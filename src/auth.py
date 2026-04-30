@@ -28,6 +28,11 @@ def _token_path(data_dir: Path) -> Path:
     return data_dir / "token.json"
 
 
+def _write_token(path: Path, payload: str) -> None:
+    path.write_text(payload)
+    path.chmod(0o600)
+
+
 def load_credentials(data_dir: Path) -> Credentials:
     token_file = _token_path(data_dir)
     if not token_file.exists():
@@ -49,7 +54,7 @@ def load_credentials(data_dir: Path) -> Credentials:
                 f"Token at {token_file} could not be refreshed: {exc}. "
                 "Re-run `python -m src.auth` to re-authorize."
             ) from exc
-        token_file.write_text(creds.to_json())
+        _write_token(token_file, creds.to_json())
         return creds
 
     raise AuthError(
@@ -76,7 +81,7 @@ def run_interactive_flow(data_dir: Path) -> Credentials:
 
     flow = InstalledAppFlow.from_client_secrets_file(str(creds_file), SCOPES)
     creds = flow.run_local_server(port=0)
-    _token_path(data_dir).write_text(creds.to_json())
+    _write_token(_token_path(data_dir), creds.to_json())
     return creds
 
 

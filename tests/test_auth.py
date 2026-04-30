@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -145,4 +146,24 @@ def test_run_interactive_flow_writes_token(tmp_path, mocker):
 
     flow_cls.assert_called_once_with(str(creds_file), auth.SCOPES)
     flow.run_local_server.assert_called_once_with(port=0)
-    assert (tmp_path / "token.json").read_text() == '{"new": "token"}'
+    token_file = tmp_path / "token.json"
+    assert token_file.read_text() == '{"new": "token"}'
+    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+
+
+def test_load_credentials_refresh_writes_token_with_secure_mode(tmp_path, mocker):
+    token_file = tmp_path / "token.json"
+    _write_token(token_file)
+
+    fake_creds = MagicMock()
+    fake_creds.valid = False
+    fake_creds.expired = True
+    fake_creds.refresh_token = "refresh"
+    fake_creds.to_json.return_value = '{"refreshed": true}'
+
+    mocker.patch("src.auth.Credentials.from_authorized_user_file", return_value=fake_creds)
+    mocker.patch("src.auth.Request")
+
+    auth.load_credentials(tmp_path)
+
+    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
