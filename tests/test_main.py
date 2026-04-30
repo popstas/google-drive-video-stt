@@ -228,6 +228,39 @@ def test_run_once_propagates_refresh_error_from_process(mocker):
     notify_mock.assert_not_called()
 
 
+def test_main_exits_on_bootstrap_auth_error(mocker):
+    cfg = make_config(folder_ids=["f1"], poll_interval=1)
+    mocker.patch("src.main.load_config", return_value=cfg)
+    mocker.patch(
+        "src.main.build_drive_service", side_effect=AuthError("malformed token")
+    )
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+    sleep_mock = mocker.patch("src.main.time.sleep")
+
+    with pytest.raises(SystemExit) as excinfo:
+        main.main()
+
+    assert excinfo.value.code == 1
+    notify_mock.assert_called_once()
+    assert "bootstrap" in notify_mock.call_args.args[0]
+    sleep_mock.assert_not_called()
+
+
+def test_main_exits_on_bootstrap_refresh_error(mocker):
+    cfg = make_config(folder_ids=["f1"], poll_interval=1)
+    mocker.patch("src.main.load_config", return_value=cfg)
+    mocker.patch(
+        "src.main.build_drive_service", side_effect=RefreshError("revoked")
+    )
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    with pytest.raises(SystemExit) as excinfo:
+        main.main()
+
+    assert excinfo.value.code == 1
+    notify_mock.assert_called_once()
+
+
 def test_main_exits_on_refresh_error(mocker):
     cfg = make_config(folder_ids=["f1"], poll_interval=1)
     mocker.patch("src.main.load_config", return_value=cfg)

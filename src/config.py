@@ -2,6 +2,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
 
 @dataclass(frozen=True)
 class Config:
@@ -18,6 +23,8 @@ def _parse_folder_ids(raw: str) -> list[str]:
 
 
 def load_config() -> Config:
+    if load_dotenv is not None:
+        load_dotenv(override=False)
     folder_ids = _parse_folder_ids(os.environ.get("FOLDER_IDS", ""))
 
     poll_raw = os.environ.get("POLL_INTERVAL", "600").strip() or "600"
