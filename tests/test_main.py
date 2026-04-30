@@ -4,8 +4,10 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from google.auth.exceptions import RefreshError
 
 from src import main
+from src.auth import AuthError
 from src.config import Config
 
 
@@ -191,6 +193,70 @@ def test_main_runs_loop_and_sleeps(mocker):
 
     assert run_calls["n"] == 2
     sleep_mock.assert_called_with(42)
+
+
+def test_run_once_propagates_refresh_error(mocker):
+    service = MagicMock()
+    cfg = make_config(folder_ids=["f1"])
+
+    mocker.patch(
+        "src.main.drive.list_unprocessed_mp4",
+        side_effect=RefreshError("token revoked"),
+    )
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    with pytest.raises(RefreshError):
+        main.run_once(service, cfg)
+
+    notify_mock.assert_not_called()
+
+
+def test_run_once_propagates_refresh_error_from_process(mocker):
+    service = MagicMock()
+    cfg = make_config(folder_ids=["f1"])
+
+    mocker.patch(
+        "src.main.drive.list_unprocessed_mp4",
+        return_value=[{"id": "v1", "name": "a.mp4"}],
+    )
+    mocker.patch("src.main.process_file", side_effect=RefreshError("token revoked"))
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    with pytest.raises(RefreshError):
+        main.run_once(service, cfg)
+
+    notify_mock.assert_not_called()
+
+
+def test_main_exits_on_refresh_error(mocker):
+    cfg = make_config(folder_ids=["f1"], poll_interval=1)
+    mocker.patch("src.main.load_config", return_value=cfg)
+    mocker.patch("src.main.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.main.run_once", side_effect=RefreshError("revoked"))
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+    sleep_mock = mocker.patch("src.main.time.sleep")
+
+    with pytest.raises(SystemExit) as excinfo:
+        main.main()
+
+    assert excinfo.value.code == 1
+    notify_mock.assert_called_once()
+    assert "OAuth" in notify_mock.call_args.args[0]
+    sleep_mock.assert_not_called()
+
+
+def test_main_exits_on_auth_error(mocker):
+    cfg = make_config(folder_ids=["f1"], poll_interval=1)
+    mocker.patch("src.main.load_config", return_value=cfg)
+    mocker.patch("src.main.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.main.run_once", side_effect=AuthError("token gone"))
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    with pytest.raises(SystemExit) as excinfo:
+        main.main()
+
+    assert excinfo.value.code == 1
+    notify_mock.assert_called_once()
 
 
 def test_main_notifies_on_cycle_exception(mocker):
