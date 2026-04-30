@@ -71,11 +71,11 @@
 - [x] Run tests — must pass before next task
 
 ### Task 5: FFmpeg extractor module (`src/extractor.py`)
-- [ ] Implement `extract_mp3(mp4_path: Path, bitrate="96k") -> Path`: run ffmpeg subprocess to extract audio
-- [ ] Handle ffmpeg errors (non-zero exit, missing binary) with clear exceptions
-- [ ] Write tests for successful extraction (mock subprocess or use tiny test fixture)
-- [ ] Write tests for error cases (ffmpeg failure, missing input file)
-- [ ] Run tests — must pass before next task
+- [x] Implement `extract_mp3(mp4_path: Path, bitrate="96k") -> Path`: run ffmpeg subprocess to extract audio
+- [x] Handle ffmpeg errors (non-zero exit, missing binary) with clear exceptions
+- [x] Write tests for successful extraction (mock subprocess or use tiny test fixture)
+- [x] Write tests for error cases (ffmpeg failure, missing input file)
+- [x] Run tests — must pass before next task
 
 ### Task 6: Telegram notification module (`src/notify.py`)
 - [ ] Implement `notify_error(text: str)`: send message via Telegram bot API, truncate to 4000 chars
