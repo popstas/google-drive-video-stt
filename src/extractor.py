@@ -8,6 +8,9 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+FFMPEG_TIMEOUT_SECONDS = 3600
+
+
 class FFmpegError(RuntimeError):
     pass
 
@@ -38,9 +41,19 @@ def extract_mp3(mp4_path: Path, bitrate: str = "96k") -> Path:
     logger.info("Running ffmpeg: %s", " ".join(cmd))
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=FFMPEG_TIMEOUT_SECONDS,
+        )
     except FileNotFoundError as exc:
         raise FFmpegError("ffmpeg binary not found") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise FFmpegError(
+            f"ffmpeg timed out after {FFMPEG_TIMEOUT_SECONDS}s: {mp4_path}"
+        ) from exc
 
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()

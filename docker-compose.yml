@@ -8,8 +8,6 @@ services:
       - .env
     volumes:
       - ./data:/app/data
-    tmpfs:
-      - /tmp
     logging:
       driver: json-file
       options:
