@@ -53,13 +53,13 @@
 - [x] Run tests — must pass before next task
 
 ### Task 3: OAuth authentication module (`src/auth.py`)
-- [ ] Implement `build_drive_service()`: load token from `data/token.json`, refresh if expired, return authorized Drive service
-- [ ] Implement `__main__` block: run interactive OAuth flow, save token to `data/token.json` using `credentials.json`
-- [ ] Handle missing `credentials.json` with clear error message
-- [ ] Handle expired/invalid token with re-auth prompt
-- [ ] Write tests for token loading and refresh logic (mock google auth)
-- [ ] Write tests for error cases (missing files, invalid token)
-- [ ] Run tests — must pass before next task
+- [x] Implement `build_drive_service()`: load token from `data/token.json`, refresh if expired, return authorized Drive service
+- [x] Implement `__main__` block: run interactive OAuth flow, save token to `data/token.json` using `credentials.json`
+- [x] Handle missing `credentials.json` with clear error message
+- [x] Handle expired/invalid token with re-auth prompt
+- [x] Write tests for token loading and refresh logic (mock google auth)
+- [x] Write tests for error cases (missing files, invalid token)
+- [x] Run tests — must pass before next task
 
 ### Task 4: Drive API module (`src/drive.py`)
 - [ ] Implement `list_unprocessed_mp4(service, folder_id)`: list MP4 files in folder, filter out those that already have sibling MP3
