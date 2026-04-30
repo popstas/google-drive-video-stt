@@ -62,13 +62,13 @@
 - [x] Run tests — must pass before next task
 
 ### Task 4: Drive API module (`src/drive.py`)
-- [ ] Implement `list_unprocessed_mp4(service, folder_id)`: list MP4 files in folder, filter out those that already have sibling MP3
-- [ ] Implement `download(service, file_id, dest_dir) -> Path`: download file to local path
-- [ ] Implement `upload(service, local_path, folder_id)`: upload file to Drive folder with correct MIME type
-- [ ] Write tests for `list_unprocessed_mp4` — mock Drive API responses for: no files, all processed, some unprocessed
-- [ ] Write tests for `download` — mock file download
-- [ ] Write tests for `upload` — mock file upload
-- [ ] Run tests — must pass before next task
+- [x] Implement `list_unprocessed_mp4(service, folder_id)`: list MP4 files in folder, filter out those that already have sibling MP3
+- [x] Implement `download(service, file_id, dest_dir) -> Path`: download file to local path
+- [x] Implement `upload(service, local_path, folder_id)`: upload file to Drive folder with correct MIME type
+- [x] Write tests for `list_unprocessed_mp4` — mock Drive API responses for: no files, all processed, some unprocessed
+- [x] Write tests for `download` — mock file download
+- [x] Write tests for `upload` — mock file upload
+- [x] Run tests — must pass before next task
 
 ### Task 5: FFmpeg extractor module (`src/extractor.py`)
 - [ ] Implement `extract_mp3(mp4_path: Path, bitrate="96k") -> Path`: run ffmpeg subprocess to extract audio
