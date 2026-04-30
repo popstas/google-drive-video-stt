@@ -83,6 +83,19 @@ def test_load_credentials_refresh_error_raises(tmp_path, mocker):
         auth.load_credentials(tmp_path)
 
 
+def test_load_credentials_malformed_token_raises_auth_error(tmp_path, mocker):
+    token_file = tmp_path / "token.json"
+    _write_token(token_file)
+
+    mocker.patch(
+        "src.auth.Credentials.from_authorized_user_file",
+        side_effect=ValueError("bad json"),
+    )
+
+    with pytest.raises(auth.AuthError, match="malformed"):
+        auth.load_credentials(tmp_path)
+
+
 def test_load_credentials_invalid_no_refresh_raises(tmp_path, mocker):
     token_file = tmp_path / "token.json"
     _write_token(token_file)

@@ -18,6 +18,7 @@ ENV_VARS = [
 def clean_env(monkeypatch):
     for var in ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr("src.config.load_dotenv", lambda *a, **kw: False)
     yield
 
 

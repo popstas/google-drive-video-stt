@@ -41,7 +41,13 @@ def load_credentials(data_dir: Path) -> Credentials:
             "Run `python -m src.auth` to perform interactive OAuth."
         )
 
-    creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
+    try:
+        creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
+    except ValueError as exc:
+        raise AuthError(
+            f"Token at {token_file} is malformed: {exc}. "
+            "Re-run `python -m src.auth` to re-authorize."
+        ) from exc
 
     if creds.valid:
         return creds

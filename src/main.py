@@ -74,7 +74,15 @@ def main() -> None:
         logger.error("FOLDER_IDS is empty; set it in the environment to start polling")
         raise SystemExit(1)
 
-    service = build_drive_service(data_dir=config.data_dir)
+    try:
+        service = build_drive_service(data_dir=config.data_dir)
+    except (RefreshError, AuthError) as exc:
+        logger.exception("OAuth bootstrap failed; exiting for restart")
+        notify.notify_error(
+            f"OAuth bootstrap failed; container will exit so it can be restarted "
+            f"after re-running `python -m src.auth`: {exc}"
+        )
+        raise SystemExit(1) from exc
 
     while True:
         try:
