@@ -11,7 +11,7 @@ MAX_MESSAGE_LENGTH = 4000
 REQUEST_TIMEOUT = 10
 
 
-def notify_error(text: str) -> None:
+def notify_error(text: str, *, proxy_url: str = "") -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
@@ -24,9 +24,12 @@ def notify_error(text: str) -> None:
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
+    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
 
     try:
-        response = requests.post(url, data=payload, timeout=REQUEST_TIMEOUT)
+        response = requests.post(
+            url, data=payload, timeout=REQUEST_TIMEOUT, proxies=proxies,
+        )
         response.raise_for_status()
     except Exception as exc:
         logger.warning("Failed to send Telegram notification: %s", type(exc).__name__)

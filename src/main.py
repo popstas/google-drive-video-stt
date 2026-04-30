@@ -44,7 +44,8 @@ def run_once(service: Any, config: Config) -> None:
         except Exception as exc:
             logger.exception("Failed to list folder %s", folder_id)
             notify.notify_error(
-                f"Failed to list folder {folder_id}: {exc}\n{traceback.format_exc()}"
+                f"Failed to list folder {folder_id}: {exc}\n{traceback.format_exc()}",
+                proxy_url=config.proxy_url,
             )
             continue
 
@@ -60,7 +61,8 @@ def run_once(service: Any, config: Config) -> None:
                 )
                 notify.notify_error(
                     f"Failed to process {file_info.get('name')} in {folder_id}: {exc}\n"
-                    f"{traceback.format_exc()}"
+                    f"{traceback.format_exc()}",
+                    proxy_url=config.proxy_url,
                 )
 
 
@@ -80,7 +82,8 @@ def main() -> None:
         logger.exception("OAuth bootstrap failed; exiting for restart")
         notify.notify_error(
             f"OAuth bootstrap failed; container will exit so it can be restarted "
-            f"after re-running `python -m src.auth`: {exc}"
+            f"after re-running `python -m src.auth`: {exc}",
+            proxy_url=config.proxy_url,
         )
         raise SystemExit(1) from exc
 
@@ -91,12 +94,16 @@ def main() -> None:
             logger.exception("OAuth refresh failed; exiting for restart")
             notify.notify_error(
                 f"OAuth refresh failed; container will exit so it can be restarted "
-                f"after re-running `python -m src.auth`: {exc}"
+                f"after re-running `python -m src.auth`: {exc}",
+                proxy_url=config.proxy_url,
             )
             raise SystemExit(1) from exc
         except Exception as exc:
             logger.exception("Cycle failed")
-            notify.notify_error(f"Cycle failed: {exc}\n{traceback.format_exc()}")
+            notify.notify_error(
+                f"Cycle failed: {exc}\n{traceback.format_exc()}",
+                proxy_url=config.proxy_url,
+            )
         time.sleep(config.poll_interval)
 
 

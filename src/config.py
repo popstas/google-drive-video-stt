@@ -16,6 +16,7 @@ class Config:
     telegram_bot_token: str
     telegram_chat_id: str
     data_dir: Path
+    proxy_url: str
 
 
 def _parse_folder_ids(raw: str) -> list[str]:
@@ -39,6 +40,7 @@ def load_config() -> Config:
     telegram_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     data_dir = Path(os.environ.get("DATA_DIR", "data").strip() or "data")
+    proxy_url = os.environ.get("PROXY_URL", "").strip()
 
     return Config(
         folder_ids=folder_ids,
@@ -47,4 +49,5 @@ def load_config() -> Config:
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
         data_dir=data_dir,
+        proxy_url=proxy_url,
     )

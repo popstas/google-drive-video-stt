@@ -24,6 +24,7 @@ def make_config(
         telegram_bot_token="",
         telegram_chat_id="",
         data_dir=data_dir,
+        proxy_url="",
     )
 
 
