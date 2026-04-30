@@ -109,8 +109,8 @@
 - [x] Verify test coverage meets 80%+ (achieved 95%)
 
 ### Task 10: [Final] Update documentation
-- [ ] Update README.md with setup instructions, usage, deployment guide
-- [ ] Create `.env.example` if not already done
+- [x] Update README.md with setup instructions, usage, deployment guide
+- [x] Create `.env.example` if not already done
 
 ## Technical Details
 - **Polling**: `files.list` with query filter by folder + mimeType, every `POLL_INTERVAL` seconds
