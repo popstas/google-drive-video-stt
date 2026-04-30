@@ -38,12 +38,12 @@
 ## Implementation Steps
 
 ### Task 1: Project scaffolding and dependencies
-- [ ] Create `pyproject.toml` with project metadata, Python 3.11+ requirement, and dependencies: `google-api-python-client`, `google-auth-oauthlib`, `google-auth-httplib2`, `requests`
-- [ ] Add dev dependencies: `pytest`, `pytest-mock`
-- [ ] Create `src/__init__.py` (empty)
-- [ ] Create `.env.example` with all env vars: `FOLDER_IDS`, `POLL_INTERVAL`, `BITRATE`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
-- [ ] Run `uv sync` to verify dependencies install correctly
-- [ ] Verify project structure is correct
+- [x] Create `pyproject.toml` with project metadata, Python 3.11+ requirement, and dependencies: `google-api-python-client`, `google-auth-oauthlib`, `google-auth-httplib2`, `requests`
+- [x] Add dev dependencies: `pytest`, `pytest-mock`
+- [x] Create `src/__init__.py` (empty)
+- [x] Create `.env.example` with all env vars: `FOLDER_IDS`, `POLL_INTERVAL`, `BITRATE`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+- [x] Run `uv sync` to verify dependencies install correctly
+- [x] Verify project structure is correct
 
 ### Task 2: Configuration module (`src/config.py`)
 - [ ] Implement `config.py`: load env vars with defaults — `FOLDER_IDS` (comma-separated list), `POLL_INTERVAL` (default 600), `BITRATE` (default "96k"), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DATA_DIR` (default "data")
