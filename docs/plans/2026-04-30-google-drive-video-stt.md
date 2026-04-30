@@ -86,14 +86,14 @@
 - [x] Run tests — must pass before next task
 
 ### Task 7: Main loop (`src/main.py`)
-- [ ] Implement `process_file(service, file_info, folder_id)`: download MP4, extract MP3, upload MP3, clean up temp dir
-- [ ] Implement `run_once(service)`: iterate folders and unprocessed files, call `process_file`, catch per-file errors and notify
-- [ ] Implement `main()`: build service, run loop with `sleep(POLL_INTERVAL)`, catch cycle-level errors and notify
-- [ ] Add `if __name__ == "__main__"` entry point
-- [ ] Write tests for `process_file` (mock drive + extractor)
-- [ ] Write tests for `run_once` — verify error in one file doesn't stop others
-- [ ] Write tests for error notification integration
-- [ ] Run tests — must pass before next task
+- [x] Implement `process_file(service, file_info, folder_id)`: download MP4, extract MP3, upload MP3, clean up temp dir
+- [x] Implement `run_once(service)`: iterate folders and unprocessed files, call `process_file`, catch per-file errors and notify
+- [x] Implement `main()`: build service, run loop with `sleep(POLL_INTERVAL)`, catch cycle-level errors and notify
+- [x] Add `if __name__ == "__main__"` entry point
+- [x] Write tests for `process_file` (mock drive + extractor)
+- [x] Write tests for `run_once` — verify error in one file doesn't stop others
+- [x] Write tests for error notification integration
+- [x] Run tests — must pass before next task
 
 ### Task 8: Docker setup
 - [ ] Create `Dockerfile`: Python 3.11-slim base, install ffmpeg, copy project, install deps with uv
