@@ -7,8 +7,10 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from google.auth.exceptions import RefreshError
+
 from src import drive, notify
-from src.auth import build_drive_service
+from src.auth import AuthError, build_drive_service
 from src.config import Config, load_config
 from src.extractor import extract_mp3
 
@@ -37,6 +39,8 @@ def run_once(service: Any, config: Config) -> None:
     for folder_id in config.folder_ids:
         try:
             files = drive.list_unprocessed_mp4(service, folder_id)
+        except RefreshError:
+            raise
         except Exception as exc:
             logger.exception("Failed to list folder %s", folder_id)
             notify.notify_error(
@@ -48,6 +52,8 @@ def run_once(service: Any, config: Config) -> None:
         for file_info in files:
             try:
                 process_file(service, file_info, folder_id, bitrate=config.bitrate)
+            except RefreshError:
+                raise
             except Exception as exc:
                 logger.exception(
                     "Failed to process %s in folder %s", file_info.get("name"), folder_id
@@ -73,6 +79,13 @@ def main() -> None:
     while True:
         try:
             run_once(service, config)
+        except (RefreshError, AuthError) as exc:
+            logger.exception("OAuth refresh failed; exiting for restart")
+            notify.notify_error(
+                f"OAuth refresh failed; container will exit so it can be restarted "
+                f"after re-running `python -m src.auth`: {exc}"
+            )
+            raise SystemExit(1) from exc
         except Exception as exc:
             logger.exception("Cycle failed")
             notify.notify_error(f"Cycle failed: {exc}\n{traceback.format_exc()}")
