@@ -78,12 +78,12 @@
 - [x] Run tests — must pass before next task
 
 ### Task 6: Telegram notification module (`src/notify.py`)
-- [ ] Implement `notify_error(text: str)`: send message via Telegram bot API, truncate to 4000 chars
-- [ ] Gracefully skip if `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` not set
-- [ ] Never raise — catch and log exceptions from Telegram API
-- [ ] Write tests for successful notification (mock requests.post)
-- [ ] Write tests for: missing token/chat_id (no-op), API failure (logged, not raised), message truncation
-- [ ] Run tests — must pass before next task
+- [x] Implement `notify_error(text: str)`: send message via Telegram bot API, truncate to 4000 chars
+- [x] Gracefully skip if `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` not set
+- [x] Never raise — catch and log exceptions from Telegram API
+- [x] Write tests for successful notification (mock requests.post)
+- [x] Write tests for: missing token/chat_id (no-op), API failure (logged, not raised), message truncation
+- [x] Run tests — must pass before next task
 
 ### Task 7: Main loop (`src/main.py`)
 - [ ] Implement `process_file(service, file_info, folder_id)`: download MP4, extract MP3, upload MP3, clean up temp dir
