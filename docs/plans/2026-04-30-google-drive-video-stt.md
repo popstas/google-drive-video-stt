@@ -96,10 +96,10 @@
 - [x] Run tests — must pass before next task
 
 ### Task 8: Docker setup
-- [ ] Create `Dockerfile`: Python 3.11-slim base, install ffmpeg, copy project, install deps with uv
-- [ ] Create `docker-compose.yml`: single service, env_file, volume mount for `./data`, tmp volume, restart policy, logging config
-- [ ] Verify `docker compose build` succeeds
-- [ ] Run tests — must pass before next task
+- [x] Create `Dockerfile`: Python 3.11-slim base, install ffmpeg, copy project, install deps with uv
+- [x] Create `docker-compose.yml`: single service, env_file, volume mount for `./data`, tmp volume, restart policy, logging config
+- [x] Verify `docker compose build` succeeds
+- [x] Run tests — must pass before next task
 
 ### Task 9: Verify acceptance criteria
 - [ ] Verify all modules import and work together (integration smoke test)
