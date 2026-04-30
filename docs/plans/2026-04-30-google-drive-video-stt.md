@@ -46,11 +46,11 @@
 - [x] Verify project structure is correct
 
 ### Task 2: Configuration module (`src/config.py`)
-- [ ] Implement `config.py`: load env vars with defaults — `FOLDER_IDS` (comma-separated list), `POLL_INTERVAL` (default 600), `BITRATE` (default "96k"), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DATA_DIR` (default "data")
-- [ ] Parse `FOLDER_IDS` into a list
-- [ ] Write tests for config loading with various env combinations
-- [ ] Write tests for edge cases (empty FOLDER_IDS, missing vars)
-- [ ] Run tests — must pass before next task
+- [x] Implement `config.py`: load env vars with defaults — `FOLDER_IDS` (comma-separated list), `POLL_INTERVAL` (default 600), `BITRATE` (default "96k"), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DATA_DIR` (default "data")
+- [x] Parse `FOLDER_IDS` into a list
+- [x] Write tests for config loading with various env combinations
+- [x] Write tests for edge cases (empty FOLDER_IDS, missing vars)
+- [x] Run tests — must pass before next task
 
 ### Task 3: OAuth authentication module (`src/auth.py`)
 - [ ] Implement `build_drive_service()`: load token from `data/token.json`, refresh if expired, return authorized Drive service
