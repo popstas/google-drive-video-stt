@@ -98,6 +98,20 @@ def test_extract_mp3_subprocess_filenotfound_raises_ffmpeg_error(tmp_path, mocke
         extractor.extract_mp3(mp4)
 
 
+def test_extract_mp3_subprocess_timeout_raises_ffmpeg_error(tmp_path, mocker):
+    mp4 = tmp_path / "v.mp4"
+    mp4.write_bytes(b"x")
+
+    mocker.patch("src.extractor.shutil.which", return_value="/usr/bin/ffmpeg")
+    mocker.patch(
+        "src.extractor.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd=["ffmpeg"], timeout=1),
+    )
+
+    with pytest.raises(extractor.FFmpegError, match="timed out"):
+        extractor.extract_mp3(mp4)
+
+
 def test_extract_mp3_output_missing_after_success(tmp_path, mocker):
     mp4 = tmp_path / "v.mp4"
     mp4.write_bytes(b"x")
