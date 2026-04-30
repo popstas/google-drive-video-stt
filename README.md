@@ -1,2 +1,104 @@
 # google-drive-video-stt
-Convert Google Drive video to mp3, speech to text with diarization
+
+Monitors Google Drive folders for new MP4 files, extracts MP3 audio with ffmpeg, and uploads the MP3 alongside the original. Designed as a headless preprocessing step for speech-to-text pipelines (e.g. NotebookLM, which rejects files over 200 MB, and Cloud STT, which doesn't accept MP4 directly).
+
+## Features
+
+- Polls one or more Google Drive folders on a configurable interval
+- Idempotent: skips MP4s that already have a sibling `<basename>.mp3`
+- Audio extraction via ffmpeg (`libmp3lame`, configurable bitrate)
+- Optional Telegram error notifications (success is silent)
+- Docker-first deployment, all mutable state in `./data`
+
+## Requirements
+
+- Python 3.11+ and [`uv`](https://github.com/astral-sh/uv) for local development
+- `ffmpeg` available on `PATH` for local runs (already included in the Docker image)
+- Google Cloud project with the Drive API enabled and an OAuth client (Desktop app) — `credentials.json`
+- Optional: a Telegram bot token + chat ID for error notifications
+
+## Setup
+
+1. Clone the repo and install dependencies:
+
+   ```bash
+   uv sync
+   ```
+
+2. Create a Google Cloud OAuth client (Desktop app), enable the Drive API, and download `credentials.json` into `./data/credentials.json`.
+
+3. Copy `.env.example` to `.env` and fill in `FOLDER_IDS` (comma-separated Drive folder IDs) plus optional Telegram credentials:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+4. Run the OAuth flow once to mint a refresh token. This opens a browser and writes `data/token.json`:
+
+   ```bash
+   uv run python -m src.auth
+   ```
+
+## Configuration
+
+All configuration is environment-driven. See `.env.example`.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FOLDER_IDS` | (required) | Comma-separated Google Drive folder IDs to monitor |
+| `POLL_INTERVAL` | `600` | Seconds between poll cycles |
+| `BITRATE` | `96k` | MP3 audio bitrate passed to ffmpeg |
+| `TELEGRAM_BOT_TOKEN` | (empty) | If set with chat ID, errors are posted to Telegram |
+| `TELEGRAM_CHAT_ID` | (empty) | Telegram chat to receive error notifications |
+| `DATA_DIR` | `data` | Directory holding `credentials.json` and `token.json` |
+
+## Usage
+
+Local run (after `src/auth` has produced a token):
+
+```bash
+uv run python -m src.main
+```
+
+The process loops forever, sleeping `POLL_INTERVAL` seconds between cycles.
+
+## Tests
+
+```bash
+uv run pytest
+uv run ruff check
+```
+
+## Docker deployment
+
+Build and run with the bundled Compose file:
+
+```bash
+docker compose up -d --build
+```
+
+The container mounts `./data` for persistent token storage. Logs are JSON-file with a 10 MB / 3-file rotation. Restart policy is `unless-stopped`.
+
+For a fresh VPS:
+
+1. Copy the repo, `.env`, and `data/` (with `credentials.json` and `token.json`) to the host.
+2. `docker compose up -d --build`
+3. Tail logs with `docker compose logs -f` and verify a poll cycle completes.
+
+## Project layout
+
+```
+src/
+  auth.py        OAuth flow + Drive service builder
+  config.py      Env var loading
+  drive.py       List / download / upload helpers
+  extractor.py   ffmpeg MP4 → MP3 wrapper
+  notify.py      Telegram error notifier
+  main.py        Polling loop entry point
+tests/           Unit tests (mock external services)
+data/            Tokens, credentials, gitignored
+```
+
+## License
+
+MIT — see `LICENSE`.
