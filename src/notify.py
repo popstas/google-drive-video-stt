@@ -20,7 +20,7 @@ def notify_error(text: str) -> None:
         return
 
     if len(text) > MAX_MESSAGE_LENGTH:
-        text = text[:MAX_MESSAGE_LENGTH]
+        text = text[-MAX_MESSAGE_LENGTH:]
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
@@ -29,4 +29,4 @@ def notify_error(text: str) -> None:
         response = requests.post(url, data=payload, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
     except Exception as exc:
-        logger.warning("Failed to send Telegram notification: %s", exc)
+        logger.warning("Failed to send Telegram notification: %s", type(exc).__name__)

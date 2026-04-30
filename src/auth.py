@@ -66,6 +66,7 @@ def build_drive_service(data_dir: Path | None = None):
 
 
 def run_interactive_flow(data_dir: Path) -> Credentials:
+    data_dir.mkdir(parents=True, exist_ok=True)
     creds_file = _credentials_path(data_dir)
     if not creds_file.exists():
         raise AuthError(
@@ -73,7 +74,6 @@ def run_interactive_flow(data_dir: Path) -> Credentials:
             "Console and place them at this path."
         )
 
-    data_dir.mkdir(parents=True, exist_ok=True)
     flow = InstalledAppFlow.from_client_secrets_file(str(creds_file), SCOPES)
     creds = flow.run_local_server(port=0)
     _token_path(data_dir).write_text(creds.to_json())

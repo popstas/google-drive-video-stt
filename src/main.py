@@ -65,7 +65,8 @@ def main() -> None:
     )
     config = load_config()
     if not config.folder_ids:
-        logger.warning("FOLDER_IDS is empty; nothing to monitor")
+        logger.error("FOLDER_IDS is empty; set it in the environment to start polling")
+        raise SystemExit(1)
 
     service = build_drive_service(data_dir=config.data_dir)
 

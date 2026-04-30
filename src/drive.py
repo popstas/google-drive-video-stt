@@ -54,7 +54,10 @@ def list_unprocessed_mp4(service: Any, folder_id: str) -> list[dict]:
 
 def download(service: Any, file_id: str, dest_dir: Path, file_name: str) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / file_name
+    safe_name = Path(file_name).name
+    if not safe_name or safe_name in {".", ".."}:
+        raise ValueError(f"Invalid file name from Drive: {file_name!r}")
+    dest_path = dest_dir / safe_name
 
     request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
     with io.FileIO(dest_path, "wb") as fh:
@@ -64,7 +67,7 @@ def download(service: Any, file_id: str, dest_dir: Path, file_name: str) -> Path
             status, done = downloader.next_chunk()
             if status is not None:
                 logger.debug(
-                    "Downloading %s: %d%%", file_name, int(status.progress() * 100)
+                    "Downloading %s: %d%%", safe_name, int(status.progress() * 100)
                 )
     return dest_path
 
