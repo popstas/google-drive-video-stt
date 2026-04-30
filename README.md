@@ -19,10 +19,10 @@ Monitors Google Drive folders for new MP4 files, extracts MP3 audio with ffmpeg,
 
 ## Setup
 
-1. Clone the repo and install dependencies:
+1. Clone the repo and install dependencies (use `--extra dev` for tests/lint tools):
 
    ```bash
-   uv sync
+   uv sync --extra dev
    ```
 
 2. Create a Google Cloud OAuth client (Desktop app), enable the Drive API, and download `credentials.json` into `./data/credentials.json`.
