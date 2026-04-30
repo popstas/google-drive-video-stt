@@ -102,11 +102,11 @@
 - [x] Run tests — must pass before next task
 
 ### Task 9: Verify acceptance criteria
-- [ ] Verify all modules import and work together (integration smoke test)
-- [ ] Verify edge cases: empty folder list, all files already processed, ffmpeg failure on single file doesn't crash loop
-- [ ] Run full test suite
-- [ ] Run linter (`ruff check`) — all issues must be fixed
-- [ ] Verify test coverage meets 80%+
+- [x] Verify all modules import and work together (integration smoke test)
+- [x] Verify edge cases: empty folder list, all files already processed, ffmpeg failure on single file doesn't crash loop
+- [x] Run full test suite
+- [x] Run linter (`ruff check`) — all issues must be fixed
+- [x] Verify test coverage meets 80%+ (achieved 95%)
 
 ### Task 10: [Final] Update documentation
 - [ ] Update README.md with setup instructions, usage, deployment guide
