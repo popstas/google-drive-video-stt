@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 MP4_MIME = "video/mp4"
 MP3_MIME = "audio/mpeg"
+TXT_MIME = "text/plain"
 PAGE_SIZE = 1000
 
 
@@ -50,6 +51,29 @@ def list_unprocessed_mp4(service: Any, folder_id: str) -> list[dict]:
         f for f in mp4_files if Path(f["name"]).stem not in mp3_basenames
     ]
     return unprocessed
+
+
+def list_folder_state(service: Any, folder_id: str) -> list[dict]:
+    """Return mp4 files with sibling flags: {file, has_mp3, has_txt, mp3_id}."""
+    mp4_files = _list_files_by_mime(service, folder_id, MP4_MIME)
+    mp3_files = _list_files_by_mime(service, folder_id, MP3_MIME)
+    txt_files = _list_files_by_mime(service, folder_id, TXT_MIME)
+
+    mp3_by_stem = {Path(f["name"]).stem: f for f in mp3_files}
+    txt_basenames = {Path(f["name"]).stem for f in txt_files}
+
+    items: list[dict] = []
+    for mp4 in mp4_files:
+        stem = Path(mp4["name"]).stem
+        mp3 = mp3_by_stem.get(stem)
+        items.append({
+            "file": mp4,
+            "has_mp3": mp3 is not None,
+            "has_txt": stem in txt_basenames,
+            "mp3_id": mp3["id"] if mp3 else None,
+            "mp3_name": mp3["name"] if mp3 else None,
+        })
+    return items
 
 
 def download(service: Any, file_id: str, dest_dir: Path, file_name: str) -> Path:

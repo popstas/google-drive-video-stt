@@ -18,6 +18,8 @@ def _make_list_service(pages_by_query: dict[str, list[dict]]) -> MagicMock:
             request.execute.return_value = {"files": pages_by_query.get("mp4", [])}
         elif "audio/mpeg" in q:
             request.execute.return_value = {"files": pages_by_query.get("mp3", [])}
+        elif "text/plain" in q:
+            request.execute.return_value = {"files": pages_by_query.get("txt", [])}
         else:
             request.execute.return_value = {"files": []}
         return request
@@ -207,3 +209,32 @@ def test_upload_accepts_custom_mime_type(tmp_path, mocker):
     drive.upload(service, local, "fld", mime_type="video/mp4")
 
     media_cls.assert_called_once_with(str(local), mimetype="video/mp4", resumable=True)
+
+
+def test_list_folder_state_returns_flags():
+    mp4 = [
+        {"id": "v1", "name": "a.mp4", "mimeType": "video/mp4"},
+        {"id": "v2", "name": "b.mp4", "mimeType": "video/mp4"},
+        {"id": "v3", "name": "c.mp4", "mimeType": "video/mp4"},
+    ]
+    mp3 = [
+        {"id": "m1", "name": "a.mp3", "mimeType": "audio/mpeg"},
+        {"id": "m2", "name": "b.mp3", "mimeType": "audio/mpeg"},
+    ]
+    txt = [{"id": "t1", "name": "a.txt", "mimeType": "text/plain"}]
+    service = _make_list_service({"mp4": mp4, "mp3": mp3, "txt": txt})
+
+    items = drive.list_folder_state(service, "folder1")
+
+    assert len(items) == 3
+    by_id = {it["file"]["id"]: it for it in items}
+    assert by_id["v1"]["has_mp3"] is True
+    assert by_id["v1"]["has_txt"] is True
+    assert by_id["v1"]["mp3_id"] == "m1"
+    assert by_id["v1"]["mp3_name"] == "a.mp3"
+    assert by_id["v2"]["has_mp3"] is True
+    assert by_id["v2"]["has_txt"] is False
+    assert by_id["v2"]["mp3_id"] == "m2"
+    assert by_id["v3"]["has_mp3"] is False
+    assert by_id["v3"]["has_txt"] is False
+    assert by_id["v3"]["mp3_id"] is None

@@ -11,6 +11,13 @@ ENV_VARS = [
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
     "DATA_DIR",
+    "PROXY_URL",
+    "STT_PROVIDER",
+    "STT_LANGUAGE",
+    "STT_CHUNK_SECONDS",
+    "OPENAI_API_KEY",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_APPLICATION_CREDENTIALS",
 ]
 
 
@@ -30,6 +37,9 @@ def test_defaults_when_no_env(monkeypatch):
     assert cfg.telegram_bot_token == ""
     assert cfg.telegram_chat_id == ""
     assert cfg.data_dir == Path("data")
+    assert cfg.stt_provider == ""
+    assert cfg.stt_chunk_seconds == 600
+    assert cfg.stt_language == ""
 
 
 def test_parses_single_folder_id(monkeypatch):
@@ -110,6 +120,52 @@ def test_blank_data_dir_uses_default(monkeypatch):
     monkeypatch.setenv("DATA_DIR", "")
     cfg = load_config()
     assert cfg.data_dir == Path("data")
+
+
+def test_stt_openai_requires_api_key(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "openai")
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        load_config()
+
+
+def test_stt_openai_with_api_key(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    cfg = load_config()
+    assert cfg.stt_provider == "openai"
+    assert cfg.openai_api_key == "sk-test"
+
+
+def test_stt_google_requires_project_and_credentials(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "google")
+    with pytest.raises(ValueError, match="GOOGLE_CLOUD_PROJECT"):
+        load_config()
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-1")
+    with pytest.raises(ValueError, match="GOOGLE_APPLICATION_CREDENTIALS"):
+        load_config()
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/sa.json")
+    cfg = load_config()
+    assert cfg.stt_provider == "google"
+    assert cfg.google_cloud_project == "proj-1"
+    assert cfg.google_application_credentials == "/tmp/sa.json"
+
+
+def test_stt_unsupported_provider_raises(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "azure")
+    with pytest.raises(ValueError, match="STT_PROVIDER"):
+        load_config()
+
+
+def test_stt_chunk_seconds_invalid(monkeypatch):
+    monkeypatch.setenv("STT_CHUNK_SECONDS", "bad")
+    with pytest.raises(ValueError, match="STT_CHUNK_SECONDS"):
+        load_config()
+
+
+def test_stt_chunk_seconds_non_positive(monkeypatch):
+    monkeypatch.setenv("STT_CHUNK_SECONDS", "0")
+    with pytest.raises(ValueError, match="positive"):
+        load_config()
 
 
 def test_full_env_combination(monkeypatch):
