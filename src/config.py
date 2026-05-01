@@ -8,7 +8,7 @@ except ImportError:
     load_dotenv = None
 
 
-SUPPORTED_STT_PROVIDERS = ("", "openai", "google")
+SUPPORTED_STT_PROVIDERS = ("", "openai", "google", "asr")
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,7 @@ class Config:
     openai_api_key: str
     google_cloud_project: str
     google_application_credentials: str
+    asr_url: str
     stt_language: str
     stt_chunk_seconds: int
 
@@ -61,6 +62,7 @@ def load_config() -> Config:
     google_application_credentials = os.environ.get(
         "GOOGLE_APPLICATION_CREDENTIALS", ""
     ).strip()
+    asr_url = os.environ.get("ASR_URL", "").strip()
     stt_language = os.environ.get("STT_LANGUAGE", "").strip()
 
     chunk_raw = os.environ.get("STT_CHUNK_SECONDS", "600").strip() or "600"
@@ -86,6 +88,8 @@ def load_config() -> Config:
             raise ValueError(
                 "GOOGLE_APPLICATION_CREDENTIALS is required when STT_PROVIDER=google"
             )
+    if stt_provider == "asr" and not asr_url:
+        raise ValueError("ASR_URL is required when STT_PROVIDER=asr")
 
     return Config(
         folder_ids=folder_ids,
@@ -99,6 +103,7 @@ def load_config() -> Config:
         openai_api_key=openai_api_key,
         google_cloud_project=google_cloud_project,
         google_application_credentials=google_application_credentials,
+        asr_url=asr_url,
         stt_language=stt_language,
         stt_chunk_seconds=stt_chunk_seconds,
     )

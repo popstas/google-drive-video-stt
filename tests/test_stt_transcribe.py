@@ -23,6 +23,7 @@ def _cfg(provider="openai") -> Config:
         openai_api_key="sk-x" if provider == "openai" else "",
         google_cloud_project="p" if provider == "google" else "",
         google_application_credentials="/tmp/sa.json" if provider == "google" else "",
+        asr_url="http://localhost:9000" if provider == "asr" else "",
         stt_language="",
         stt_chunk_seconds=600,
     )

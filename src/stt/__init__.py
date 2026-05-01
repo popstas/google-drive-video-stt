@@ -25,6 +25,14 @@ def get_provider(config: Config) -> STTProvider:
             project=config.google_cloud_project,
             language=config.stt_language,
         )
+    if name == "asr":
+        from src.stt.asr_provider import ASRProvider
+
+        return ASRProvider(
+            url=config.asr_url,
+            language=config.stt_language,
+            proxy_url=config.proxy_url,
+        )
     raise UnknownProviderError(f"Unknown STT provider: {name!r}")
 
 

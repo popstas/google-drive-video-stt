@@ -18,6 +18,7 @@ ENV_VARS = [
     "OPENAI_API_KEY",
     "GOOGLE_CLOUD_PROJECT",
     "GOOGLE_APPLICATION_CREDENTIALS",
+    "ASR_URL",
 ]
 
 
@@ -148,6 +149,20 @@ def test_stt_google_requires_project_and_credentials(monkeypatch):
     assert cfg.stt_provider == "google"
     assert cfg.google_cloud_project == "proj-1"
     assert cfg.google_application_credentials == "/tmp/sa.json"
+
+
+def test_stt_asr_requires_url(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "asr")
+    with pytest.raises(ValueError, match="ASR_URL"):
+        load_config()
+
+
+def test_stt_asr_with_url(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "asr")
+    monkeypatch.setenv("ASR_URL", "http://localhost:9000")
+    cfg = load_config()
+    assert cfg.stt_provider == "asr"
+    assert cfg.asr_url == "http://localhost:9000"
 
 
 def test_stt_unsupported_provider_raises(monkeypatch):

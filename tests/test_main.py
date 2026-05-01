@@ -20,6 +20,7 @@ def make_config(
     openai_api_key="",
     google_cloud_project="",
     google_application_credentials="",
+    asr_url="",
     stt_language="",
     stt_chunk_seconds=600,
 ) -> Config:
@@ -35,6 +36,7 @@ def make_config(
         openai_api_key=openai_api_key,
         google_cloud_project=google_cloud_project,
         google_application_credentials=google_application_credentials,
+        asr_url=asr_url,
         stt_language=stt_language,
         stt_chunk_seconds=stt_chunk_seconds,
     )
