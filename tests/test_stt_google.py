@@ -103,6 +103,11 @@ def test_requires_bucket():
         GoogleProvider(project="p", bucket="", data_dir=Path("/tmp"))
 
 
+def test_requires_language():
+    with pytest.raises(STTError, match="STT_LANGUAGE"):
+        GoogleProvider(project="p", bucket="b", data_dir=Path("/tmp"))
+
+
 def test_transcribe_full_diarized(mocker, tmp_path):
     audio = tmp_path / "a.mp3"
     audio.write_bytes(b"audio")

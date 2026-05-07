@@ -52,7 +52,7 @@ All configuration is environment-driven. See `.env.example`.
 | `TELEGRAM_CHAT_ID` | (empty) | Telegram chat to receive error notifications |
 | `DATA_DIR` | `data` | Directory holding `credentials.json` and `token.json` |
 | `STT_PROVIDER` | (empty) | `openai`, `google`, `asr`, or empty to disable transcription |
-| `STT_LANGUAGE` | (empty) | Language hint, e.g. `en`, `ru`. Empty = auto-detect |
+| `STT_LANGUAGE` | (empty) | Language hint. `openai`/`asr`: optional (`en`, `ru`); empty = auto-detect. `google`: required BCP-47 (`en-US`, `ru-RU`) — `long` model has no auto-detect |
 | `STT_CHUNK_SECONDS` | `600` | Chunk length for `openai`/`asr`. Ignored when `STT_PROVIDER=google` |
 | `OPENAI_API_KEY` | — | Required when `STT_PROVIDER=openai` |
 | `GOOGLE_CLOUD_PROJECT` | — | Required when `STT_PROVIDER=google` |
@@ -73,7 +73,7 @@ Setup:
 
 1. Enable the Speech-to-Text and Cloud Storage APIs on your GCP project.
 2. Create a GCS bucket (same region as your recognizer) — e.g. `gsutil mb -l us gs://<bucket>`.
-3. Set `GOOGLE_CLOUD_PROJECT` and `GOOGLE_STT_GCS_BUCKET` in `.env`.
+3. Set `GOOGLE_CLOUD_PROJECT`, `GOOGLE_STT_GCS_BUCKET`, and `STT_LANGUAGE` (BCP-47, e.g. `en-US`) in `.env`.
 4. Re-run the OAuth flow once so the new `cloud-platform` scope is granted:
 
    ```bash

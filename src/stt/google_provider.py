@@ -22,10 +22,16 @@ class GoogleProvider(STTProvider):
             raise STTError("GOOGLE_CLOUD_PROJECT is required for Google STT provider")
         if not bucket:
             raise STTError("GOOGLE_STT_GCS_BUCKET is required for Google STT provider")
+        if not language:
+            raise STTError(
+                "STT_LANGUAGE is required for Google STT provider; the `long` model "
+                "needs an explicit BCP-47 language code (e.g. en-US, ru-RU) — "
+                "the `auto` value is Chirp-only."
+            )
         self._project = project
         self._bucket = bucket
         self._data_dir = Path(data_dir)
-        self._language = language or "auto"
+        self._language = language
         self._operation_timeout = 3600.0
         self._credentials = None
         self._speech_client = None
