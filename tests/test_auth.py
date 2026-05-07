@@ -158,7 +158,7 @@ def test_run_interactive_flow_writes_token(tmp_path, mocker):
     auth.run_interactive_flow(tmp_path)
 
     flow_cls.assert_called_once_with(str(creds_file), auth.SCOPES)
-    flow.run_local_server.assert_called_once_with(port=0)
+    flow.run_local_server.assert_called_once_with(port=0, open_browser=False)
     token_file = tmp_path / "token.json"
     assert token_file.read_text() == '{"new": "token"}'
     assert stat.S_IMODE(token_file.stat().st_mode) == 0o600

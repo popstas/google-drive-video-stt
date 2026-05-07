@@ -76,7 +76,9 @@ def build_drive_service(data_dir: Path | None = None):
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def run_interactive_flow(data_dir: Path) -> Credentials:
+def run_interactive_flow(data_dir: Path, response_url: str | None = None) -> Credentials:
+    import os
+
     data_dir.mkdir(parents=True, exist_ok=True)
     creds_file = _credentials_path(data_dir)
     if not creds_file.exists():
@@ -86,17 +88,41 @@ def run_interactive_flow(data_dir: Path) -> Credentials:
         )
 
     flow = InstalledAppFlow.from_client_secrets_file(str(creds_file), SCOPES)
-    creds = flow.run_local_server(port=0)
+
+    if response_url is None:
+        response_url = os.environ.get("OAUTH_RESPONSE_URL")
+
+    if os.environ.get("OAUTH_MANUAL") or response_url:
+        flow.redirect_uri = "http://localhost"
+        flow.autogenerate_code_verifier = False
+        flow.code_verifier = None
+        if response_url:
+            flow.fetch_token(authorization_response=response_url)
+            creds = flow.credentials
+        else:
+            auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+            print(f"Open this URL in a browser:\n\n{auth_url}\n")
+            print(
+                "Then re-run with OAUTH_RESPONSE_URL=<paste-redirect-url> "
+                "or pass it as the first CLI argument."
+            )
+            raise SystemExit(0)
+    else:
+        creds = flow.run_local_server(port=0, open_browser=False)
+
     _write_token(_token_path(data_dir), creds.to_json())
     return creds
 
 
 def main() -> None:
+    import sys
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     data_dir = load_config().data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
+    response_url = sys.argv[1] if len(sys.argv) > 1 else None
     try:
-        run_interactive_flow(data_dir)
+        run_interactive_flow(data_dir, response_url=response_url)
     except AuthError as exc:
         logger.error(str(exc))
         raise SystemExit(1) from exc
