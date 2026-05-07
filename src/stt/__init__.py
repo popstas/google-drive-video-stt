@@ -23,6 +23,8 @@ def get_provider(config: Config) -> STTProvider:
 
         return GoogleProvider(
             project=config.google_cloud_project,
+            bucket=config.google_stt_gcs_bucket,
+            data_dir=config.data_dir,
             language=config.stt_language,
         )
     if name == "asr":

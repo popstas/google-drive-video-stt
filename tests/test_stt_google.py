@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -9,74 +10,217 @@ from src.stt.base import STTError
 from src.stt.google_provider import GoogleProvider
 
 
-def _install_fake_google_modules(mocker, recognize_response):
-    fake_client = MagicMock()
-    fake_client.recognize.return_value = recognize_response
-    speech_client_cls = MagicMock(return_value=fake_client)
+def _install_fake_google_modules(mocker, batch_response, *, raise_on_recognize=None):
+    fake_speech_client = MagicMock()
+    operation = MagicMock()
+    if raise_on_recognize is not None:
+        fake_speech_client.batch_recognize.side_effect = raise_on_recognize
+    else:
+        operation.result.return_value = batch_response
+        fake_speech_client.batch_recognize.return_value = operation
+    speech_client_cls = MagicMock(return_value=fake_speech_client)
     speech_v2_module = MagicMock(SpeechClient=speech_client_cls)
 
     types_module = MagicMock()
-    types_module.RecognitionConfig = MagicMock(name="RecognitionConfig")
-    types_module.AutoDetectDecodingConfig = MagicMock(name="AutoDetectDecodingConfig")
-    types_module.RecognizeRequest = MagicMock(name="RecognizeRequest")
+    for name in (
+        "AutoDetectDecodingConfig",
+        "BatchRecognizeFileMetadata",
+        "BatchRecognizeRequest",
+        "InlineOutputConfig",
+        "RecognitionConfig",
+        "RecognitionFeatures",
+        "RecognitionOutputConfig",
+        "SpeakerDiarizationConfig",
+    ):
+        setattr(types_module, name, MagicMock(name=name))
 
+    fake_blob = MagicMock()
+    fake_bucket = MagicMock()
+    fake_bucket.blob.return_value = fake_blob
+    fake_storage_client = MagicMock()
+    fake_storage_client.bucket.return_value = fake_bucket
+    storage_client_cls = MagicMock(return_value=fake_storage_client)
+    storage_module = MagicMock(Client=storage_client_cls)
+    google_cloud_pkg = MagicMock(storage=storage_module)
     google_pkg = MagicMock()
-    google_cloud_pkg = MagicMock()
+
     mocker.patch.dict(
         "sys.modules",
         {
             "google.cloud.speech_v2": speech_v2_module,
             "google.cloud.speech_v2.types": types_module,
+            "google.cloud.storage": storage_module,
             "google.cloud": google_cloud_pkg,
             "google": google_pkg,
         },
     )
-    return fake_client, speech_v2_module, types_module
+    return {
+        "speech_client": fake_speech_client,
+        "speech_v2": speech_v2_module,
+        "types": types_module,
+        "storage_client": fake_storage_client,
+        "bucket": fake_bucket,
+        "blob": fake_blob,
+    }
+
+
+def _word(text, speaker, start_seconds):
+    w = MagicMock()
+    w.word = text
+    w.speaker_label = speaker
+    w.start_offset = timedelta(seconds=start_seconds)
+    w.end_offset = timedelta(seconds=start_seconds + 1)
+    return w
+
+
+def _make_response(words_per_alt, gcs_uri):
+    file_result = MagicMock()
+    transcript = MagicMock()
+    alt = MagicMock()
+    alt.words = words_per_alt
+    inner_result = MagicMock()
+    inner_result.alternatives = [alt]
+    transcript.results = [inner_result]
+    file_result.transcript = transcript
+    response = MagicMock()
+    response.results = {gcs_uri: file_result}
+    return response
 
 
 def test_requires_project():
     with pytest.raises(STTError, match="GOOGLE_CLOUD_PROJECT"):
-        GoogleProvider(project="")
+        GoogleProvider(project="", bucket="b", data_dir=Path("/tmp"))
 
 
-def test_transcribe_chunk_concatenates_alternatives(mocker, tmp_path):
-    chunk = tmp_path / "c.mp3"
-    chunk.write_bytes(b"audio")
-
-    response = MagicMock()
-    alt_a = MagicMock()
-    alt_a.transcript = "hello"
-    alt_b = MagicMock()
-    alt_b.transcript = "world"
-    result_a = MagicMock(alternatives=[alt_a])
-    result_b = MagicMock(alternatives=[alt_b])
-    response.results = [result_a, result_b]
-
-    fake_client, _, types_module = _install_fake_google_modules(mocker, response)
-
-    provider = GoogleProvider(project="proj-1", language="en")
-    text = provider.transcribe_chunk(chunk)
-
-    assert text == "hello world"
-    fake_client.recognize.assert_called_once()
-    types_module.RecognitionConfig.assert_called_once()
-    types_module.RecognizeRequest.assert_called_once()
+def test_requires_bucket():
+    with pytest.raises(STTError, match="GOOGLE_STT_GCS_BUCKET"):
+        GoogleProvider(project="p", bucket="", data_dir=Path("/tmp"))
 
 
-def test_transcribe_chunk_propagates_errors(mocker, tmp_path):
-    chunk = tmp_path / "c.mp3"
-    chunk.write_bytes(b"x")
+def test_transcribe_full_diarized(mocker, tmp_path):
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"audio")
 
-    response = MagicMock()
-    fake_client, _, _ = _install_fake_google_modules(mocker, response)
-    fake_client.recognize.side_effect = RuntimeError("quota")
+    mocker.patch("src.auth.load_credentials", return_value=MagicMock(name="creds"))
 
-    provider = GoogleProvider(project="p")
+    words = [
+        _word("hello", 1, 0),
+        _word("world", 1, 1),
+        _word("hi", 2, 5),
+        _word("there", 2, 6),
+    ]
+
+    mocks = _install_fake_google_modules(mocker, None)
+    provider = GoogleProvider(
+        project="proj-1", bucket="my-bucket", data_dir=tmp_path, language="en"
+    )
+    # capture URI used to keyed response after blob_name is generated
+    fake_response = MagicMock()
+    fake_response.results = {}
+
+    def _on_batch(request=None, **kwargs):
+        # Use the URI passed in the request files
+        uri = request.files[0].uri if request and request.files else None
+        # but request is a MagicMock; ease: use the bucket prefix to find any uri
+        op = MagicMock()
+        # Build response from any URI: just rebuild keyed by what _format_diarized expects
+        # We set up by capturing the actual uri the provider used:
+        op.result.return_value = _make_response(words, _on_batch.captured_uri)
+        return op
+
+    # Hook: capture URI when blob() is called
+    captured_blob = mocks["blob"]
+
+    def _capture_blob(name):
+        _on_batch.captured_uri = f"gs://my-bucket/{name}"
+        return captured_blob
+
+    mocks["bucket"].blob = MagicMock(side_effect=_capture_blob)
+    mocks["speech_client"].batch_recognize.side_effect = _on_batch
+
+    text = provider.transcribe_full(audio)
+
+    assert text == "[00:00:00] Speaker 1: hello world\n[00:00:05] Speaker 2: hi there"
+    mocks["blob"].upload_from_filename.assert_called_once_with(str(audio))
+    mocks["blob"].delete.assert_called_once()
+    # batch_recognize called with model=long
+    call = mocks["speech_client"].batch_recognize.call_args
+    assert call is not None
+    # RecognitionConfig was constructed with model="long"
+    rc_call = mocks["types"].RecognitionConfig.call_args
+    assert rc_call.kwargs.get("model") == "long"
+    # diarization features were built
+    mocks["types"].SpeakerDiarizationConfig.assert_called_once()
+    feat_call = mocks["types"].RecognitionFeatures.call_args
+    assert feat_call.kwargs.get("enable_word_time_offsets") is True
+
+
+def test_blob_deleted_on_error(mocker, tmp_path):
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+    mocker.patch("src.auth.load_credentials", return_value=MagicMock(name="creds"))
+    mocks = _install_fake_google_modules(
+        mocker, None, raise_on_recognize=RuntimeError("quota")
+    )
+
+    provider = GoogleProvider(
+        project="p", bucket="b", data_dir=tmp_path, language="en"
+    )
     with pytest.raises(STTError, match="quota"):
-        provider.transcribe_chunk(chunk)
+        provider.transcribe_full(audio)
+
+    mocks["blob"].delete.assert_called_once()
 
 
-def test_transcribe_chunk_missing_file(tmp_path):
-    provider = GoogleProvider(project="p")
+def test_auth_error_wrapped_as_stt_error(mocker, tmp_path):
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+
+    from src.auth import AuthError
+
+    mocker.patch("src.auth.load_credentials", side_effect=AuthError("missing token"))
+    _install_fake_google_modules(mocker, None)
+
+    provider = GoogleProvider(
+        project="p", bucket="b", data_dir=tmp_path, language="en"
+    )
+    with pytest.raises(STTError, match="missing token"):
+        provider.transcribe_full(audio)
+
+
+def test_transcribe_full_missing_file(tmp_path):
+    provider = GoogleProvider(
+        project="p", bucket="b", data_dir=tmp_path, language="en"
+    )
     with pytest.raises(FileNotFoundError):
-        provider.transcribe_chunk(tmp_path / "missing.mp3")
+        provider.transcribe_full(tmp_path / "missing.mp3")
+
+
+def test_transcribe_chunk_routes_to_full(mocker, tmp_path):
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+
+    mocker.patch("src.auth.load_credentials", return_value=MagicMock(name="creds"))
+    mocks = _install_fake_google_modules(mocker, None)
+
+    words = [_word("hello", 1, 0)]
+
+    def _on_batch(request=None, **kwargs):
+        op = MagicMock()
+        op.result.return_value = _make_response(words, _on_batch.captured_uri)
+        return op
+
+    captured_blob = mocks["blob"]
+
+    def _capture_blob(name):
+        _on_batch.captured_uri = f"gs://b/{name}"
+        return captured_blob
+
+    mocks["bucket"].blob = MagicMock(side_effect=_capture_blob)
+    mocks["speech_client"].batch_recognize.side_effect = _on_batch
+
+    provider = GoogleProvider(
+        project="p", bucket="b", data_dir=tmp_path, language="en"
+    )
+    text = provider.transcribe_chunk(audio)
+    assert text == "[00:00:00] Speaker 1: hello"

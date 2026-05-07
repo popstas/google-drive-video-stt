@@ -69,8 +69,8 @@ The current `google` STT provider uses Speech-to-Text v2 sync `Recognize` with a
 - [x] run `uv run pytest tests/test_stt_transcribe.py` — must pass before Task 4
 
 ### Task 4: Implement batched + diarization GoogleProvider
-- [ ] add `google-cloud-storage` to `pyproject.toml` and run `uv lock` (note: lockfile change committed)
-- [ ] rewrite `src/stt/google_provider.py`:
+- [x] add `google-cloud-storage` to `pyproject.toml` and run `uv lock` (note: lockfile change committed)
+- [x] rewrite `src/stt/google_provider.py`:
   - constructor takes `project: str`, `bucket: str`, `language: str`, `data_dir: Path` (for credentials); store, do not initialize clients eagerly
   - `_get_credentials()`: call `src.auth.load_credentials(data_dir)`; raise `STTError` wrapping `AuthError` with hint to re-run `python -m src.auth`
   - `_get_speech_client()`: lazy `SpeechClient(credentials=creds)`
@@ -78,15 +78,15 @@ The current `google` STT provider uses Speech-to-Text v2 sync `Recognize` with a
   - `transcribe_full(audio_path)`: upload mp3 to `gs://{bucket}/{stt-{uuid}-{name}.mp3}`, run `BatchRecognize` with `RecognitionConfig(model="long", language_codes=[lang], features=RecognitionFeatures(enable_word_time_offsets=True, enable_word_confidence=False, diarization_config=SpeakerDiarizationConfig(min_speaker_count=2, max_speaker_count=6)))`, `RecognitionOutputConfig(inline_response_config=InlineOutputConfig())`, await `operation.result()`, parse, then delete the GCS blob in a `finally` block. Return the formatted transcript.
   - `transcribe_chunk(audio_path)`: route to `transcribe_full` so the provider also works if some caller bypasses `transcribe_full` (defensive).
   - helper `_format_diarized(results) -> str`: walk word-level results, group consecutive words with the same `speaker_label`, emit one line per turn formatted as `[HH:MM:SS] Speaker N: <joined words>` where the timestamp is the first word's `start_offset`.
-- [ ] update `src/stt/__init__.py::get_provider` to pass `bucket=config.google_stt_gcs_bucket` and `data_dir=config.data_dir` to `GoogleProvider`
-- [ ] rewrite `tests/test_stt_google.py`:
+- [x] update `src/stt/__init__.py::get_provider` to pass `bucket=config.google_stt_gcs_bucket` and `data_dir=config.data_dir` to `GoogleProvider`
+- [x] rewrite `tests/test_stt_google.py`:
   - mock `src.auth.load_credentials` to return a sentinel credential
   - mock `google.cloud.storage.Client` and its bucket/blob `upload_from_filename` / `delete`
   - mock `google.cloud.speech_v2.SpeechClient.batch_recognize` to return an operation whose `result()` yields a fake `BatchRecognizeResponse` with one file containing two diarized turns
   - assert: GCS upload called with `gs://{bucket}/...` URI; batch_recognize called with `model="long"` and diarization features; output equals `"[00:00:00] Speaker 1: hello world\n[00:00:05] Speaker 2: hi there"` (or similar from fixture)
   - assert blob is deleted on both success and exception paths (use `pytest.raises` plus mock assertion)
   - assert auth error path: when `load_credentials` raises `AuthError`, provider raises `STTError`
-- [ ] run `uv run pytest tests/test_stt_google.py` — must pass before Task 5
+- [x] run `uv run pytest tests/test_stt_google.py` — must pass before Task 5
 
 ### Task 5: Documentation and example env
 - [ ] update `.env.example`: remove `GOOGLE_APPLICATION_CREDENTIALS`; add `GOOGLE_STT_GCS_BUCKET`; clarify that `STT_PROVIDER=google` now uses OAuth (no service account) and batched diarization
