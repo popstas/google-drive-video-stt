@@ -63,10 +63,10 @@ The current `google` STT provider uses Speech-to-Text v2 sync `Recognize` with a
 - [x] run `uv run pytest tests/test_config.py` — must pass before Task 3
 
 ### Task 3: Add full-file transcription hook to STTProvider
-- [ ] in `src/stt/base.py`, add a non-abstract method `transcribe_full(self, audio_path: Path) -> str | None` returning `None` by default — providers that need full-file access override it
-- [ ] in `src/stt/transcribe.py::transcribe_file`, call `provider.transcribe_full(mp3_path)` first; if it returns a non-None string, return it directly; otherwise fall through to existing chunking path
-- [ ] add tests in `tests/test_stt_transcribe.py`: (a) provider returning `None` from `transcribe_full` falls back to chunking (existing path) (b) provider returning a string from `transcribe_full` skips chunking and returns that string verbatim (c) `chunk_mp3` is not invoked in case (b) — assert via mock
-- [ ] run `uv run pytest tests/test_stt_transcribe.py` — must pass before Task 4
+- [x] in `src/stt/base.py`, add a non-abstract method `transcribe_full(self, audio_path: Path) -> str | None` returning `None` by default — providers that need full-file access override it
+- [x] in `src/stt/transcribe.py::transcribe_file`, call `provider.transcribe_full(mp3_path)` first; if it returns a non-None string, return it directly; otherwise fall through to existing chunking path
+- [x] add tests in `tests/test_stt_transcribe.py`: (a) provider returning `None` from `transcribe_full` falls back to chunking (existing path) (b) provider returning a string from `transcribe_full` skips chunking and returns that string verbatim (c) `chunk_mp3` is not invoked in case (b) — assert via mock
+- [x] run `uv run pytest tests/test_stt_transcribe.py` — must pass before Task 4
 
 ### Task 4: Implement batched + diarization GoogleProvider
 - [ ] add `google-cloud-storage` to `pyproject.toml` and run `uv lock` (note: lockfile change committed)

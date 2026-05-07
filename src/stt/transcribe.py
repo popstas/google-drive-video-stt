@@ -23,6 +23,11 @@ def transcribe_file(mp3_path: Path, config: Config) -> str:
 
     provider = get_provider(config)
 
+    full_text = provider.transcribe_full(mp3_path)
+    if full_text is not None:
+        logger.info("Transcribing full file: %s", mp3_path.name)
+        return full_text
+
     with tempfile.TemporaryDirectory(prefix="stt-chunks-") as tmp:
         chunks = chunk_mp3(mp3_path, config.stt_chunk_seconds, Path(tmp))
         logger.info("Transcribing %d chunk(s) of %s", len(chunks), mp3_path.name)

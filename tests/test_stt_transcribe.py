@@ -22,7 +22,7 @@ def _cfg(provider="openai") -> Config:
         stt_provider=provider,
         openai_api_key="sk-x" if provider == "openai" else "",
         google_cloud_project="p" if provider == "google" else "",
-        google_application_credentials="/tmp/sa.json" if provider == "google" else "",
+        google_stt_gcs_bucket="b" if provider == "google" else "",
         asr_url="http://localhost:9000" if provider == "asr" else "",
         stt_language="",
         stt_chunk_seconds=600,
@@ -47,6 +47,7 @@ def test_transcribe_file_chunks_and_merges(mocker, tmp_path):
     mocker.patch("src.stt.transcribe.chunk_mp3", return_value=chunk_paths)
 
     provider = MagicMock()
+    provider.transcribe_full.return_value = None
     provider.transcribe_chunk.side_effect = ["one", "two", "three"]
     mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
 
@@ -65,6 +66,7 @@ def test_transcribe_file_skips_empty_parts(mocker, tmp_path):
 
     mocker.patch("src.stt.transcribe.chunk_mp3", return_value=chunks)
     provider = MagicMock()
+    provider.transcribe_full.return_value = None
     provider.transcribe_chunk.side_effect = ["", "later"]
     mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
 
@@ -74,3 +76,57 @@ def test_transcribe_file_skips_empty_parts(mocker, tmp_path):
 def test_transcribe_file_missing_input(tmp_path):
     with pytest.raises(FileNotFoundError):
         transcribe_mod.transcribe_file(tmp_path / "missing.mp3", _cfg())
+
+
+def test_transcribe_full_returning_none_falls_back_to_chunking(mocker, tmp_path):
+    mp3 = tmp_path / "a.mp3"
+    mp3.write_bytes(b"x")
+    chunks = [tmp_path / "c1.mp3"]
+    chunks[0].write_bytes(b"x")
+
+    chunk_mock = mocker.patch("src.stt.transcribe.chunk_mp3", return_value=chunks)
+    provider = MagicMock()
+    provider.transcribe_full.return_value = None
+    provider.transcribe_chunk.return_value = "chunked"
+    mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
+
+    result = transcribe_mod.transcribe_file(mp3, _cfg())
+
+    assert result == "chunked"
+    provider.transcribe_full.assert_called_once_with(mp3)
+    assert chunk_mock.called
+    assert provider.transcribe_chunk.call_count == 1
+
+
+def test_transcribe_full_returning_string_skips_chunking(mocker, tmp_path):
+    mp3 = tmp_path / "a.mp3"
+    mp3.write_bytes(b"x")
+
+    chunk_mock = mocker.patch("src.stt.transcribe.chunk_mp3")
+    provider = MagicMock()
+    provider.transcribe_full.return_value = "[00:00:00] Speaker 1: hello"
+    mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
+
+    result = transcribe_mod.transcribe_file(mp3, _cfg(provider="google"))
+
+    assert result == "[00:00:00] Speaker 1: hello"
+    provider.transcribe_full.assert_called_once_with(mp3)
+    chunk_mock.assert_not_called()
+    provider.transcribe_chunk.assert_not_called()
+
+
+def test_transcribe_full_empty_string_is_returned_verbatim(mocker, tmp_path):
+    """Empty string from transcribe_full is a valid result, not a fallback signal."""
+    mp3 = tmp_path / "a.mp3"
+    mp3.write_bytes(b"x")
+
+    chunk_mock = mocker.patch("src.stt.transcribe.chunk_mp3")
+    provider = MagicMock()
+    provider.transcribe_full.return_value = ""
+    mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
+
+    result = transcribe_mod.transcribe_file(mp3, _cfg(provider="google"))
+
+    assert result == ""
+    chunk_mock.assert_not_called()
+    provider.transcribe_chunk.assert_not_called()
