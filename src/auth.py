@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -44,6 +45,47 @@ def load_credentials(data_dir: Path) -> Credentials:
             "Run `python -m src.auth` to perform interactive OAuth."
         )
 
+    # Inspect the token file directly: Credentials.from_authorized_user_file
+    # overwrites creds.scopes with whatever scopes argument we pass, so checking
+    # creds.scopes after the fact only echoes our request — it does not reveal
+    # what the saved token was actually authorized for.
+    try:
+        token_data = json.loads(token_file.read_text())
+    except (OSError, ValueError) as exc:
+        raise AuthError(
+            f"Token at {token_file} is malformed: {exc}. "
+            "Re-run `python -m src.auth` to re-authorize."
+        ) from exc
+
+    if not isinstance(token_data, dict):
+        raise AuthError(
+            f"Token at {token_file} is malformed: expected a JSON object, "
+            f"got {type(token_data).__name__}. "
+            "Re-run `python -m src.auth` to re-authorize."
+        )
+
+    saved_scopes = token_data.get("scopes")
+    if isinstance(saved_scopes, str):
+        saved_scopes = saved_scopes.split(" ")
+    elif saved_scopes is not None and not isinstance(saved_scopes, list):
+        raise AuthError(
+            f"Token at {token_file} is malformed: 'scopes' must be a list or "
+            f"string, got {type(saved_scopes).__name__}. "
+            "Re-run `python -m src.auth` to re-authorize."
+        )
+    if saved_scopes and not all(isinstance(s, str) for s in saved_scopes):
+        raise AuthError(
+            f"Token at {token_file} is malformed: 'scopes' must contain only "
+            "strings. Re-run `python -m src.auth` to re-authorize."
+        )
+    granted = set(saved_scopes or [])
+    missing = [s for s in SCOPES if s not in granted]
+    if missing:
+        raise AuthError(
+            f"Token at {token_file} is missing required scopes: {missing}. "
+            "Re-run `python -m src.auth` to re-authorize."
+        )
+
     try:
         creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
     except ValueError as exc:
@@ -51,14 +93,6 @@ def load_credentials(data_dir: Path) -> Credentials:
             f"Token at {token_file} is malformed: {exc}. "
             "Re-run `python -m src.auth` to re-authorize."
         ) from exc
-
-    granted = set(creds.scopes or [])
-    missing = [s for s in SCOPES if s not in granted]
-    if missing:
-        raise AuthError(
-            f"Token at {token_file} is missing required scopes: {missing}. "
-            "Re-run `python -m src.auth` to re-authorize."
-        )
 
     if creds.valid:
         return creds

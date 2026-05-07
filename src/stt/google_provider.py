@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import uuid
 from pathlib import Path
@@ -107,6 +108,7 @@ class GoogleProvider(STTProvider):
         blob = bucket.blob(blob_name)
         gcs_uri = f"gs://{self._bucket}/{blob_name}"
 
+        delete_blob = True
         try:
             logger.info("Uploading %s to %s", audio_path.name, gcs_uri)
             blob.upload_from_filename(str(audio_path))
@@ -136,19 +138,41 @@ class GoogleProvider(STTProvider):
                 processing_strategy=BatchRecognizeRequest.ProcessingStrategy.DYNAMIC_BATCHING,
             )
 
+            operation = None
             try:
                 operation = speech_client.batch_recognize(request=request)
                 response = operation.result(timeout=self._operation_timeout)
+            except concurrent.futures.TimeoutError as exc:
+                # Polling timeout is client-side only; the server-side batch job
+                # may still be running and reading from the blob. Leave the blob
+                # in place (and try to cancel the operation) so we don't yank
+                # the input out from under a live job.
+                delete_blob = False
+                if operation is not None:
+                    try:
+                        operation.cancel()
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "Failed to cancel Google STT operation for %s",
+                            gcs_uri,
+                            exc_info=True,
+                        )
+                raise STTError(
+                    f"Google Cloud STT batch_recognize did not complete within "
+                    f"{self._operation_timeout}s; GCS blob {gcs_uri} retained "
+                    "for manual cleanup"
+                ) from exc
             except Exception as exc:
                 raise STTError(f"Google Cloud STT batch_recognize failed: {exc}") from exc
 
             return self._format_diarized(response, gcs_uri)
         finally:
-            try:
-                blob.delete()
-                logger.info("Deleted %s", gcs_uri)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Failed to delete %s: %s", gcs_uri, exc)
+            if delete_blob:
+                try:
+                    blob.delete()
+                    logger.info("Deleted %s", gcs_uri)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to delete %s: %s", gcs_uri, exc)
 
     def _format_diarized(self, response, gcs_uri: str) -> str:
         results_map = getattr(response, "results", {}) or {}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -399,6 +400,61 @@ def test_file_result_error_code_raises_stt_error(mocker, tmp_path):
         provider.transcribe_full(audio)
     # Blob still cleaned up on file-level error.
     mocks["blob"].delete.assert_called_once()
+
+
+def test_polling_timeout_retains_blob_and_cancels_operation(mocker, tmp_path):
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+
+    mocker.patch("src.auth.load_credentials", return_value=MagicMock(name="creds"))
+    mocks = _install_fake_google_modules(mocker, None)
+
+    captured_op = MagicMock()
+    captured_op.result.side_effect = concurrent.futures.TimeoutError("polling timeout")
+
+    def _on_batch(request=None, **kwargs):
+        return captured_op
+
+    captured_blob = mocks["blob"]
+
+    def _capture_blob(name):
+        return captured_blob
+
+    mocks["bucket"].blob = MagicMock(side_effect=_capture_blob)
+    mocks["speech_client"].batch_recognize.side_effect = _on_batch
+
+    provider = GoogleProvider(
+        project="p", bucket="b", data_dir=tmp_path, language="en"
+    )
+    with pytest.raises(STTError, match="did not complete"):
+        provider.transcribe_full(audio)
+
+    # Server-side job may still be running — input blob must be retained.
+    captured_blob.delete.assert_not_called()
+    # We attempt to cancel the long-running operation on timeout.
+    captured_op.cancel.assert_called_once()
+
+
+def test_polling_timeout_swallows_cancel_failure(mocker, tmp_path):
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+
+    mocker.patch("src.auth.load_credentials", return_value=MagicMock(name="creds"))
+    mocks = _install_fake_google_modules(mocker, None)
+
+    captured_op = MagicMock()
+    captured_op.result.side_effect = concurrent.futures.TimeoutError("polling timeout")
+    captured_op.cancel.side_effect = RuntimeError("cancel failed")
+
+    mocks["speech_client"].batch_recognize.return_value = captured_op
+
+    provider = GoogleProvider(
+        project="p", bucket="b", data_dir=tmp_path, language="en"
+    )
+    with pytest.raises(STTError, match="did not complete"):
+        provider.transcribe_full(audio)
+
+    mocks["blob"].delete.assert_not_called()
 
 
 def test_transcribe_chunk_routes_to_full(mocker, tmp_path):

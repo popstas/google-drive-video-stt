@@ -18,6 +18,7 @@ def _write_token(path: Path, payload: dict | None = None) -> None:
         "client_id": "cid",
         "client_secret": "csec",
         "token_uri": "https://oauth2.googleapis.com/token",
+        "scopes": list(auth.SCOPES),
     }
     path.write_text(json.dumps(payload))
 
@@ -117,17 +118,116 @@ def test_load_credentials_invalid_no_refresh_raises(tmp_path, mocker):
 
 def test_load_credentials_missing_scope_raises(tmp_path, mocker):
     token_file = tmp_path / "token.json"
-    _write_token(token_file)
+    # Real google-auth reads scopes from the file when the caller passes
+    # scopes=None, but our loader passes scopes=SCOPES, which forces
+    # creds.scopes to mirror SCOPES regardless of saved scopes. The check
+    # therefore must inspect the file's "scopes" field directly.
+    _write_token(
+        token_file,
+        {
+            "token": "access",
+            "refresh_token": "refresh",
+            "client_id": "cid",
+            "client_secret": "csec",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "scopes": ["https://www.googleapis.com/auth/drive"],
+        },
+    )
+
+    # No need to mock from_authorized_user_file — the scope check fires before
+    # we attempt to construct a Credentials object.
+    with pytest.raises(auth.AuthError, match="missing required scopes"):
+        auth.load_credentials(tmp_path)
+
+
+def test_load_credentials_missing_scope_field_raises(tmp_path):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(
+        json.dumps(
+            {
+                "token": "access",
+                "refresh_token": "refresh",
+                "client_id": "cid",
+                "client_secret": "csec",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        )
+    )
+
+    with pytest.raises(auth.AuthError, match="missing required scopes"):
+        auth.load_credentials(tmp_path)
+
+
+def test_load_credentials_scopes_as_space_string(tmp_path, mocker):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(
+        json.dumps(
+            {
+                "token": "access",
+                "refresh_token": "refresh",
+                "client_id": "cid",
+                "client_secret": "csec",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "scopes": " ".join(auth.SCOPES),
+            }
+        )
+    )
 
     fake_creds = MagicMock()
     fake_creds.valid = True
     fake_creds.expired = False
     fake_creds.refresh_token = "refresh"
-    fake_creds.scopes = ["https://www.googleapis.com/auth/drive"]
+    fake_creds.scopes = list(auth.SCOPES)
 
     mocker.patch("src.auth.Credentials.from_authorized_user_file", return_value=fake_creds)
 
-    with pytest.raises(auth.AuthError, match="missing required scopes"):
+    result = auth.load_credentials(tmp_path)
+    assert result is fake_creds
+
+
+def test_load_credentials_token_not_a_dict_raises(tmp_path):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(json.dumps([]))
+
+    with pytest.raises(auth.AuthError, match="expected a JSON object"):
+        auth.load_credentials(tmp_path)
+
+
+def test_load_credentials_scopes_wrong_type_raises(tmp_path):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(
+        json.dumps(
+            {
+                "token": "access",
+                "refresh_token": "refresh",
+                "client_id": "cid",
+                "client_secret": "csec",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "scopes": 42,
+            }
+        )
+    )
+
+    with pytest.raises(auth.AuthError, match="'scopes' must be a list or string"):
+        auth.load_credentials(tmp_path)
+
+
+def test_load_credentials_scopes_with_non_string_members_raises(tmp_path):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(
+        json.dumps(
+            {
+                "token": "access",
+                "refresh_token": "refresh",
+                "client_id": "cid",
+                "client_secret": "csec",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "scopes": [{}],
+            }
+        )
+    )
+
+    with pytest.raises(auth.AuthError, match="must contain only strings"):
         auth.load_credentials(tmp_path)
 
 
