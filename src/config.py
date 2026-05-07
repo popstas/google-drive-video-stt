@@ -86,6 +86,12 @@ def load_config() -> Config:
             raise ValueError(
                 "GOOGLE_STT_GCS_BUCKET is required when STT_PROVIDER=google"
             )
+        if not stt_language:
+            raise ValueError(
+                "STT_LANGUAGE is required when STT_PROVIDER=google "
+                "(BCP-47 code, e.g. en-US, ru-RU). The `long` model has no "
+                "auto-detect; only Chirp models accept `auto`."
+            )
     if stt_provider == "asr" and not asr_url:
         raise ValueError("ASR_URL is required when STT_PROVIDER=asr")
 

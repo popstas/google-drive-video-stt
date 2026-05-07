@@ -145,10 +145,23 @@ def test_stt_google_requires_project_and_bucket(monkeypatch):
     with pytest.raises(ValueError, match="GOOGLE_STT_GCS_BUCKET"):
         load_config()
     monkeypatch.setenv("GOOGLE_STT_GCS_BUCKET", "my-stt-bucket")
+    with pytest.raises(ValueError, match="STT_LANGUAGE"):
+        load_config()
+    monkeypatch.setenv("STT_LANGUAGE", "en-US")
     cfg = load_config()
     assert cfg.stt_provider == "google"
     assert cfg.google_cloud_project == "proj-1"
     assert cfg.google_stt_gcs_bucket == "my-stt-bucket"
+    assert cfg.stt_language == "en-US"
+
+
+def test_stt_google_rejects_empty_language(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "google")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-1")
+    monkeypatch.setenv("GOOGLE_STT_GCS_BUCKET", "my-stt-bucket")
+    monkeypatch.setenv("STT_LANGUAGE", "")
+    with pytest.raises(ValueError, match="STT_LANGUAGE"):
+        load_config()
 
 
 def test_stt_asr_requires_url(monkeypatch):
