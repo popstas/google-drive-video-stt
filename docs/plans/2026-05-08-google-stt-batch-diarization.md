@@ -48,10 +48,10 @@ The current `google` STT provider uses Speech-to-Text v2 sync `Recognize` with a
 ## Implementation Steps
 
 ### Task 1: Extend OAuth scope to cloud-platform
-- [ ] update `SCOPES` in `src/auth.py` to `["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/cloud-platform"]`
-- [ ] update `tests/test_auth.py` assertions referencing `SCOPES` (if any) to include the new scope
-- [ ] add a unit test confirming `load_credentials` raises `AuthError` with re-auth message when token scope set is missing `cloud-platform` (use `Credentials.from_authorized_user_file` mock or fixture token file)
-- [ ] run `uv run pytest tests/test_auth.py` — must pass before Task 2
+- [x] update `SCOPES` in `src/auth.py` to `["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/cloud-platform"]`
+- [x] update `tests/test_auth.py` assertions referencing `SCOPES` (if any) to include the new scope
+- [x] add a unit test confirming `load_credentials` raises `AuthError` with re-auth message when token scope set is missing `cloud-platform` (use `Credentials.from_authorized_user_file` mock or fixture token file)
+- [x] run `uv run pytest tests/test_auth.py` — must pass before Task 2
 
 ### Task 2: Add GCS bucket config; drop `GOOGLE_APPLICATION_CREDENTIALS` requirement
 - [ ] add field `google_stt_gcs_bucket: str` to `Config` in `src/config.py`

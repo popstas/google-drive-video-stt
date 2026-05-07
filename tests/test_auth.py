@@ -35,6 +35,7 @@ def test_load_credentials_returns_valid_creds(tmp_path, mocker):
     fake_creds.valid = True
     fake_creds.expired = False
     fake_creds.refresh_token = "refresh"
+    fake_creds.scopes = list(auth.SCOPES)
 
     from_file = mocker.patch(
         "src.auth.Credentials.from_authorized_user_file", return_value=fake_creds
@@ -54,6 +55,7 @@ def test_load_credentials_refreshes_expired(tmp_path, mocker):
     fake_creds.valid = False
     fake_creds.expired = True
     fake_creds.refresh_token = "refresh"
+    fake_creds.scopes = list(auth.SCOPES)
     fake_creds.to_json.return_value = '{"refreshed": true}'
 
     mocker.patch("src.auth.Credentials.from_authorized_user_file", return_value=fake_creds)
@@ -74,6 +76,7 @@ def test_load_credentials_refresh_error_raises(tmp_path, mocker):
     fake_creds.valid = False
     fake_creds.expired = True
     fake_creds.refresh_token = "refresh"
+    fake_creds.scopes = list(auth.SCOPES)
     fake_creds.refresh.side_effect = RefreshError("boom")
 
     mocker.patch("src.auth.Credentials.from_authorized_user_file", return_value=fake_creds)
@@ -104,11 +107,33 @@ def test_load_credentials_invalid_no_refresh_raises(tmp_path, mocker):
     fake_creds.valid = False
     fake_creds.expired = False
     fake_creds.refresh_token = None
+    fake_creds.scopes = list(auth.SCOPES)
 
     mocker.patch("src.auth.Credentials.from_authorized_user_file", return_value=fake_creds)
 
     with pytest.raises(auth.AuthError, match="invalid"):
         auth.load_credentials(tmp_path)
+
+
+def test_load_credentials_missing_scope_raises(tmp_path, mocker):
+    token_file = tmp_path / "token.json"
+    _write_token(token_file)
+
+    fake_creds = MagicMock()
+    fake_creds.valid = True
+    fake_creds.expired = False
+    fake_creds.refresh_token = "refresh"
+    fake_creds.scopes = ["https://www.googleapis.com/auth/drive"]
+
+    mocker.patch("src.auth.Credentials.from_authorized_user_file", return_value=fake_creds)
+
+    with pytest.raises(auth.AuthError, match="missing required scopes"):
+        auth.load_credentials(tmp_path)
+
+
+def test_scopes_includes_cloud_platform():
+    assert "https://www.googleapis.com/auth/cloud-platform" in auth.SCOPES
+    assert "https://www.googleapis.com/auth/drive" in auth.SCOPES
 
 
 def test_build_drive_service_uses_credentials(tmp_path, mocker):
@@ -172,6 +197,7 @@ def test_load_credentials_refresh_writes_token_with_secure_mode(tmp_path, mocker
     fake_creds.valid = False
     fake_creds.expired = True
     fake_creds.refresh_token = "refresh"
+    fake_creds.scopes = list(auth.SCOPES)
     fake_creds.to_json.return_value = '{"refreshed": true}'
 
     mocker.patch("src.auth.Credentials.from_authorized_user_file", return_value=fake_creds)

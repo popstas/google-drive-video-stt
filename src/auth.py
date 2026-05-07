@@ -13,7 +13,10 @@ from src.config import load_config
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/drive"]
+SCOPES = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/cloud-platform",
+]
 
 
 class AuthError(Exception):
@@ -48,6 +51,14 @@ def load_credentials(data_dir: Path) -> Credentials:
             f"Token at {token_file} is malformed: {exc}. "
             "Re-run `python -m src.auth` to re-authorize."
         ) from exc
+
+    granted = set(creds.scopes or [])
+    missing = [s for s in SCOPES if s not in granted]
+    if missing:
+        raise AuthError(
+            f"Token at {token_file} is missing required scopes: {missing}. "
+            "Re-run `python -m src.auth` to re-authorize."
+        )
 
     if creds.valid:
         return creds
