@@ -51,6 +51,44 @@ All configuration is environment-driven. See `.env.example`.
 | `TELEGRAM_BOT_TOKEN` | (empty) | If set with chat ID, errors are posted to Telegram |
 | `TELEGRAM_CHAT_ID` | (empty) | Telegram chat to receive error notifications |
 | `DATA_DIR` | `data` | Directory holding `credentials.json` and `token.json` |
+| `STT_PROVIDER` | (empty) | `openai`, `google`, `asr`, or empty to disable transcription |
+| `STT_LANGUAGE` | (empty) | Language hint, e.g. `en`, `ru`. Empty = auto-detect |
+| `STT_CHUNK_SECONDS` | `600` | Chunk length for `openai`/`asr`. Ignored when `STT_PROVIDER=google` |
+| `OPENAI_API_KEY` | — | Required when `STT_PROVIDER=openai` |
+| `GOOGLE_CLOUD_PROJECT` | — | Required when `STT_PROVIDER=google` |
+| `GOOGLE_STT_GCS_BUCKET` | — | Required when `STT_PROVIDER=google`; bucket used to stage MP3 uploads |
+| `ASR_URL` | — | Required when `STT_PROVIDER=asr`; base URL of whisper-asr-webservice |
+
+## Speech-to-text
+
+Setting `STT_PROVIDER` to a non-empty value transcribes each MP3 and uploads a sibling
+`<basename>.txt` next to the MP4/MP3.
+
+### Google (batched + diarization)
+
+The `google` provider uses Speech-to-Text v2 `BatchRecognize` with speaker diarization,
+authenticated by the same OAuth user credentials as Drive (no service account).
+
+Setup:
+
+1. Enable the Speech-to-Text and Cloud Storage APIs on your GCP project.
+2. Create a GCS bucket (same region as your recognizer) — e.g. `gsutil mb -l us gs://<bucket>`.
+3. Set `GOOGLE_CLOUD_PROJECT` and `GOOGLE_STT_GCS_BUCKET` in `.env`.
+4. Re-run the OAuth flow once so the new `cloud-platform` scope is granted:
+
+   ```bash
+   rm data/token.json && uv run python -m src.auth
+   ```
+
+Each MP3 is uploaded to `gs://<bucket>/stt-<uuid>-<name>.mp3`, transcribed as a single batch
+job, then the staged blob is deleted. `STT_CHUNK_SECONDS` does not apply.
+
+Sample output:
+
+```
+[00:00:00] Speaker 1: hello, thanks for joining today
+[00:00:05] Speaker 2: hi, glad to be here
+```
 
 ## Usage
 

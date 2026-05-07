@@ -89,10 +89,10 @@ The current `google` STT provider uses Speech-to-Text v2 sync `Recognize` with a
 - [x] run `uv run pytest tests/test_stt_google.py` — must pass before Task 5
 
 ### Task 5: Documentation and example env
-- [ ] update `.env.example`: remove `GOOGLE_APPLICATION_CREDENTIALS`; add `GOOGLE_STT_GCS_BUCKET`; clarify that `STT_PROVIDER=google` now uses OAuth (no service account) and batched diarization
-- [ ] note in `.env.example` that `STT_CHUNK_SECONDS` is ignored when `STT_PROVIDER=google` (full-file batch)
-- [ ] update `README.md` (if it documents STT setup): remove service-account instructions; add (a) re-auth note for new scope (b) bucket-creation note (`gsutil mb` or console) (c) sample diarized output snippet
-- [ ] no test changes for this task
+- [x] update `.env.example`: remove `GOOGLE_APPLICATION_CREDENTIALS`; add `GOOGLE_STT_GCS_BUCKET`; clarify that `STT_PROVIDER=google` now uses OAuth (no service account) and batched diarization
+- [x] note in `.env.example` that `STT_CHUNK_SECONDS` is ignored when `STT_PROVIDER=google` (full-file batch)
+- [x] update `README.md` (if it documents STT setup): remove service-account instructions; add (a) re-auth note for new scope (b) bucket-creation note (`gsutil mb` or console) (c) sample diarized output snippet
+- [x] no test changes for this task
 
 ### Task 6: Verify acceptance criteria
 - [ ] verify all decisions from the Decisions section are reflected in code
