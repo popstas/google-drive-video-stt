@@ -54,13 +54,13 @@ The current `google` STT provider uses Speech-to-Text v2 sync `Recognize` with a
 - [x] run `uv run pytest tests/test_auth.py` — must pass before Task 2
 
 ### Task 2: Add GCS bucket config; drop `GOOGLE_APPLICATION_CREDENTIALS` requirement
-- [ ] add field `google_stt_gcs_bucket: str` to `Config` in `src/config.py`
-- [ ] read `GOOGLE_STT_GCS_BUCKET` env var in `load_config()`
-- [ ] remove `GOOGLE_APPLICATION_CREDENTIALS` requirement from the `stt_provider == "google"` validation block; keep the field on `Config` but no longer require it (it is now ignored — leave the env read for backward compat or remove entirely; see decision in this task)
-- [ ] decide and implement: drop `google_application_credentials` from `Config` entirely (cleaner, matches "no service account" decision)
-- [ ] require `GOOGLE_CLOUD_PROJECT` and `GOOGLE_STT_GCS_BUCKET` when `STT_PROVIDER=google`
-- [ ] update `tests/test_config.py`: drop tests requiring `GOOGLE_APPLICATION_CREDENTIALS`, add tests for `GOOGLE_STT_GCS_BUCKET` validation (missing → ValueError, present → success)
-- [ ] run `uv run pytest tests/test_config.py` — must pass before Task 3
+- [x] add field `google_stt_gcs_bucket: str` to `Config` in `src/config.py`
+- [x] read `GOOGLE_STT_GCS_BUCKET` env var in `load_config()`
+- [x] remove `GOOGLE_APPLICATION_CREDENTIALS` requirement from the `stt_provider == "google"` validation block; keep the field on `Config` but no longer require it (it is now ignored — leave the env read for backward compat or remove entirely; see decision in this task)
+- [x] decide and implement: drop `google_application_credentials` from `Config` entirely (cleaner, matches "no service account" decision)
+- [x] require `GOOGLE_CLOUD_PROJECT` and `GOOGLE_STT_GCS_BUCKET` when `STT_PROVIDER=google`
+- [x] update `tests/test_config.py`: drop tests requiring `GOOGLE_APPLICATION_CREDENTIALS`, add tests for `GOOGLE_STT_GCS_BUCKET` validation (missing → ValueError, present → success)
+- [x] run `uv run pytest tests/test_config.py` — must pass before Task 3
 
 ### Task 3: Add full-file transcription hook to STTProvider
 - [ ] in `src/stt/base.py`, add a non-abstract method `transcribe_full(self, audio_path: Path) -> str | None` returning `None` by default — providers that need full-file access override it

@@ -17,7 +17,7 @@ ENV_VARS = [
     "STT_CHUNK_SECONDS",
     "OPENAI_API_KEY",
     "GOOGLE_CLOUD_PROJECT",
-    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_STT_GCS_BUCKET",
     "ASR_URL",
 ]
 
@@ -137,18 +137,18 @@ def test_stt_openai_with_api_key(monkeypatch):
     assert cfg.openai_api_key == "sk-test"
 
 
-def test_stt_google_requires_project_and_credentials(monkeypatch):
+def test_stt_google_requires_project_and_bucket(monkeypatch):
     monkeypatch.setenv("STT_PROVIDER", "google")
     with pytest.raises(ValueError, match="GOOGLE_CLOUD_PROJECT"):
         load_config()
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-1")
-    with pytest.raises(ValueError, match="GOOGLE_APPLICATION_CREDENTIALS"):
+    with pytest.raises(ValueError, match="GOOGLE_STT_GCS_BUCKET"):
         load_config()
-    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/sa.json")
+    monkeypatch.setenv("GOOGLE_STT_GCS_BUCKET", "my-stt-bucket")
     cfg = load_config()
     assert cfg.stt_provider == "google"
     assert cfg.google_cloud_project == "proj-1"
-    assert cfg.google_application_credentials == "/tmp/sa.json"
+    assert cfg.google_stt_gcs_bucket == "my-stt-bucket"
 
 
 def test_stt_asr_requires_url(monkeypatch):

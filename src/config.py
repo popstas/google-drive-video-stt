@@ -23,7 +23,7 @@ class Config:
     stt_provider: str
     openai_api_key: str
     google_cloud_project: str
-    google_application_credentials: str
+    google_stt_gcs_bucket: str
     asr_url: str
     stt_language: str
     stt_chunk_seconds: int
@@ -59,9 +59,7 @@ def load_config() -> Config:
         )
     openai_api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     google_cloud_project = os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
-    google_application_credentials = os.environ.get(
-        "GOOGLE_APPLICATION_CREDENTIALS", ""
-    ).strip()
+    google_stt_gcs_bucket = os.environ.get("GOOGLE_STT_GCS_BUCKET", "").strip()
     asr_url = os.environ.get("ASR_URL", "").strip()
     stt_language = os.environ.get("STT_LANGUAGE", "").strip()
 
@@ -84,9 +82,9 @@ def load_config() -> Config:
             raise ValueError(
                 "GOOGLE_CLOUD_PROJECT is required when STT_PROVIDER=google"
             )
-        if not google_application_credentials:
+        if not google_stt_gcs_bucket:
             raise ValueError(
-                "GOOGLE_APPLICATION_CREDENTIALS is required when STT_PROVIDER=google"
+                "GOOGLE_STT_GCS_BUCKET is required when STT_PROVIDER=google"
             )
     if stt_provider == "asr" and not asr_url:
         raise ValueError("ASR_URL is required when STT_PROVIDER=asr")
@@ -102,7 +100,7 @@ def load_config() -> Config:
         stt_provider=stt_provider,
         openai_api_key=openai_api_key,
         google_cloud_project=google_cloud_project,
-        google_application_credentials=google_application_credentials,
+        google_stt_gcs_bucket=google_stt_gcs_bucket,
         asr_url=asr_url,
         stt_language=stt_language,
         stt_chunk_seconds=stt_chunk_seconds,
