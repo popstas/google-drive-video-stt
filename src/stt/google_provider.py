@@ -149,16 +149,43 @@ class GoogleProvider(STTProvider):
         file_result = None
         if hasattr(results_map, "get"):
             file_result = results_map.get(gcs_uri)
-        if file_result is None and isinstance(results_map, dict):
-            for value in results_map.values():
-                file_result = value
-                break
+        if file_result is None:
+            try:
+                file_result = next(iter(results_map.values()), None)
+            except (AttributeError, TypeError):
+                file_result = None
 
         if file_result is None:
-            return ""
+            raise STTError(
+                f"Google STT returned no result for {gcs_uri}"
+            )
 
-        transcript = getattr(file_result, "transcript", None)
+        err = getattr(file_result, "error", None)
+        if err is not None:
+            err_code = getattr(err, "code", 0)
+            if isinstance(err_code, int) and err_code != 0:
+                err_message = getattr(err, "message", "") or ""
+                raise STTError(
+                    f"Google STT failed for {gcs_uri}: {err_message} (code {err_code})"
+                )
+
+        # Modern v2 shape (with InlineOutputConfig): inline_result.transcript.
+        # Older/deprecated shape: file_result.transcript.
+        transcript = None
+        inline = getattr(file_result, "inline_result", None)
+        if inline is not None:
+            cand = getattr(inline, "transcript", None)
+            if cand is not None and getattr(cand, "results", None):
+                transcript = cand
         if transcript is None:
+            cand = getattr(file_result, "transcript", None)
+            if cand is not None and getattr(cand, "results", None):
+                transcript = cand
+        if transcript is None:
+            logger.warning(
+                "Google STT returned no transcript for %s; emitting empty result",
+                gcs_uri,
+            )
             return ""
 
         words: list = []

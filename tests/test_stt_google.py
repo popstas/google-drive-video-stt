@@ -81,7 +81,13 @@ def _make_response(words_per_alt, gcs_uri):
     inner_result = MagicMock()
     inner_result.alternatives = [alt]
     transcript.results = [inner_result]
-    file_result.transcript = transcript
+    # Real v2 API populates inline_result.transcript when InlineOutputConfig is set;
+    # the top-level `transcript` field is deprecated and arrives default-constructed.
+    file_result.inline_result.transcript = transcript
+    deprecated = MagicMock()
+    deprecated.results = []
+    file_result.transcript = deprecated
+    file_result.error.code = 0
     response = MagicMock()
     response.results = {gcs_uri: file_result}
     return response
@@ -301,6 +307,93 @@ def test_missing_speaker_label_does_not_emit_speaker_zero(mocker, tmp_path):
     # missing-label words merge into the current turn.
     assert text.startswith("[00:00:00] Speaker 1: um hello world")
     assert "[00:00:05] Speaker 2: hi" in text
+
+
+def test_reads_inline_result_transcript_not_deprecated_field(mocker, tmp_path):
+    """Real v2 API populates inline_result.transcript; reading the deprecated
+    top-level transcript field returns an empty default-constructed message."""
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+
+    mocker.patch("src.auth.load_credentials", return_value=MagicMock(name="creds"))
+    mocks = _install_fake_google_modules(mocker, None)
+
+    words = [_word("hi", 1, 0)]
+
+    def _on_batch(request=None, **kwargs):
+        op = MagicMock()
+        # Build a response where ONLY inline_result.transcript carries data;
+        # the deprecated top-level transcript is empty (mirrors real protos).
+        file_result = MagicMock()
+        transcript = MagicMock()
+        alt = MagicMock()
+        alt.words = words
+        inner = MagicMock()
+        inner.alternatives = [alt]
+        transcript.results = [inner]
+        file_result.inline_result.transcript = transcript
+        empty = MagicMock()
+        empty.results = []
+        file_result.transcript = empty
+        file_result.error.code = 0
+        response = MagicMock()
+        response.results = {_on_batch.captured_uri: file_result}
+        op.result.return_value = response
+        return op
+
+    captured_blob = mocks["blob"]
+
+    def _capture_blob(name):
+        _on_batch.captured_uri = f"gs://b/{name}"
+        return captured_blob
+
+    mocks["bucket"].blob = MagicMock(side_effect=_capture_blob)
+    mocks["speech_client"].batch_recognize.side_effect = _on_batch
+
+    provider = GoogleProvider(
+        project="p", bucket="b", data_dir=tmp_path, language="en"
+    )
+    assert provider.transcribe_full(audio) == "[00:00:00] Speaker 1: hi"
+
+
+def test_file_result_error_code_raises_stt_error(mocker, tmp_path):
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+
+    mocker.patch("src.auth.load_credentials", return_value=MagicMock(name="creds"))
+    mocks = _install_fake_google_modules(mocker, None)
+
+    def _on_batch(request=None, **kwargs):
+        op = MagicMock()
+        file_result = MagicMock()
+        file_result.error.code = 7  # PERMISSION_DENIED
+        file_result.error.message = "denied"
+        # No usable transcript on either field
+        empty = MagicMock()
+        empty.results = []
+        file_result.inline_result.transcript = empty
+        file_result.transcript = empty
+        response = MagicMock()
+        response.results = {_on_batch.captured_uri: file_result}
+        op.result.return_value = response
+        return op
+
+    captured_blob = mocks["blob"]
+
+    def _capture_blob(name):
+        _on_batch.captured_uri = f"gs://b/{name}"
+        return captured_blob
+
+    mocks["bucket"].blob = MagicMock(side_effect=_capture_blob)
+    mocks["speech_client"].batch_recognize.side_effect = _on_batch
+
+    provider = GoogleProvider(
+        project="p", bucket="b", data_dir=tmp_path, language="en"
+    )
+    with pytest.raises(STTError, match="denied"):
+        provider.transcribe_full(audio)
+    # Blob still cleaned up on file-level error.
+    mocks["blob"].delete.assert_called_once()
 
 
 def test_transcribe_chunk_routes_to_full(mocker, tmp_path):
