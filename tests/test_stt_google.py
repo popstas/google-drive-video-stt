@@ -119,9 +119,6 @@ def test_transcribe_full_diarized(mocker, tmp_path):
     fake_response.results = {}
 
     def _on_batch(request=None, **kwargs):
-        # Use the URI passed in the request files
-        uri = request.files[0].uri if request and request.files else None
-        # but request is a MagicMock; ease: use the bucket prefix to find any uri
         op = MagicMock()
         # Build response from any URI: just rebuild keyed by what _format_diarized expects
         # We set up by capturing the actual uri the provider used:

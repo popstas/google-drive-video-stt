@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,7 +19,7 @@ def test_transcribe_chunk_calls_openai_with_text_response(mocker, tmp_path):
 
     fake_client = MagicMock()
     fake_client.audio.transcriptions.create.return_value = "  hello  "
-    openai_module = mocker.patch.dict("sys.modules", {})
+    mocker.patch.dict("sys.modules", {})
     fake_openai = MagicMock()
     fake_openai.OpenAI.return_value = fake_client
     mocker.patch.dict("sys.modules", {"openai": fake_openai})

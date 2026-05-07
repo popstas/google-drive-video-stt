@@ -95,11 +95,11 @@ The current `google` STT provider uses Speech-to-Text v2 sync `Recognize` with a
 - [x] no test changes for this task
 
 ### Task 6: Verify acceptance criteria
-- [ ] verify all decisions from the Decisions section are reflected in code
-- [ ] run full test suite: `uv run pytest` — all tests must pass
-- [ ] run `uv run python -c "from src.config import load_config; load_config()"` with a sample `.env` to confirm validation
-- [ ] run linter if project uses one (`uv run ruff check` or equivalent) — fix any issues
-- [ ] verify `transcribe_chunk` is no longer the entry point for google provider (logs in `transcribe.py` should reflect "transcribing full file" branch)
+- [x] verify all decisions from the Decisions section are reflected in code
+- [x] run full test suite: `uv run pytest` — all tests must pass
+- [x] run `uv run python -c "from src.config import load_config; load_config()"` with a sample `.env` to confirm validation
+- [x] run linter if project uses one (`uv run ruff check` or equivalent) — fix any issues
+- [x] verify `transcribe_chunk` is no longer the entry point for google provider (logs in `transcribe.py` should reflect "transcribing full file" branch)
 
 ## Technical Details
 
