@@ -193,6 +193,116 @@ def test_transcribe_full_missing_file(tmp_path):
         provider.transcribe_full(tmp_path / "missing.mp3")
 
 
+def test_processing_strategy_is_dynamic_batching(mocker, tmp_path):
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+
+    mocker.patch("src.auth.load_credentials", return_value=MagicMock(name="creds"))
+
+    words = [_word("hi", 1, 0)]
+    mocks = _install_fake_google_modules(mocker, None)
+
+    sentinel = object()
+    mocks["types"].BatchRecognizeRequest.ProcessingStrategy.DYNAMIC_BATCHING = sentinel
+
+    def _on_batch(request=None, **kwargs):
+        op = MagicMock()
+        op.result.return_value = _make_response(words, _on_batch.captured_uri)
+        return op
+
+    captured_blob = mocks["blob"]
+
+    def _capture_blob(name):
+        _on_batch.captured_uri = f"gs://b/{name}"
+        return captured_blob
+
+    mocks["bucket"].blob = MagicMock(side_effect=_capture_blob)
+    mocks["speech_client"].batch_recognize.side_effect = _on_batch
+
+    provider = GoogleProvider(
+        project="p", bucket="b", data_dir=tmp_path, language="en"
+    )
+    provider.transcribe_full(audio)
+
+    req_call = mocks["types"].BatchRecognizeRequest.call_args
+    assert req_call.kwargs.get("processing_strategy") is sentinel
+
+
+def test_operation_result_called_with_timeout(mocker, tmp_path):
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+
+    mocker.patch("src.auth.load_credentials", return_value=MagicMock(name="creds"))
+
+    words = [_word("hi", 1, 0)]
+    mocks = _install_fake_google_modules(mocker, None)
+
+    captured_op = MagicMock()
+    captured_op.result.return_value = _make_response(words, "gs://b/x")
+
+    def _on_batch(request=None, **kwargs):
+        captured_op.result.return_value = _make_response(words, _on_batch.captured_uri)
+        return captured_op
+
+    captured_blob = mocks["blob"]
+
+    def _capture_blob(name):
+        _on_batch.captured_uri = f"gs://b/{name}"
+        return captured_blob
+
+    mocks["bucket"].blob = MagicMock(side_effect=_capture_blob)
+    mocks["speech_client"].batch_recognize.side_effect = _on_batch
+
+    provider = GoogleProvider(
+        project="p", bucket="b", data_dir=tmp_path, language="en"
+    )
+    provider.transcribe_full(audio)
+
+    captured_op.result.assert_called_once()
+    assert captured_op.result.call_args.kwargs.get("timeout") is not None
+
+
+def test_missing_speaker_label_does_not_emit_speaker_zero(mocker, tmp_path):
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+
+    mocker.patch("src.auth.load_credentials", return_value=MagicMock(name="creds"))
+
+    # Mix of words: first has no label, then valid speaker 1, then a None label.
+    words = [
+        _word("um", None, 0),
+        _word("hello", 1, 1),
+        _word("world", None, 2),
+        _word("hi", 2, 5),
+    ]
+    mocks = _install_fake_google_modules(mocker, None)
+
+    def _on_batch(request=None, **kwargs):
+        op = MagicMock()
+        op.result.return_value = _make_response(words, _on_batch.captured_uri)
+        return op
+
+    captured_blob = mocks["blob"]
+
+    def _capture_blob(name):
+        _on_batch.captured_uri = f"gs://b/{name}"
+        return captured_blob
+
+    mocks["bucket"].blob = MagicMock(side_effect=_capture_blob)
+    mocks["speech_client"].batch_recognize.side_effect = _on_batch
+
+    provider = GoogleProvider(
+        project="p", bucket="b", data_dir=tmp_path, language="en"
+    )
+    text = provider.transcribe_full(audio)
+
+    assert "Speaker 0" not in text
+    # Missing-label word before any valid speaker defaults to Speaker 1; subsequent
+    # missing-label words merge into the current turn.
+    assert text.startswith("[00:00:00] Speaker 1: um hello world")
+    assert "[00:00:05] Speaker 2: hi" in text
+
+
 def test_transcribe_chunk_routes_to_full(mocker, tmp_path):
     audio = tmp_path / "a.mp3"
     audio.write_bytes(b"x")

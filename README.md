@@ -133,6 +133,13 @@ src/
   extractor.py   ffmpeg MP4 → MP3 wrapper
   notify.py      Telegram error notifier
   main.py        Polling loop entry point
+  stt/
+    base.py            STTProvider ABC (transcribe_chunk + transcribe_full hook)
+    chunker.py         ffmpeg MP3 splitter (used by chunked providers)
+    transcribe.py      Dispatch: full-file path or chunked path
+    openai_provider.py OpenAI Whisper API client
+    asr_provider.py    Self-hosted whisper-asr-webservice client
+    google_provider.py Speech-to-Text v2 BatchRecognize + diarization
 tests/           Unit tests (mock external services)
 data/            Tokens, credentials, gitignored
 ```

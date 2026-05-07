@@ -26,6 +26,7 @@ class GoogleProvider(STTProvider):
         self._bucket = bucket
         self._data_dir = Path(data_dir)
         self._language = language or "auto"
+        self._operation_timeout = 3600.0
         self._credentials = None
         self._speech_client = None
         self._storage_client = None
@@ -33,10 +34,8 @@ class GoogleProvider(STTProvider):
     def _get_credentials(self):
         if self._credentials is not None:
             return self._credentials
-        try:
-            from src.auth import AuthError, load_credentials
-        except ImportError as exc:
-            raise STTError(f"Failed to import auth module: {exc}") from exc
+        from src.auth import AuthError, load_credentials
+
         try:
             self._credentials = load_credentials(self._data_dir)
         except AuthError as exc:
@@ -73,7 +72,7 @@ class GoogleProvider(STTProvider):
         return self._storage_client
 
     def transcribe_chunk(self, audio_path: Path) -> str:
-        return self.transcribe_full(audio_path) or ""
+        return self.transcribe_full(audio_path)
 
     def transcribe_full(self, audio_path: Path) -> str:
         audio_path = Path(audio_path)
@@ -128,11 +127,12 @@ class GoogleProvider(STTProvider):
                 recognition_output_config=RecognitionOutputConfig(
                     inline_response_config=InlineOutputConfig(),
                 ),
+                processing_strategy=BatchRecognizeRequest.ProcessingStrategy.DYNAMIC_BATCHING,
             )
 
             try:
                 operation = speech_client.batch_recognize(request=request)
-                response = operation.result()
+                response = operation.result(timeout=self._operation_timeout)
             except Exception as exc:
                 raise STTError(f"Google Cloud STT batch_recognize failed: {exc}") from exc
 
@@ -186,9 +186,13 @@ class GoogleProvider(STTProvider):
         for w in words:
             speaker = getattr(w, "speaker_label", None)
             try:
-                speaker_int = int(speaker) if speaker is not None and speaker != "" else 0
+                speaker_int: int | None = (
+                    int(speaker) if speaker is not None and speaker != "" else None
+                )
             except (TypeError, ValueError):
-                speaker_int = 0
+                speaker_int = None
+            if speaker_int is None or speaker_int <= 0:
+                speaker_int = current_speaker if current_speaker is not None else 1
             text = getattr(w, "word", "") or ""
             start = getattr(w, "start_offset", None)
 
