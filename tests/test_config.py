@@ -11,6 +11,14 @@ ENV_VARS = [
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
     "DATA_DIR",
+    "PROXY_URL",
+    "STT_PROVIDER",
+    "STT_LANGUAGE",
+    "STT_CHUNK_SECONDS",
+    "OPENAI_API_KEY",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_STT_GCS_BUCKET",
+    "ASR_URL",
 ]
 
 
@@ -30,6 +38,9 @@ def test_defaults_when_no_env(monkeypatch):
     assert cfg.telegram_bot_token == ""
     assert cfg.telegram_chat_id == ""
     assert cfg.data_dir == Path("data")
+    assert cfg.stt_provider == ""
+    assert cfg.stt_chunk_seconds == 600
+    assert cfg.stt_language == ""
 
 
 def test_parses_single_folder_id(monkeypatch):
@@ -110,6 +121,79 @@ def test_blank_data_dir_uses_default(monkeypatch):
     monkeypatch.setenv("DATA_DIR", "")
     cfg = load_config()
     assert cfg.data_dir == Path("data")
+
+
+def test_stt_openai_requires_api_key(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "openai")
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        load_config()
+
+
+def test_stt_openai_with_api_key(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    cfg = load_config()
+    assert cfg.stt_provider == "openai"
+    assert cfg.openai_api_key == "sk-test"
+
+
+def test_stt_google_requires_project_and_bucket(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "google")
+    with pytest.raises(ValueError, match="GOOGLE_CLOUD_PROJECT"):
+        load_config()
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-1")
+    with pytest.raises(ValueError, match="GOOGLE_STT_GCS_BUCKET"):
+        load_config()
+    monkeypatch.setenv("GOOGLE_STT_GCS_BUCKET", "my-stt-bucket")
+    with pytest.raises(ValueError, match="STT_LANGUAGE"):
+        load_config()
+    monkeypatch.setenv("STT_LANGUAGE", "en-US")
+    cfg = load_config()
+    assert cfg.stt_provider == "google"
+    assert cfg.google_cloud_project == "proj-1"
+    assert cfg.google_stt_gcs_bucket == "my-stt-bucket"
+    assert cfg.stt_language == "en-US"
+
+
+def test_stt_google_rejects_empty_language(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "google")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-1")
+    monkeypatch.setenv("GOOGLE_STT_GCS_BUCKET", "my-stt-bucket")
+    monkeypatch.setenv("STT_LANGUAGE", "")
+    with pytest.raises(ValueError, match="STT_LANGUAGE"):
+        load_config()
+
+
+def test_stt_asr_requires_url(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "asr")
+    with pytest.raises(ValueError, match="ASR_URL"):
+        load_config()
+
+
+def test_stt_asr_with_url(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "asr")
+    monkeypatch.setenv("ASR_URL", "http://localhost:9000")
+    cfg = load_config()
+    assert cfg.stt_provider == "asr"
+    assert cfg.asr_url == "http://localhost:9000"
+
+
+def test_stt_unsupported_provider_raises(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "azure")
+    with pytest.raises(ValueError, match="STT_PROVIDER"):
+        load_config()
+
+
+def test_stt_chunk_seconds_invalid(monkeypatch):
+    monkeypatch.setenv("STT_CHUNK_SECONDS", "bad")
+    with pytest.raises(ValueError, match="STT_CHUNK_SECONDS"):
+        load_config()
+
+
+def test_stt_chunk_seconds_non_positive(monkeypatch):
+    monkeypatch.setenv("STT_CHUNK_SECONDS", "0")
+    with pytest.raises(ValueError, match="positive"):
+        load_config()
 
 
 def test_full_env_combination(monkeypatch):

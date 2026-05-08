@@ -13,32 +13,68 @@ from src import drive, notify
 from src.auth import AuthError, build_drive_service
 from src.config import Config, load_config
 from src.extractor import extract_mp3
+from src.stt.transcribe import transcribe_file
 
 logger = logging.getLogger(__name__)
 
 
-def process_file(
-    service: Any,
-    file_info: dict,
-    folder_id: str,
-    bitrate: str = "96k",
+def _save_and_upload_txt(
+    service: Any, mp4_name: str, text: str, folder_id: str, tmp_dir: Path,
 ) -> None:
+    txt_name = Path(mp4_name).stem + ".txt"
+    txt_path = tmp_dir / txt_name
+    txt_path.write_text(text, encoding="utf-8")
+    drive.upload(service, txt_path, folder_id, mime_type=drive.TXT_MIME)
+    logger.info("Uploaded %s to folder %s", txt_name, folder_id)
+
+
+def process_item(service: Any, item: dict, folder_id: str, config: Config) -> None:
+    file_info = item["file"]
     file_id = file_info["id"]
     file_name = file_info["name"]
-    logger.info("Processing %s (id=%s) in folder %s", file_name, file_id, folder_id)
+    has_mp3 = item.get("has_mp3", False)
+    has_txt = item.get("has_txt", False)
+    mp3_id = item.get("mp3_id")
+    mp3_name = item.get("mp3_name")
+
+    stt_enabled = bool(config.stt_provider)
+    needs_mp3 = not has_mp3
+    needs_txt = stt_enabled and not has_txt
+
+    if not needs_mp3 and not needs_txt:
+        return
+
+    logger.info(
+        "Processing %s (id=%s) in folder %s [mp3=%s, txt=%s]",
+        file_name, file_id, folder_id, "make" if needs_mp3 else "skip",
+        "make" if needs_txt else "skip",
+    )
 
     with tempfile.TemporaryDirectory(prefix="gd-stt-") as tmp:
         tmp_dir = Path(tmp)
-        mp4_path = drive.download(service, file_id, tmp_dir, file_name)
-        mp3_path = extract_mp3(mp4_path, bitrate=bitrate)
-        drive.upload(service, mp3_path, folder_id, mime_type=drive.MP3_MIME)
-        logger.info("Uploaded %s to folder %s", mp3_path.name, folder_id)
+        mp3_path: Path | None = None
+
+        if needs_mp3:
+            mp4_path = drive.download(service, file_id, tmp_dir, file_name)
+            mp3_path = extract_mp3(mp4_path, bitrate=config.bitrate)
+            drive.upload(service, mp3_path, folder_id, mime_type=drive.MP3_MIME)
+            logger.info("Uploaded %s to folder %s", mp3_path.name, folder_id)
+
+        if needs_txt:
+            if mp3_path is None:
+                if not mp3_id or not mp3_name:
+                    raise RuntimeError(
+                        f"mp3 marked present for {file_name} but id/name missing"
+                    )
+                mp3_path = drive.download(service, mp3_id, tmp_dir, mp3_name)
+            text = transcribe_file(mp3_path, config)
+            _save_and_upload_txt(service, file_name, text, folder_id, tmp_dir)
 
 
 def run_once(service: Any, config: Config) -> None:
     for folder_id in config.folder_ids:
         try:
-            files = drive.list_unprocessed_mp4(service, folder_id)
+            items = drive.list_folder_state(service, folder_id)
         except RefreshError:
             raise
         except Exception as exc:
@@ -49,18 +85,25 @@ def run_once(service: Any, config: Config) -> None:
             )
             continue
 
-        logger.info("Folder %s: %d unprocessed file(s)", folder_id, len(files))
-        for file_info in files:
+        stt_enabled = bool(config.stt_provider)
+        pending = [
+            item for item in items
+            if not item.get("has_mp3")
+            or (stt_enabled and not item.get("has_txt"))
+        ]
+        logger.info("Folder %s: %d pending file(s)", folder_id, len(pending))
+        for item in pending:
             try:
-                process_file(service, file_info, folder_id, bitrate=config.bitrate)
+                process_item(service, item, folder_id, config)
             except RefreshError:
                 raise
             except Exception as exc:
+                file_name = item.get("file", {}).get("name")
                 logger.exception(
-                    "Failed to process %s in folder %s", file_info.get("name"), folder_id
+                    "Failed to process %s in folder %s", file_name, folder_id
                 )
                 notify.notify_error(
-                    f"Failed to process {file_info.get('name')} in {folder_id}: {exc}\n"
+                    f"Failed to process {file_name} in {folder_id}: {exc}\n"
                     f"{traceback.format_exc()}",
                     proxy_url=config.proxy_url,
                 )

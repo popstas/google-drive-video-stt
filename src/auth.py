@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -13,7 +14,10 @@ from src.config import load_config
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/drive"]
+SCOPES = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/cloud-platform",
+]
 
 
 class AuthError(Exception):
@@ -39,6 +43,47 @@ def load_credentials(data_dir: Path) -> Credentials:
         raise AuthError(
             f"Token file not found at {token_file}. "
             "Run `python -m src.auth` to perform interactive OAuth."
+        )
+
+    # Inspect the token file directly: Credentials.from_authorized_user_file
+    # overwrites creds.scopes with whatever scopes argument we pass, so checking
+    # creds.scopes after the fact only echoes our request — it does not reveal
+    # what the saved token was actually authorized for.
+    try:
+        token_data = json.loads(token_file.read_text())
+    except (OSError, ValueError) as exc:
+        raise AuthError(
+            f"Token at {token_file} is malformed: {exc}. "
+            "Re-run `python -m src.auth` to re-authorize."
+        ) from exc
+
+    if not isinstance(token_data, dict):
+        raise AuthError(
+            f"Token at {token_file} is malformed: expected a JSON object, "
+            f"got {type(token_data).__name__}. "
+            "Re-run `python -m src.auth` to re-authorize."
+        )
+
+    saved_scopes = token_data.get("scopes")
+    if isinstance(saved_scopes, str):
+        saved_scopes = saved_scopes.split(" ")
+    elif saved_scopes is not None and not isinstance(saved_scopes, list):
+        raise AuthError(
+            f"Token at {token_file} is malformed: 'scopes' must be a list or "
+            f"string, got {type(saved_scopes).__name__}. "
+            "Re-run `python -m src.auth` to re-authorize."
+        )
+    if saved_scopes and not all(isinstance(s, str) for s in saved_scopes):
+        raise AuthError(
+            f"Token at {token_file} is malformed: 'scopes' must contain only "
+            "strings. Re-run `python -m src.auth` to re-authorize."
+        )
+    granted = set(saved_scopes or [])
+    missing = [s for s in SCOPES if s not in granted]
+    if missing:
+        raise AuthError(
+            f"Token at {token_file} is missing required scopes: {missing}. "
+            "Re-run `python -m src.auth` to re-authorize."
         )
 
     try:
@@ -76,7 +121,9 @@ def build_drive_service(data_dir: Path | None = None):
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def run_interactive_flow(data_dir: Path) -> Credentials:
+def run_interactive_flow(data_dir: Path, response_url: str | None = None) -> Credentials:
+    import os
+
     data_dir.mkdir(parents=True, exist_ok=True)
     creds_file = _credentials_path(data_dir)
     if not creds_file.exists():
@@ -86,17 +133,41 @@ def run_interactive_flow(data_dir: Path) -> Credentials:
         )
 
     flow = InstalledAppFlow.from_client_secrets_file(str(creds_file), SCOPES)
-    creds = flow.run_local_server(port=0)
+
+    if response_url is None:
+        response_url = os.environ.get("OAUTH_RESPONSE_URL")
+
+    if os.environ.get("OAUTH_MANUAL") or response_url:
+        flow.redirect_uri = "http://localhost"
+        flow.autogenerate_code_verifier = False
+        flow.code_verifier = None
+        if response_url:
+            flow.fetch_token(authorization_response=response_url)
+            creds = flow.credentials
+        else:
+            auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+            print(f"Open this URL in a browser:\n\n{auth_url}\n")
+            print(
+                "Then re-run with OAUTH_RESPONSE_URL=<paste-redirect-url> "
+                "or pass it as the first CLI argument."
+            )
+            raise SystemExit(0)
+    else:
+        creds = flow.run_local_server(port=0, open_browser=False)
+
     _write_token(_token_path(data_dir), creds.to_json())
     return creds
 
 
 def main() -> None:
+    import sys
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     data_dir = load_config().data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
+    response_url = sys.argv[1] if len(sys.argv) > 1 else None
     try:
-        run_interactive_flow(data_dir)
+        run_interactive_flow(data_dir, response_url=response_url)
     except AuthError as exc:
         logger.error(str(exc))
         raise SystemExit(1) from exc

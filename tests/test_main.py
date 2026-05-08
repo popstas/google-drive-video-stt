@@ -16,6 +16,13 @@ def make_config(
     bitrate="96k",
     poll_interval=600,
     data_dir=Path("data"),
+    stt_provider="",
+    openai_api_key="",
+    google_cloud_project="",
+    google_stt_gcs_bucket="",
+    asr_url="",
+    stt_language="",
+    stt_chunk_seconds=600,
 ) -> Config:
     return Config(
         folder_ids=folder_ids if folder_ids is not None else ["folderA"],
@@ -25,10 +32,27 @@ def make_config(
         telegram_chat_id="",
         data_dir=data_dir,
         proxy_url="",
+        stt_provider=stt_provider,
+        openai_api_key=openai_api_key,
+        google_cloud_project=google_cloud_project,
+        google_stt_gcs_bucket=google_stt_gcs_bucket,
+        asr_url=asr_url,
+        stt_language=stt_language,
+        stt_chunk_seconds=stt_chunk_seconds,
     )
 
 
-def test_process_file_downloads_extracts_uploads(mocker, tmp_path):
+def _item(file_id="fid", name="video.mp4", *, has_mp3=False, has_txt=False, mp3_id=None, mp3_name=None):
+    return {
+        "file": {"id": file_id, "name": name},
+        "has_mp3": has_mp3,
+        "has_txt": has_txt,
+        "mp3_id": mp3_id,
+        "mp3_name": mp3_name,
+    }
+
+
+def test_process_item_downloads_extracts_uploads(mocker, tmp_path):
     service = MagicMock()
     mp4_path = tmp_path / "video.mp4"
     mp3_path = tmp_path / "video.mp3"
@@ -37,11 +61,11 @@ def test_process_file_downloads_extracts_uploads(mocker, tmp_path):
     extract_mock = mocker.patch("src.main.extract_mp3", return_value=mp3_path)
     upload_mock = mocker.patch("src.main.drive.upload", return_value={"id": "uploaded"})
 
-    file_info = {"id": "fid1", "name": "video.mp4"}
-    main.process_file(service, file_info, "folderA", bitrate="128k")
+    cfg = make_config(bitrate="128k")
+    main.process_item(service, _item("fid1", "video.mp4"), "folderA", cfg)
 
     download_mock.assert_called_once()
-    args, kwargs = download_mock.call_args
+    args, _ = download_mock.call_args
     assert args[0] is service
     assert args[1] == "fid1"
     assert isinstance(args[2], Path)
@@ -53,7 +77,22 @@ def test_process_file_downloads_extracts_uploads(mocker, tmp_path):
     )
 
 
-def test_process_file_temp_dir_is_cleaned_up(mocker):
+def test_process_item_skips_when_already_done(mocker):
+    service = MagicMock()
+    download = mocker.patch("src.main.drive.download")
+    extract = mocker.patch("src.main.extract_mp3")
+    upload = mocker.patch("src.main.drive.upload")
+
+    cfg = make_config()
+    main.process_item(
+        service, _item("fid", "v.mp4", has_mp3=True), "folder", cfg,
+    )
+    download.assert_not_called()
+    extract.assert_not_called()
+    upload.assert_not_called()
+
+
+def test_process_item_temp_dir_is_cleaned_up(mocker):
     service = MagicMock()
     captured = {}
 
@@ -67,10 +106,84 @@ def test_process_file_temp_dir_is_cleaned_up(mocker):
     mocker.patch("src.main.extract_mp3", side_effect=lambda p, bitrate: p.with_suffix(".mp3"))
     mocker.patch("src.main.drive.upload")
 
-    main.process_file(service, {"id": "fid", "name": "v.mp4"}, "f", bitrate="96k")
+    cfg = make_config()
+    main.process_item(service, _item("fid", "v.mp4"), "f", cfg)
 
     assert "dest_dir" in captured
     assert not captured["dest_dir"].exists(), "temp dir should be cleaned up"
+
+
+def test_process_item_runs_stt_when_enabled(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    upload_mock = mocker.patch("src.main.drive.upload")
+    transcribe_mock = mocker.patch(
+        "src.main.transcribe_file", return_value="hello world"
+    )
+
+    cfg = make_config(stt_provider="openai", openai_api_key="sk-x")
+    main.process_item(service, _item("fid", "video.mp4"), "f", cfg)
+
+    transcribe_mock.assert_called_once_with(mp3_path, cfg)
+    # Two uploads: mp3 and txt
+    assert upload_mock.call_count == 2
+    second_call = upload_mock.call_args_list[1]
+    assert second_call.kwargs["mime_type"] == "text/plain"
+    txt_path = second_call.args[1]
+    assert txt_path.name == "video.txt"
+
+
+def test_process_item_only_stt_when_mp3_already_exists(mocker, tmp_path):
+    service = MagicMock()
+
+    def fake_download(svc, file_id, dest_dir, name):
+        path = dest_dir / name
+        path.write_bytes(b"x")
+        return path
+
+    download_mock = mocker.patch("src.main.drive.download", side_effect=fake_download)
+    extract_mock = mocker.patch("src.main.extract_mp3")
+    upload_mock = mocker.patch("src.main.drive.upload")
+    transcribe_mock = mocker.patch(
+        "src.main.transcribe_file", return_value="text"
+    )
+
+    cfg = make_config(stt_provider="openai", openai_api_key="sk-x")
+    item = _item(
+        "fid", "video.mp4", has_mp3=True, mp3_id="mp3id", mp3_name="video.mp3",
+    )
+    main.process_item(service, item, "folderX", cfg)
+
+    extract_mock.assert_not_called()
+    download_mock.assert_called_once()
+    args, _ = download_mock.call_args
+    assert args[1] == "mp3id"
+    assert args[3] == "video.mp3"
+    transcribe_mock.assert_called_once()
+    upload_mock.assert_called_once()
+    assert upload_mock.call_args.kwargs["mime_type"] == "text/plain"
+
+
+def test_process_item_skips_completely_when_mp3_and_txt_present(mocker):
+    service = MagicMock()
+    download = mocker.patch("src.main.drive.download")
+    extract = mocker.patch("src.main.extract_mp3")
+    upload = mocker.patch("src.main.drive.upload")
+    transcribe = mocker.patch("src.main.transcribe_file")
+
+    cfg = make_config(stt_provider="openai", openai_api_key="sk-x")
+    item = _item("fid", "v.mp4", has_mp3=True, has_txt=True,
+                 mp3_id="m", mp3_name="v.mp3")
+    main.process_item(service, item, "f", cfg)
+
+    download.assert_not_called()
+    extract.assert_not_called()
+    upload.assert_not_called()
+    transcribe.assert_not_called()
 
 
 def test_run_once_iterates_all_folders_and_files(mocker):
@@ -78,43 +191,77 @@ def test_run_once_iterates_all_folders_and_files(mocker):
     cfg = make_config(folder_ids=["f1", "f2"])
 
     listings = {
-        "f1": [{"id": "v1", "name": "a.mp4"}],
-        "f2": [{"id": "v2", "name": "b.mp4"}, {"id": "v3", "name": "c.mp4"}],
+        "f1": [_item("v1", "a.mp4")],
+        "f2": [_item("v2", "b.mp4"), _item("v3", "c.mp4")],
     }
     mocker.patch(
-        "src.main.drive.list_unprocessed_mp4",
+        "src.main.drive.list_folder_state",
         side_effect=lambda svc, fid: listings[fid],
     )
-    process_mock = mocker.patch("src.main.process_file")
+    process_mock = mocker.patch("src.main.process_item")
 
     main.run_once(service, cfg)
 
     assert process_mock.call_count == 3
-    calls = [(c.args[2], c.args[1]["id"]) for c in process_mock.call_args_list]
+    calls = [(c.args[2], c.args[1]["file"]["id"]) for c in process_mock.call_args_list]
     assert ("f1", "v1") in calls
     assert ("f2", "v2") in calls
     assert ("f2", "v3") in calls
+
+
+def test_run_once_filters_already_processed(mocker):
+    service = MagicMock()
+    cfg = make_config(folder_ids=["f1"])
+
+    items = [
+        _item("v1", "a.mp4", has_mp3=False),
+        _item("v2", "b.mp4", has_mp3=True),
+    ]
+    mocker.patch("src.main.drive.list_folder_state", return_value=items)
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(service, cfg)
+
+    assert process_mock.call_count == 1
+    assert process_mock.call_args.args[1]["file"]["id"] == "v1"
+
+
+def test_run_once_with_stt_includes_files_missing_txt(mocker):
+    service = MagicMock()
+    cfg = make_config(folder_ids=["f1"], stt_provider="openai", openai_api_key="sk-x")
+
+    items = [
+        _item("v1", "a.mp4", has_mp3=True, has_txt=True, mp3_id="m1", mp3_name="a.mp3"),
+        _item("v2", "b.mp4", has_mp3=True, has_txt=False, mp3_id="m2", mp3_name="b.mp3"),
+    ]
+    mocker.patch("src.main.drive.list_folder_state", return_value=items)
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(service, cfg)
+
+    assert process_mock.call_count == 1
+    assert process_mock.call_args.args[1]["file"]["id"] == "v2"
 
 
 def test_run_once_continues_on_per_file_error(mocker):
     service = MagicMock()
     cfg = make_config(folder_ids=["f1"])
 
-    files = [
-        {"id": "good1", "name": "ok1.mp4"},
-        {"id": "bad", "name": "fail.mp4"},
-        {"id": "good2", "name": "ok2.mp4"},
+    items = [
+        _item("good1", "ok1.mp4"),
+        _item("bad", "fail.mp4"),
+        _item("good2", "ok2.mp4"),
     ]
-    mocker.patch("src.main.drive.list_unprocessed_mp4", return_value=files)
+    mocker.patch("src.main.drive.list_folder_state", return_value=items)
 
     processed_ids = []
 
-    def fake_process(svc, info, folder, bitrate):
-        if info["id"] == "bad":
+    def fake_process(svc, item, folder, c):
+        if item["file"]["id"] == "bad":
             raise RuntimeError("ffmpeg failed")
-        processed_ids.append(info["id"])
+        processed_ids.append(item["file"]["id"])
 
-    mocker.patch("src.main.process_file", side_effect=fake_process)
+    mocker.patch("src.main.process_item", side_effect=fake_process)
     notify_mock = mocker.patch("src.main.notify.notify_error")
 
     main.run_once(service, cfg)
@@ -131,10 +278,10 @@ def test_run_once_continues_on_listing_error(mocker):
     def fake_list(svc, folder_id):
         if folder_id == "bad_folder":
             raise RuntimeError("api error")
-        return [{"id": "v1", "name": "a.mp4"}]
+        return [_item("v1", "a.mp4")]
 
-    mocker.patch("src.main.drive.list_unprocessed_mp4", side_effect=fake_list)
-    process_mock = mocker.patch("src.main.process_file")
+    mocker.patch("src.main.drive.list_folder_state", side_effect=fake_list)
+    process_mock = mocker.patch("src.main.process_item")
     notify_mock = mocker.patch("src.main.notify.notify_error")
 
     main.run_once(service, cfg)
@@ -149,8 +296,8 @@ def test_run_once_no_folders_does_nothing(mocker):
     service = MagicMock()
     cfg = make_config(folder_ids=[])
 
-    list_mock = mocker.patch("src.main.drive.list_unprocessed_mp4")
-    process_mock = mocker.patch("src.main.process_file")
+    list_mock = mocker.patch("src.main.drive.list_folder_state")
+    process_mock = mocker.patch("src.main.process_item")
 
     main.run_once(service, cfg)
 
@@ -158,19 +305,19 @@ def test_run_once_no_folders_does_nothing(mocker):
     process_mock.assert_not_called()
 
 
-def test_run_once_passes_bitrate_to_process_file(mocker):
+def test_run_once_passes_config_to_process(mocker):
     service = MagicMock()
     cfg = make_config(folder_ids=["f1"], bitrate="192k")
 
     mocker.patch(
-        "src.main.drive.list_unprocessed_mp4",
-        return_value=[{"id": "v1", "name": "a.mp4"}],
+        "src.main.drive.list_folder_state",
+        return_value=[_item("v1", "a.mp4")],
     )
-    process_mock = mocker.patch("src.main.process_file")
+    process_mock = mocker.patch("src.main.process_item")
 
     main.run_once(service, cfg)
 
-    assert process_mock.call_args.kwargs["bitrate"] == "192k"
+    assert process_mock.call_args.args[3] is cfg
 
 
 def test_main_runs_loop_and_sleeps(mocker):
@@ -201,7 +348,7 @@ def test_run_once_propagates_refresh_error(mocker):
     cfg = make_config(folder_ids=["f1"])
 
     mocker.patch(
-        "src.main.drive.list_unprocessed_mp4",
+        "src.main.drive.list_folder_state",
         side_effect=RefreshError("token revoked"),
     )
     notify_mock = mocker.patch("src.main.notify.notify_error")
@@ -217,10 +364,10 @@ def test_run_once_propagates_refresh_error_from_process(mocker):
     cfg = make_config(folder_ids=["f1"])
 
     mocker.patch(
-        "src.main.drive.list_unprocessed_mp4",
-        return_value=[{"id": "v1", "name": "a.mp4"}],
+        "src.main.drive.list_folder_state",
+        return_value=[_item("v1", "a.mp4")],
     )
-    mocker.patch("src.main.process_file", side_effect=RefreshError("token revoked"))
+    mocker.patch("src.main.process_item", side_effect=RefreshError("token revoked"))
     notify_mock = mocker.patch("src.main.notify.notify_error")
 
     with pytest.raises(RefreshError):

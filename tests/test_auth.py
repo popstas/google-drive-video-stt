@@ -18,6 +18,7 @@ def _write_token(path: Path, payload: dict | None = None) -> None:
         "client_id": "cid",
         "client_secret": "csec",
         "token_uri": "https://oauth2.googleapis.com/token",
+        "scopes": list(auth.SCOPES),
     }
     path.write_text(json.dumps(payload))
 
@@ -35,6 +36,7 @@ def test_load_credentials_returns_valid_creds(tmp_path, mocker):
     fake_creds.valid = True
     fake_creds.expired = False
     fake_creds.refresh_token = "refresh"
+    fake_creds.scopes = list(auth.SCOPES)
 
     from_file = mocker.patch(
         "src.auth.Credentials.from_authorized_user_file", return_value=fake_creds
@@ -54,6 +56,7 @@ def test_load_credentials_refreshes_expired(tmp_path, mocker):
     fake_creds.valid = False
     fake_creds.expired = True
     fake_creds.refresh_token = "refresh"
+    fake_creds.scopes = list(auth.SCOPES)
     fake_creds.to_json.return_value = '{"refreshed": true}'
 
     mocker.patch("src.auth.Credentials.from_authorized_user_file", return_value=fake_creds)
@@ -74,6 +77,7 @@ def test_load_credentials_refresh_error_raises(tmp_path, mocker):
     fake_creds.valid = False
     fake_creds.expired = True
     fake_creds.refresh_token = "refresh"
+    fake_creds.scopes = list(auth.SCOPES)
     fake_creds.refresh.side_effect = RefreshError("boom")
 
     mocker.patch("src.auth.Credentials.from_authorized_user_file", return_value=fake_creds)
@@ -104,11 +108,132 @@ def test_load_credentials_invalid_no_refresh_raises(tmp_path, mocker):
     fake_creds.valid = False
     fake_creds.expired = False
     fake_creds.refresh_token = None
+    fake_creds.scopes = list(auth.SCOPES)
 
     mocker.patch("src.auth.Credentials.from_authorized_user_file", return_value=fake_creds)
 
     with pytest.raises(auth.AuthError, match="invalid"):
         auth.load_credentials(tmp_path)
+
+
+def test_load_credentials_missing_scope_raises(tmp_path, mocker):
+    token_file = tmp_path / "token.json"
+    # Real google-auth reads scopes from the file when the caller passes
+    # scopes=None, but our loader passes scopes=SCOPES, which forces
+    # creds.scopes to mirror SCOPES regardless of saved scopes. The check
+    # therefore must inspect the file's "scopes" field directly.
+    _write_token(
+        token_file,
+        {
+            "token": "access",
+            "refresh_token": "refresh",
+            "client_id": "cid",
+            "client_secret": "csec",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "scopes": ["https://www.googleapis.com/auth/drive"],
+        },
+    )
+
+    # No need to mock from_authorized_user_file — the scope check fires before
+    # we attempt to construct a Credentials object.
+    with pytest.raises(auth.AuthError, match="missing required scopes"):
+        auth.load_credentials(tmp_path)
+
+
+def test_load_credentials_missing_scope_field_raises(tmp_path):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(
+        json.dumps(
+            {
+                "token": "access",
+                "refresh_token": "refresh",
+                "client_id": "cid",
+                "client_secret": "csec",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        )
+    )
+
+    with pytest.raises(auth.AuthError, match="missing required scopes"):
+        auth.load_credentials(tmp_path)
+
+
+def test_load_credentials_scopes_as_space_string(tmp_path, mocker):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(
+        json.dumps(
+            {
+                "token": "access",
+                "refresh_token": "refresh",
+                "client_id": "cid",
+                "client_secret": "csec",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "scopes": " ".join(auth.SCOPES),
+            }
+        )
+    )
+
+    fake_creds = MagicMock()
+    fake_creds.valid = True
+    fake_creds.expired = False
+    fake_creds.refresh_token = "refresh"
+    fake_creds.scopes = list(auth.SCOPES)
+
+    mocker.patch("src.auth.Credentials.from_authorized_user_file", return_value=fake_creds)
+
+    result = auth.load_credentials(tmp_path)
+    assert result is fake_creds
+
+
+def test_load_credentials_token_not_a_dict_raises(tmp_path):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(json.dumps([]))
+
+    with pytest.raises(auth.AuthError, match="expected a JSON object"):
+        auth.load_credentials(tmp_path)
+
+
+def test_load_credentials_scopes_wrong_type_raises(tmp_path):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(
+        json.dumps(
+            {
+                "token": "access",
+                "refresh_token": "refresh",
+                "client_id": "cid",
+                "client_secret": "csec",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "scopes": 42,
+            }
+        )
+    )
+
+    with pytest.raises(auth.AuthError, match="'scopes' must be a list or string"):
+        auth.load_credentials(tmp_path)
+
+
+def test_load_credentials_scopes_with_non_string_members_raises(tmp_path):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(
+        json.dumps(
+            {
+                "token": "access",
+                "refresh_token": "refresh",
+                "client_id": "cid",
+                "client_secret": "csec",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "scopes": [{}],
+            }
+        )
+    )
+
+    with pytest.raises(auth.AuthError, match="must contain only strings"):
+        auth.load_credentials(tmp_path)
+
+
+def test_scopes_includes_cloud_platform():
+    assert "https://www.googleapis.com/auth/cloud-platform" in auth.SCOPES
+    assert "https://www.googleapis.com/auth/drive" in auth.SCOPES
 
 
 def test_build_drive_service_uses_credentials(tmp_path, mocker):
@@ -158,7 +283,7 @@ def test_run_interactive_flow_writes_token(tmp_path, mocker):
     auth.run_interactive_flow(tmp_path)
 
     flow_cls.assert_called_once_with(str(creds_file), auth.SCOPES)
-    flow.run_local_server.assert_called_once_with(port=0)
+    flow.run_local_server.assert_called_once_with(port=0, open_browser=False)
     token_file = tmp_path / "token.json"
     assert token_file.read_text() == '{"new": "token"}'
     assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
@@ -172,6 +297,7 @@ def test_load_credentials_refresh_writes_token_with_secure_mode(tmp_path, mocker
     fake_creds.valid = False
     fake_creds.expired = True
     fake_creds.refresh_token = "refresh"
+    fake_creds.scopes = list(auth.SCOPES)
     fake_creds.to_json.return_value = '{"refreshed": true}'
 
     mocker.patch("src.auth.Credentials.from_authorized_user_file", return_value=fake_creds)
