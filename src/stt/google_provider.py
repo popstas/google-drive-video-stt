@@ -10,6 +10,19 @@ from src.stt.base import STTError, STTProvider
 logger = logging.getLogger(__name__)
 
 
+class _PollingTimeout(Exception):
+    """Internal sentinel: client-side polling timeout from operation.result()."""
+
+
+def _is_diarization_unsupported(exc: BaseException) -> bool:
+    """True when Google rejected the request because the recognizer doesn't
+    support speaker diarization for the requested language/model. Matches
+    substrings (case-insensitive) rather than the gRPC status type so we don't
+    have to import google.api_core.exceptions in tests that mock out the SDK."""
+    msg = str(exc).lower()
+    return "diarization" in msg and ("not support" in msg or "unsupported" in msg)
+
+
 class GoogleProvider(STTProvider):
     def __init__(
         self,
@@ -108,27 +121,25 @@ class GoogleProvider(STTProvider):
         blob = bucket.blob(blob_name)
         gcs_uri = f"gs://{self._bucket}/{blob_name}"
 
-        delete_blob = True
-        try:
-            logger.info("Uploading %s to %s", audio_path.name, gcs_uri)
-            blob.upload_from_filename(str(audio_path))
+        recognizer = f"projects/{self._project}/locations/global/recognizers/_"
 
-            speech_client = self._get_speech_client()
+        def _build_request(diarize: bool):
+            features_kwargs = dict(
+                enable_word_time_offsets=True,
+                enable_word_confidence=False,
+            )
+            if diarize:
+                features_kwargs["diarization_config"] = SpeakerDiarizationConfig(
+                    min_speaker_count=2,
+                    max_speaker_count=6,
+                )
             config = RecognitionConfig(
                 auto_decoding_config=AutoDetectDecodingConfig(),
                 language_codes=[self._language],
                 model="long",
-                features=RecognitionFeatures(
-                    enable_word_time_offsets=True,
-                    enable_word_confidence=False,
-                    diarization_config=SpeakerDiarizationConfig(
-                        min_speaker_count=2,
-                        max_speaker_count=6,
-                    ),
-                ),
+                features=RecognitionFeatures(**features_kwargs),
             )
-            recognizer = f"projects/{self._project}/locations/global/recognizers/_"
-            request = BatchRecognizeRequest(
+            return BatchRecognizeRequest(
                 recognizer=recognizer,
                 config=config,
                 files=[BatchRecognizeFileMetadata(uri=gcs_uri)],
@@ -138,32 +149,65 @@ class GoogleProvider(STTProvider):
                 processing_strategy=BatchRecognizeRequest.ProcessingStrategy.DYNAMIC_BATCHING,
             )
 
-            operation = None
+        delete_blob = True
+        try:
+            logger.info("Uploading %s to %s", audio_path.name, gcs_uri)
+            blob.upload_from_filename(str(audio_path))
+
+            speech_client = self._get_speech_client()
+
+            def _run(diarize: bool):
+                operation = None
+                try:
+                    operation = speech_client.batch_recognize(
+                        request=_build_request(diarize=diarize)
+                    )
+                    return operation.result(timeout=self._operation_timeout), None
+                except concurrent.futures.TimeoutError as exc:
+                    # Polling timeout is client-side only; the server-side batch
+                    # job may still be running and reading from the blob. Leave
+                    # the blob in place (and try to cancel the operation) so we
+                    # don't yank the input out from under a live job.
+                    if operation is not None:
+                        try:
+                            operation.cancel()
+                        except Exception:  # noqa: BLE001
+                            logger.warning(
+                                "Failed to cancel Google STT operation for %s",
+                                gcs_uri,
+                                exc_info=True,
+                            )
+                    raise _PollingTimeout(
+                        f"Google Cloud STT batch_recognize did not complete "
+                        f"within {self._operation_timeout}s; GCS blob "
+                        f"{gcs_uri} retained for manual cleanup"
+                    ) from exc
+
             try:
-                operation = speech_client.batch_recognize(request=request)
-                response = operation.result(timeout=self._operation_timeout)
-            except concurrent.futures.TimeoutError as exc:
-                # Polling timeout is client-side only; the server-side batch job
-                # may still be running and reading from the blob. Leave the blob
-                # in place (and try to cancel the operation) so we don't yank
-                # the input out from under a live job.
+                response, _ = _run(diarize=True)
+            except _PollingTimeout as exc:
                 delete_blob = False
-                if operation is not None:
-                    try:
-                        operation.cancel()
-                    except Exception:  # noqa: BLE001
-                        logger.warning(
-                            "Failed to cancel Google STT operation for %s",
-                            gcs_uri,
-                            exc_info=True,
-                        )
-                raise STTError(
-                    f"Google Cloud STT batch_recognize did not complete within "
-                    f"{self._operation_timeout}s; GCS blob {gcs_uri} retained "
-                    "for manual cleanup"
-                ) from exc
+                raise STTError(str(exc)) from exc
             except Exception as exc:
-                raise STTError(f"Google Cloud STT batch_recognize failed: {exc}") from exc
+                if _is_diarization_unsupported(exc):
+                    logger.warning(
+                        "Google STT recognizer does not support diarization for "
+                        "language %r; retrying without diarization",
+                        self._language,
+                    )
+                    try:
+                        response, _ = _run(diarize=False)
+                    except _PollingTimeout as exc2:
+                        delete_blob = False
+                        raise STTError(str(exc2)) from exc2
+                    except Exception as exc2:
+                        raise STTError(
+                            f"Google Cloud STT batch_recognize failed: {exc2}"
+                        ) from exc2
+                else:
+                    raise STTError(
+                        f"Google Cloud STT batch_recognize failed: {exc}"
+                    ) from exc
 
             return self._format_diarized(response, gcs_uri)
         finally:
@@ -218,18 +262,45 @@ class GoogleProvider(STTProvider):
             )
             return ""
 
+        results = list(getattr(transcript, "results", []) or [])
         words: list = []
-        for result in getattr(transcript, "results", []) or []:
+        any_speaker = False
+        for result in results:
             alternatives = getattr(result, "alternatives", []) or []
             if not alternatives:
                 continue
             for word in getattr(alternatives[0], "words", []) or []:
                 words.append(word)
+                sp = getattr(word, "speaker_label", None)
+                try:
+                    if sp is not None and sp != "" and int(sp) > 0:
+                        any_speaker = True
+                except (TypeError, ValueError):
+                    pass
 
         if not words:
             return ""
 
-        lines: list[str] = []
+        if not any_speaker:
+            # Diarization wasn't returned (unsupported language, or retry-without
+            # path): emit one timestamped line per result, no Speaker prefix.
+            lines: list[str] = []
+            for result in results:
+                alternatives = getattr(result, "alternatives", []) or []
+                if not alternatives:
+                    continue
+                alt_words = list(getattr(alternatives[0], "words", []) or [])
+                if not alt_words:
+                    continue
+                ts = _format_offset(getattr(alt_words[0], "start_offset", None))
+                text = " ".join(
+                    (getattr(w, "word", "") or "") for w in alt_words
+                ).strip()
+                if text:
+                    lines.append(f"[{ts}] {text}")
+            return "\n".join(lines)
+
+        lines = []
         current_speaker: int | None = None
         current_words: list[str] = []
         current_start = None

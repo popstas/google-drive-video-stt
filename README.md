@@ -90,6 +90,11 @@ Sample output:
 [00:00:05] Speaker 2: hi, glad to be here
 ```
 
+Diarization is supported only for a limited set of languages on the `long`
+model (mostly `en-*`). For unsupported languages (e.g. `ru-RU`), the provider
+automatically retries once without diarization and emits `[HH:MM:SS] <text>`
+lines (no `Speaker N:` prefix).
+
 ## Usage
 
 Local run (after `src/auth` has produced a token):

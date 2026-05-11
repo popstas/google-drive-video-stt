@@ -457,6 +457,122 @@ def test_polling_timeout_swallows_cancel_failure(mocker, tmp_path):
     mocks["blob"].delete.assert_not_called()
 
 
+def test_retries_without_diarization_when_unsupported(mocker, tmp_path):
+    """Real-world failure: ru-RU + long model rejects diarization. The provider
+    should retry once without diarization_config and emit timestamped lines
+    without the Speaker N: prefix."""
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+
+    mocker.patch("src.auth.load_credentials", return_value=MagicMock(name="creds"))
+    mocks = _install_fake_google_modules(mocker, None)
+
+    diar_error = RuntimeError(
+        "400 Config contains unsupported fields. "
+        "field: \"features.diarization_config\" "
+        "description: \"Recognizer does not support feature: speaker_diarization\""
+    )
+
+    # Words from the retry response have NO speaker_label (Google didn't run
+    # diarization on the second call).
+    no_speaker_words = [
+        _word("привет", None, 0),
+        _word("мир", None, 1),
+    ]
+
+    call_count = {"n": 0}
+
+    def _on_batch(request=None, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise diar_error
+        op = MagicMock()
+        op.result.return_value = _make_response(
+            no_speaker_words, _on_batch.captured_uri
+        )
+        return op
+
+    captured_blob = mocks["blob"]
+
+    def _capture_blob(name):
+        _on_batch.captured_uri = f"gs://b/{name}"
+        return captured_blob
+
+    mocks["bucket"].blob = MagicMock(side_effect=_capture_blob)
+    mocks["speech_client"].batch_recognize.side_effect = _on_batch
+
+    provider = GoogleProvider(
+        project="p", bucket="b", data_dir=tmp_path, language="ru-RU"
+    )
+    text = provider.transcribe_full(audio)
+
+    # Two attempts: first with diarization, second without.
+    assert call_count["n"] == 2
+    # Output is timestamped but has no Speaker prefix.
+    assert text == "[00:00:00] привет мир"
+    assert "Speaker" not in text
+    # Blob is still cleaned up.
+    captured_blob.delete.assert_called_once()
+    # Second RecognitionFeatures call has no diarization_config kwarg.
+    feat_calls = mocks["types"].RecognitionFeatures.call_args_list
+    assert len(feat_calls) == 2
+    assert "diarization_config" in feat_calls[0].kwargs
+    assert "diarization_config" not in feat_calls[1].kwargs
+
+
+def test_does_not_retry_on_unrelated_invalid_argument(mocker, tmp_path):
+    """A 400 that isn't about diarization must surface immediately, not retry."""
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+
+    mocker.patch("src.auth.load_credentials", return_value=MagicMock(name="creds"))
+    mocks = _install_fake_google_modules(
+        mocker, None, raise_on_recognize=RuntimeError("400 some other validation error")
+    )
+
+    provider = GoogleProvider(
+        project="p", bucket="b", data_dir=tmp_path, language="ru-RU"
+    )
+    with pytest.raises(STTError, match="some other validation error"):
+        provider.transcribe_full(audio)
+
+    assert mocks["speech_client"].batch_recognize.call_count == 1
+    mocks["blob"].delete.assert_called_once()
+
+
+def test_retry_failure_still_deletes_blob(mocker, tmp_path):
+    """If the retry-without-diarization also fails, the blob is still cleaned up."""
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+
+    mocker.patch("src.auth.load_credentials", return_value=MagicMock(name="creds"))
+    mocks = _install_fake_google_modules(mocker, None)
+
+    diar_error = RuntimeError(
+        "Recognizer does not support feature: speaker_diarization"
+    )
+    retry_error = RuntimeError("downstream quota exceeded")
+
+    call_count = {"n": 0}
+
+    def _on_batch(request=None, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise diar_error
+        raise retry_error
+
+    mocks["speech_client"].batch_recognize.side_effect = _on_batch
+
+    provider = GoogleProvider(
+        project="p", bucket="b", data_dir=tmp_path, language="ru-RU"
+    )
+    with pytest.raises(STTError, match="quota exceeded"):
+        provider.transcribe_full(audio)
+
+    assert call_count["n"] == 2
+    mocks["blob"].delete.assert_called_once()
+
+
 def test_transcribe_chunk_routes_to_full(mocker, tmp_path):
     audio = tmp_path / "a.mp3"
     audio.write_bytes(b"x")
