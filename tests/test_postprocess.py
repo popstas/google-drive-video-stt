@@ -88,6 +88,16 @@ def test_map_speakers_without_names_uses_speaker_labels():
     assert out == "Speaker 1: a\nSpeaker 2: b"
 
 
+def test_single_name_does_not_collapse_speakers():
+    # One extracted name must not flatten a two-party transcript into one speaker.
+    text = "Speaker 1: hi\nSpeaker 2: hello\nSpeaker 1: bye"
+    out = postprocess.map_speakers(text, ["Alice"])
+    lines = out.split("\n")
+    assert lines[0] == "Alice: hi"
+    assert lines[1] == "Speaker 2: hello"
+    assert lines[2] == "Alice: bye"
+
+
 def test_extra_speaker_merged_into_frequent_neighbor():
     # Speaker 3 is a single stray turn nested between Speaker 2's turns -> merge into 2.
     text = (

@@ -174,7 +174,10 @@ def map_speakers(text: str, names: list[str], *, expected: int | None = None) ->
             distinct.append(num)
 
     if expected is None:
-        expected = len(names) if names else 2
+        # Default to the common two-party case. A file name that yields a single
+        # name (e.g. "Alice - weekly.mp4" -> ["Alice"]) must not collapse a
+        # multi-speaker transcript into one speaker; floor the count at 2.
+        expected = max(2, len(names))
     expected = max(1, expected)
 
     word_counts: dict[int, int] = {}
