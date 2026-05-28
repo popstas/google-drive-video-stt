@@ -1,3 +1,4 @@
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,7 +9,12 @@ except ImportError:
     load_dotenv = None
 
 
-SUPPORTED_STT_PROVIDERS = ("", "openai", "google", "asr")
+SUPPORTED_STT_PROVIDERS = ("", "openai", "google", "asr", "deepgram")
+DEEPGRAM_DIARIZE_MODELS = ("latest", "v1")
+DEEPGRAM_AUDIO_SOURCES = ("m4a_copy", "mp3_96k", "mp3_192k")
+DEEPGRAM_TXT_FORMATTERS = ("word_speaker", "utterance")
+DEEPGRAM_DEFAULT_KEYTERMS_FILE = Path("config/deepgram-keyterms.txt")
+DEEPGRAM_MAX_KEYTERMS = 100
 
 
 @dataclass(frozen=True)
@@ -22,15 +28,89 @@ class Config:
     proxy_url: str
     stt_provider: str
     openai_api_key: str
+    deepgram_api_key: str
     google_cloud_project: str
     google_stt_gcs_bucket: str
     asr_url: str
     stt_language: str
     stt_chunk_seconds: int
+    deepgram_model: str = "nova-3"
+    deepgram_diarize_model: str = "latest"
+    deepgram_audio_source: str = "m4a_copy"
+    deepgram_txt_formatter: str = "word_speaker"
+    deepgram_keyterms_enabled: bool = True
+    deepgram_keyterms_file: Path = DEEPGRAM_DEFAULT_KEYTERMS_FILE
+    deepgram_keyterms: tuple[str, ...] = ()
 
 
 def _parse_folder_ids(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _load_deepgram_api_key(api_key: str, api_key_file: str) -> str:
+    api_key = api_key.strip()
+    if api_key:
+        return api_key
+
+    api_key_file = api_key_file.strip()
+    if not api_key_file:
+        return ""
+
+    path = Path(api_key_file)
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ValueError(f"DEEPGRAM_API_KEY_FILE could not be read: {path}") from exc
+    if not raw:
+        return ""
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+    if isinstance(parsed, str):
+        return parsed.strip()
+    if isinstance(parsed, dict):
+        for key in ("api_key", "deepgram_api_key", "DEEPGRAM_API_KEY"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+    return ""
+
+
+def _parse_bool(raw: str, *, default: bool) -> bool:
+    value = raw.strip().lower()
+    if not value:
+        return default
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Expected boolean value, got: {raw!r}")
+
+
+def _load_deepgram_keyterms(enabled: bool, keyterms_file: Path) -> tuple[str, ...]:
+    if not enabled:
+        return ()
+
+    try:
+        raw_lines = keyterms_file.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ValueError(f"DEEPGRAM_KEYTERMS_FILE could not be read: {keyterms_file}") from exc
+
+    keyterms = tuple(
+        line.strip()
+        for line in raw_lines
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+    if len(keyterms) > DEEPGRAM_MAX_KEYTERMS:
+        raise ValueError(
+            f"DEEPGRAM_KEYTERMS_FILE may contain at most {DEEPGRAM_MAX_KEYTERMS} "
+            f"keyterms, got: {len(keyterms)}"
+        )
+    return keyterms
 
 
 def load_config() -> Config:
@@ -56,12 +136,49 @@ def load_config() -> Config:
     if stt_provider not in SUPPORTED_STT_PROVIDERS:
         raise ValueError(
             f"STT_PROVIDER must be one of {SUPPORTED_STT_PROVIDERS!r}, got: {stt_provider!r}"
-        )
+    )
     openai_api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    deepgram_api_key = ""
+    deepgram_model = "nova-3"
+    deepgram_diarize_model = "latest"
+    deepgram_audio_source = "m4a_copy"
+    deepgram_txt_formatter = "word_speaker"
+    deepgram_keyterms_enabled = True
+    deepgram_keyterms_file = DEEPGRAM_DEFAULT_KEYTERMS_FILE
+    deepgram_keyterms: tuple[str, ...] = ()
+    if stt_provider == "deepgram":
+        deepgram_api_key = _load_deepgram_api_key(
+            os.environ.get("DEEPGRAM_API_KEY", ""),
+            os.environ.get("DEEPGRAM_API_KEY_FILE", ""),
+        )
+        deepgram_model = os.environ.get("DEEPGRAM_MODEL", "nova-3").strip() or "nova-3"
+        deepgram_diarize_model = (
+            os.environ.get("DEEPGRAM_DIARIZE_MODEL", "latest").strip().lower()
+            or "latest"
+        )
+        deepgram_audio_source = (
+            os.environ.get("DEEPGRAM_AUDIO_SOURCE", "m4a_copy").strip().lower()
+            or "m4a_copy"
+        )
+        deepgram_txt_formatter = (
+            os.environ.get("DEEPGRAM_TXT_FORMATTER", "word_speaker").strip().lower()
+            or "word_speaker"
+        )
+        deepgram_keyterms_enabled = _parse_bool(
+            os.environ.get("DEEPGRAM_KEYTERMS_ENABLED", ""),
+            default=True,
+        )
+        deepgram_keyterms_file = Path(
+            os.environ.get("DEEPGRAM_KEYTERMS_FILE", str(DEEPGRAM_DEFAULT_KEYTERMS_FILE))
+            .strip()
+            or str(DEEPGRAM_DEFAULT_KEYTERMS_FILE)
+        )
     google_cloud_project = os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
     google_stt_gcs_bucket = os.environ.get("GOOGLE_STT_GCS_BUCKET", "").strip()
     asr_url = os.environ.get("ASR_URL", "").strip()
     stt_language = os.environ.get("STT_LANGUAGE", "").strip()
+    if stt_provider == "deepgram" and not stt_language:
+        stt_language = "ru"
 
     chunk_raw = os.environ.get("STT_CHUNK_SECONDS", "600").strip() or "600"
     try:
@@ -77,6 +194,28 @@ def load_config() -> Config:
 
     if stt_provider == "openai" and not openai_api_key:
         raise ValueError("OPENAI_API_KEY is required when STT_PROVIDER=openai")
+    if stt_provider == "deepgram":
+        if not deepgram_api_key:
+            raise ValueError("DEEPGRAM_API_KEY is required when STT_PROVIDER=deepgram")
+        if deepgram_diarize_model not in DEEPGRAM_DIARIZE_MODELS:
+            raise ValueError(
+                f"DEEPGRAM_DIARIZE_MODEL must be one of {DEEPGRAM_DIARIZE_MODELS!r}, "
+                f"got: {deepgram_diarize_model!r}"
+            )
+        if deepgram_audio_source not in DEEPGRAM_AUDIO_SOURCES:
+            raise ValueError(
+                f"DEEPGRAM_AUDIO_SOURCE must be one of {DEEPGRAM_AUDIO_SOURCES!r}, "
+                f"got: {deepgram_audio_source!r}"
+            )
+        if deepgram_txt_formatter not in DEEPGRAM_TXT_FORMATTERS:
+            raise ValueError(
+                f"DEEPGRAM_TXT_FORMATTER must be one of {DEEPGRAM_TXT_FORMATTERS!r}, "
+                f"got: {deepgram_txt_formatter!r}"
+            )
+        deepgram_keyterms = _load_deepgram_keyterms(
+            deepgram_keyterms_enabled,
+            deepgram_keyterms_file,
+        )
     if stt_provider == "google":
         if not google_cloud_project:
             raise ValueError(
@@ -105,9 +244,17 @@ def load_config() -> Config:
         proxy_url=proxy_url,
         stt_provider=stt_provider,
         openai_api_key=openai_api_key,
+        deepgram_api_key=deepgram_api_key,
         google_cloud_project=google_cloud_project,
         google_stt_gcs_bucket=google_stt_gcs_bucket,
         asr_url=asr_url,
         stt_language=stt_language,
         stt_chunk_seconds=stt_chunk_seconds,
+        deepgram_model=deepgram_model,
+        deepgram_diarize_model=deepgram_diarize_model,
+        deepgram_audio_source=deepgram_audio_source,
+        deepgram_txt_formatter=deepgram_txt_formatter,
+        deepgram_keyterms_enabled=deepgram_keyterms_enabled,
+        deepgram_keyterms_file=deepgram_keyterms_file,
+        deepgram_keyterms=deepgram_keyterms,
     )

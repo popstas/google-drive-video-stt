@@ -12,7 +12,7 @@ from google.auth.exceptions import RefreshError
 from src import drive, notify
 from src.auth import AuthError, build_drive_service
 from src.config import Config, load_config
-from src.extractor import extract_mp3
+from src.extractor import extract_m4a_copy, extract_mp3
 from src.stt.transcribe import transcribe_file
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,16 @@ def _save_and_upload_txt(
     txt_path.write_text(text, encoding="utf-8")
     drive.upload(service, txt_path, folder_id, mime_type=drive.TXT_MIME)
     logger.info("Uploaded %s to folder %s", txt_name, folder_id)
+
+
+def _prepare_deepgram_audio(mp4_path: Path, config: Config) -> Path:
+    if config.deepgram_audio_source == "m4a_copy":
+        return extract_m4a_copy(mp4_path)
+    if config.deepgram_audio_source == "mp3_96k":
+        return extract_mp3(mp4_path, bitrate="96k")
+    if config.deepgram_audio_source == "mp3_192k":
+        return extract_mp3(mp4_path, bitrate="192k")
+    raise RuntimeError(f"Unknown Deepgram audio source: {config.deepgram_audio_source}")
 
 
 def process_item(service: Any, item: dict, folder_id: str, config: Config) -> None:
@@ -52,6 +62,7 @@ def process_item(service: Any, item: dict, folder_id: str, config: Config) -> No
 
     with tempfile.TemporaryDirectory(prefix="gd-stt-") as tmp:
         tmp_dir = Path(tmp)
+        mp4_path: Path | None = None
         mp3_path: Path | None = None
 
         if needs_mp3:
@@ -61,13 +72,20 @@ def process_item(service: Any, item: dict, folder_id: str, config: Config) -> No
             logger.info("Uploaded %s to folder %s", mp3_path.name, folder_id)
 
         if needs_txt:
-            if mp3_path is None:
+            if config.stt_provider == "deepgram":
+                if mp4_path is None:
+                    mp4_path = drive.download(service, file_id, tmp_dir, file_name)
+                stt_audio_path = _prepare_deepgram_audio(mp4_path, config)
+            elif mp3_path is None:
                 if not mp3_id or not mp3_name:
                     raise RuntimeError(
                         f"mp3 marked present for {file_name} but id/name missing"
                     )
                 mp3_path = drive.download(service, mp3_id, tmp_dir, mp3_name)
-            text = transcribe_file(mp3_path, config)
+                stt_audio_path = mp3_path
+            else:
+                stt_audio_path = mp3_path
+            text = transcribe_file(stt_audio_path, config)
             _save_and_upload_txt(service, file_name, text, folder_id, tmp_dir)
 
 

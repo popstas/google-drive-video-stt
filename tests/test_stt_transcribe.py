@@ -21,10 +21,11 @@ def _cfg(provider="openai") -> Config:
         proxy_url="",
         stt_provider=provider,
         openai_api_key="sk-x" if provider == "openai" else "",
+        deepgram_api_key="dg-x" if provider == "deepgram" else "",
         google_cloud_project="p" if provider == "google" else "",
         google_stt_gcs_bucket="b" if provider == "google" else "",
         asr_url="http://localhost:9000" if provider == "asr" else "",
-        stt_language="",
+        stt_language="ru" if provider == "deepgram" else "",
         stt_chunk_seconds=600,
     )
 
@@ -130,3 +131,65 @@ def test_transcribe_full_empty_string_is_returned_verbatim(mocker, tmp_path):
     assert result == ""
     chunk_mock.assert_not_called()
     provider.transcribe_chunk.assert_not_called()
+
+
+def test_transcribe_file_deepgram_full_file_skips_chunking(mocker, tmp_path):
+    mp3 = tmp_path / "a.mp3"
+    mp3.write_bytes(b"x")
+
+    chunk_mock = mocker.patch("src.stt.transcribe.chunk_mp3")
+    provider = MagicMock()
+    provider.transcribe_full.return_value = "[00:00:00] Speaker 1: привет"
+    mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
+
+    result = transcribe_mod.transcribe_file(mp3, _cfg(provider="deepgram"))
+
+    assert result == "[00:00:00] Speaker 1: привет"
+    provider.transcribe_full.assert_called_once_with(mp3)
+    chunk_mock.assert_not_called()
+    provider.transcribe_chunk.assert_not_called()
+
+
+def test_transcribe_file_logs_deepgram_cost(mocker, tmp_path, caplog):
+    mp3 = tmp_path / "a.mp3"
+    mp3.write_bytes(b"x")
+
+    provider = MagicMock()
+    provider.transcribe_full.return_value = "[00:00:00] Speaker 1: text"
+    provider.last_request_id = "request-1"
+    provider.last_duration_seconds = 12.5
+    mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
+    fetch_mock = mocker.patch(
+        "src.stt.transcribe.fetch_request_cost_usd",
+        return_value=0.012345,
+    )
+
+    with caplog.at_level("INFO"):
+        result = transcribe_mod.transcribe_file(mp3, _cfg(provider="deepgram"))
+
+    assert result == "[00:00:00] Speaker 1: text"
+    fetch_mock.assert_called_once_with(
+        "dg-x",
+        "request-1",
+        proxy_url="",
+    )
+    assert "Deepgram cost for a.mp3: $0.012345" in caplog.text
+    assert "duration=12.50s" in caplog.text
+
+
+def test_transcribe_file_logs_deepgram_cost_unavailable(mocker, tmp_path, caplog):
+    mp3 = tmp_path / "a.mp3"
+    mp3.write_bytes(b"x")
+
+    provider = MagicMock()
+    provider.transcribe_full.return_value = "[00:00:00] Speaker 1: text"
+    provider.last_request_id = "request-1"
+    provider.last_duration_seconds = None
+    mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
+    mocker.patch("src.stt.transcribe.fetch_request_cost_usd", return_value=None)
+
+    with caplog.at_level("INFO"):
+        transcribe_mod.transcribe_file(mp3, _cfg(provider="deepgram"))
+
+    assert "Deepgram cost unavailable yet for a.mp3" in caplog.text
+    assert "request_id=request-1" in caplog.text
