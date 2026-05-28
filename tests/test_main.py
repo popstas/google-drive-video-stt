@@ -77,7 +77,7 @@ def test_process_item_downloads_extracts_uploads(mocker, tmp_path):
 
     extract_mock.assert_called_once_with(mp4_path, bitrate="128k")
     upload_mock.assert_called_once_with(
-        service, mp3_path, "folderA", mime_type="audio/mpeg"
+        service, mp3_path, "folderA", mime_type="audio/mpeg", name="video.mp3"
     )
 
 
@@ -680,3 +680,37 @@ def test_main_notifies_on_cycle_exception(mocker):
 
     notify_mock.assert_called_once()
     assert "boom" in notify_mock.call_args.args[0]
+
+
+def test_process_item_preserves_slash_name_on_upload(mocker, tmp_path):
+    service = MagicMock()
+    cfg = make_config(stt_provider="openai", openai_api_key="sk-x")
+
+    captured = {}
+
+    def fake_download(svc, file_id, dest_dir, name):
+        # Drive name with "/" must become a filesystem-safe local temp file.
+        path = dest_dir / main.drive.safe_local_name(name)
+        path.write_bytes(b"x")
+        return path
+
+    def fake_extract(mp4_path, bitrate):
+        return mp4_path.with_suffix(".mp3")
+
+    def fake_upload(svc, local_path, folder, mime_type, name=None):
+        captured.setdefault("uploads", []).append((name, local_path.name, mime_type))
+
+    mocker.patch("src.main.drive.download", side_effect=fake_download)
+    mocker.patch("src.main.extract_mp3", side_effect=fake_extract)
+    mocker.patch("src.main.drive.upload", side_effect=fake_upload)
+    mocker.patch("src.main.transcribe_file", return_value="text")
+
+    item = _item("fid", "Call 2026/05/28 Rec.mp4")
+    main.process_item(service, item, "folderX", cfg)
+
+    uploads = dict((name, local) for name, local, _ in captured["uploads"])
+    # Drive upload names keep the original "/"; local temp names are sanitized.
+    assert "Call 2026/05/28 Rec.mp3" in uploads
+    assert "Call 2026/05/28 Rec.txt" in uploads
+    for drive_name, local_name in uploads.items():
+        assert "/" not in local_name

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,25 @@ MP3_MIME = "audio/mpeg"
 TXT_MIME = "text/plain"
 FOLDER_MIME = "application/vnd.google-apps.folder"
 PAGE_SIZE = 1000
+
+
+def drive_stem(name: str) -> str:
+    """Filename minus its extension, treating the Drive name as a flat string.
+
+    Drive names may contain ``/`` (Drive allows it in file names); ``Path(...).stem``
+    would treat that as a path separator and drop everything before the last ``/``.
+    ``os.path.splitext`` only splits on the final dot, so the full name is preserved.
+    """
+    return os.path.splitext(name)[0]
+
+
+def safe_local_name(name: str) -> str:
+    """Sanitize a Drive name into a filesystem-safe local filename.
+
+    Path separators and NULs in a Drive name would otherwise create unintended
+    subdirectories or path traversal when used as a local temp filename.
+    """
+    return name.replace("/", "_").replace("\\", "_").replace("\0", "_")
 
 
 def get_file_metadata(service: Any, file_id: str) -> dict:
@@ -59,10 +79,10 @@ def list_unprocessed_mp4(service: Any, folder_id: str) -> list[dict]:
     mp4_files = _list_files_by_mime(service, folder_id, MP4_MIME)
     mp3_files = _list_files_by_mime(service, folder_id, MP3_MIME)
 
-    mp3_basenames = {Path(f["name"]).stem for f in mp3_files}
+    mp3_basenames = {drive_stem(f["name"]) for f in mp3_files}
 
     unprocessed = [
-        f for f in mp4_files if Path(f["name"]).stem not in mp3_basenames
+        f for f in mp4_files if drive_stem(f["name"]) not in mp3_basenames
     ]
     return unprocessed
 
@@ -73,12 +93,12 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
     mp3_files = _list_files_by_mime(service, folder_id, MP3_MIME)
     txt_files = _list_files_by_mime(service, folder_id, TXT_MIME)
 
-    mp3_by_stem = {Path(f["name"]).stem: f for f in mp3_files}
-    txt_basenames = {Path(f["name"]).stem for f in txt_files}
+    mp3_by_stem = {drive_stem(f["name"]): f for f in mp3_files}
+    txt_basenames = {drive_stem(f["name"]) for f in txt_files}
 
     items: list[dict] = []
     for mp4 in mp4_files:
-        stem = Path(mp4["name"]).stem
+        stem = drive_stem(mp4["name"])
         mp3 = mp3_by_stem.get(stem)
         items.append({
             "file": mp4,
@@ -92,7 +112,7 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
 
 def download(service: Any, file_id: str, dest_dir: Path, file_name: str) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = Path(file_name).name
+    safe_name = safe_local_name(file_name)
     if not safe_name or safe_name in {".", ".."}:
         raise ValueError(f"Invalid file name from Drive: {file_name!r}")
     dest_path = dest_dir / safe_name
@@ -110,8 +130,14 @@ def download(service: Any, file_id: str, dest_dir: Path, file_name: str) -> Path
     return dest_path
 
 
-def upload(service: Any, local_path: Path, folder_id: str, mime_type: str = MP3_MIME) -> dict:
-    metadata = {"name": local_path.name, "parents": [folder_id]}
+def upload(
+    service: Any,
+    local_path: Path,
+    folder_id: str,
+    mime_type: str = MP3_MIME,
+    name: str | None = None,
+) -> dict:
+    metadata = {"name": name or local_path.name, "parents": [folder_id]}
     media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
     response = (
         service.files()

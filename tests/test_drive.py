@@ -260,3 +260,79 @@ def test_list_folder_state_returns_flags():
     assert by_id["v3"]["has_mp3"] is False
     assert by_id["v3"]["has_txt"] is False
     assert by_id["v3"]["mp3_id"] is None
+
+
+def test_drive_stem_preserves_slashes():
+    name = "Call - 2026/05/28 17:27 GMT+04:00 – Recording.mp4"
+    assert drive.drive_stem(name) == "Call - 2026/05/28 17:27 GMT+04:00 – Recording"
+
+
+def test_drive_stem_plain_name():
+    assert drive.drive_stem("video.mp4") == "video"
+
+
+def test_safe_local_name_replaces_separators():
+    name = "Call - 2026/05/28 – Recording.mp4"
+    safe = drive.safe_local_name(name)
+    assert "/" not in safe
+    assert safe == "Call - 2026_05_28 – Recording.mp4"
+
+
+def test_list_folder_state_matches_siblings_with_slashes():
+    mp4 = [{"id": "v1", "name": "Call 2026/05/28 Rec.mp4", "mimeType": "video/mp4"}]
+    mp3 = [{"id": "m1", "name": "Call 2026/05/28 Rec.mp3", "mimeType": "audio/mpeg"}]
+    txt = [{"id": "t1", "name": "Call 2026/05/28 Rec.txt", "mimeType": "text/plain"}]
+    service = _make_list_service({"mp4": mp4, "mp3": mp3, "txt": txt})
+
+    items = drive.list_folder_state(service, "folder1")
+
+    assert len(items) == 1
+    assert items[0]["has_mp3"] is True
+    assert items[0]["has_txt"] is True
+    assert items[0]["mp3_id"] == "m1"
+
+
+def test_list_unprocessed_mp4_matches_siblings_with_slashes():
+    mp4 = [
+        {"id": "a", "name": "A 2026/01/01.mp4", "mimeType": "video/mp4"},
+        {"id": "b", "name": "B 2026/02/02.mp4", "mimeType": "video/mp4"},
+    ]
+    mp3 = [{"id": "c", "name": "A 2026/01/01.mp3", "mimeType": "audio/mpeg"}]
+    service = _make_list_service({"mp4": mp4, "mp3": mp3})
+
+    result = drive.list_unprocessed_mp4(service, "folder1")
+
+    assert [f["id"] for f in result] == ["b"]
+
+
+def test_download_sanitizes_slash_name(tmp_path, mocker):
+    service = MagicMock()
+    service.files.return_value.get_media.return_value = MagicMock()
+
+    def make_downloader(fh, _request):
+        downloader = MagicMock()
+        downloader.next_chunk.return_value = (None, True)
+        return downloader
+
+    mocker.patch("src.drive.MediaIoBaseDownload", side_effect=make_downloader)
+
+    path = drive.download(service, "fid", tmp_path, "Call 2026/05/28 Rec.mp4")
+
+    # No characters dropped, no unintended subdirectory created from the "/".
+    assert path.parent == tmp_path
+    assert path.name == "Call 2026_05_28 Rec.mp4"
+    assert path.exists()
+
+
+def test_upload_explicit_name_overrides_local_name(tmp_path, mocker):
+    local = tmp_path / "Call 2026_05_28 Rec.mp3"
+    local.write_bytes(b"abc")
+
+    service = MagicMock()
+    service.files.return_value.create.return_value.execute.return_value = {"id": "x"}
+    mocker.patch("src.drive.MediaFileUpload", return_value="media")
+
+    drive.upload(service, local, "fld", drive.MP3_MIME, name="Call 2026/05/28 Rec.mp3")
+
+    create_kwargs = service.files.return_value.create.call_args.kwargs
+    assert create_kwargs["body"]["name"] == "Call 2026/05/28 Rec.mp3"

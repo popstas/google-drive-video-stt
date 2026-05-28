@@ -21,11 +21,14 @@ logger = logging.getLogger(__name__)
 def _save_and_upload_txt(
     service: Any, mp4_name: str, text: str, folder_id: str, tmp_dir: Path,
 ) -> None:
-    txt_name = Path(mp4_name).stem + ".txt"
-    txt_path = tmp_dir / txt_name
+    # Drive names may contain "/"; keep the original stem for the uploaded name but
+    # sanitize the local temp filename so it stays filesystem-safe.
+    stem = drive.drive_stem(mp4_name)
+    drive_txt_name = stem + ".txt"
+    txt_path = tmp_dir / (drive.safe_local_name(stem) + ".txt")
     txt_path.write_text(text, encoding="utf-8")
-    drive.upload(service, txt_path, folder_id, mime_type=drive.TXT_MIME)
-    logger.info("Uploaded %s to folder %s", txt_name, folder_id)
+    drive.upload(service, txt_path, folder_id, mime_type=drive.TXT_MIME, name=drive_txt_name)
+    logger.info("Uploaded %s to folder %s", drive_txt_name, folder_id)
 
 
 def _prepare_deepgram_audio(mp4_path: Path, config: Config) -> Path:
@@ -68,8 +71,11 @@ def process_item(service: Any, item: dict, folder_id: str, config: Config) -> No
         if needs_mp3:
             mp4_path = drive.download(service, file_id, tmp_dir, file_name)
             mp3_path = extract_mp3(mp4_path, bitrate=config.bitrate)
-            drive.upload(service, mp3_path, folder_id, mime_type=drive.MP3_MIME)
-            logger.info("Uploaded %s to folder %s", mp3_path.name, folder_id)
+            mp3_drive_name = drive.drive_stem(file_name) + ".mp3"
+            drive.upload(
+                service, mp3_path, folder_id, mime_type=drive.MP3_MIME, name=mp3_drive_name
+            )
+            logger.info("Uploaded %s to folder %s", mp3_drive_name, folder_id)
 
         if needs_txt:
             if config.stt_provider == "deepgram":

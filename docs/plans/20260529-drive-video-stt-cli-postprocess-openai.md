@@ -78,12 +78,12 @@ dropped characters in output filenames, and a new OpenAI-based transcription/key
 
 ### Task 3: Fix dropped characters in output filenames
 
-- [ ] Reproduce the bug: a Drive name containing `/` (e.g. `... - 2026/05/28 17:27 GMT+04:00 – Recording.mp4`) yields siblings missing everything before the last `/`
-- [ ] Replace `Path(...).stem` / `.name` usage on Drive names with `os.path.splitext` (string-based) in `src/drive.py` and `src/main.py`
-- [ ] Decouple local temp filenames from the uploaded Drive name so temp paths stay filesystem-safe while uploads keep the original name + correct extension
-- [ ] Verify sibling-presence detection (`list_folder_state`) still matches by the correct basename after the fix
-- [ ] write tests covering Drive names with `/` and other path-like characters (no characters dropped; correct sibling naming)
-- [ ] run project tests - must pass before next task
+- [x] Reproduce the bug: a Drive name containing `/` (e.g. `... - 2026/05/28 17:27 GMT+04:00 – Recording.mp4`) yields siblings missing everything before the last `/`
+- [x] Replace `Path(...).stem` / `.name` usage on Drive names with `os.path.splitext` (string-based) in `src/drive.py` and `src/main.py`
+- [x] Decouple local temp filenames from the uploaded Drive name so temp paths stay filesystem-safe while uploads keep the original name + correct extension
+- [x] Verify sibling-presence detection (`list_folder_state`) still matches by the correct basename after the fix
+- [x] write tests covering Drive names with `/` and other path-like characters (no characters dropped; correct sibling naming)
+- [x] run project tests - must pass before next task
 
 ### Task 4: Add transcript post-processing and speaker mapping
 
