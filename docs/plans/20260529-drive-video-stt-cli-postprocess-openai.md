@@ -70,11 +70,11 @@ dropped characters in output filenames, and a new OpenAI-based transcription/key
 
 ### Task 2: Add a project skill documenting all CLI capabilities
 
-- [ ] Create the project skill describing every CLI command, its arguments, and example invocations
-- [ ] Document required/optional env vars and provider-specific configuration referenced by each command
-- [ ] Keep the skill in sync with the actual command surface implemented in Task 1
-- [ ] write tests or a doc/CLI consistency check where practical (e.g. assert documented commands match registered subcommands)
-- [ ] run project tests - must pass before next task
+- [x] Create the project skill describing every CLI command, its arguments, and example invocations
+- [x] Document required/optional env vars and provider-specific configuration referenced by each command
+- [x] Keep the skill in sync with the actual command surface implemented in Task 1
+- [x] write tests or a doc/CLI consistency check where practical (e.g. assert documented commands match registered subcommands)
+- [x] run project tests - must pass before next task
 
 ### Task 3: Fix dropped characters in output filenames
 
