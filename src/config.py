@@ -34,6 +34,7 @@ class Config:
     asr_url: str
     stt_language: str
     stt_chunk_seconds: int
+    stt_postprocess: bool = True
     deepgram_model: str = "nova-3"
     deepgram_diarize_model: str = "latest"
     deepgram_audio_source: str = "m4a_copy"
@@ -180,6 +181,10 @@ def load_config() -> Config:
     if stt_provider == "deepgram" and not stt_language:
         stt_language = "ru"
 
+    stt_postprocess = _parse_bool(
+        os.environ.get("STT_POSTPROCESS", ""), default=True
+    )
+
     chunk_raw = os.environ.get("STT_CHUNK_SECONDS", "600").strip() or "600"
     try:
         stt_chunk_seconds = int(chunk_raw)
@@ -250,6 +255,7 @@ def load_config() -> Config:
         asr_url=asr_url,
         stt_language=stt_language,
         stt_chunk_seconds=stt_chunk_seconds,
+        stt_postprocess=stt_postprocess,
         deepgram_model=deepgram_model,
         deepgram_diarize_model=deepgram_diarize_model,
         deepgram_audio_source=deepgram_audio_source,

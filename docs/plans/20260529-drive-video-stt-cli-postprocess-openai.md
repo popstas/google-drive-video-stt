@@ -87,13 +87,13 @@ dropped characters in output filenames, and a new OpenAI-based transcription/key
 
 ### Task 4: Add transcript post-processing and speaker mapping
 
-- [ ] Add a post-processing step that runs after STT produces the transcript
-- [ ] Clean up the raw transcript into a final transcript
-- [ ] Extract the 2 interlocutor names from the video filename and map them to `Speaker N`
-- [ ] When more speakers appear than expected (only 2 interlocutors), decide which real speaker each extra one should be merged into
-- [ ] Overwrite the original `.txt` on Google Drive with the final transcript
-- [ ] write tests for name extraction, speaker mapping, extra-speaker merging, and the Drive overwrite path (mock Drive)
-- [ ] run project tests - must pass before next task
+- [x] Add a post-processing step that runs after STT produces the transcript
+- [x] Clean up the raw transcript into a final transcript
+- [x] Extract the 2 interlocutor names from the video filename and map them to `Speaker N`
+- [x] When more speakers appear than expected (only 2 interlocutors), decide which real speaker each extra one should be merged into
+- [x] Overwrite the original `.txt` on Google Drive with the final transcript
+- [x] write tests for name extraction, speaker mapping, extra-speaker merging, and the Drive overwrite path (mock Drive)
+- [x] run project tests - must pass before next task
 
 ### Task 5: Add an OpenAI transcription/keypoints pipeline
 

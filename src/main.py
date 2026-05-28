@@ -9,7 +9,7 @@ from typing import Any
 
 from google.auth.exceptions import RefreshError
 
-from src import drive, notify
+from src import drive, notify, postprocess
 from src.auth import AuthError, build_drive_service
 from src.config import Config, load_config
 from src.extractor import extract_m4a_copy, extract_mp3
@@ -19,7 +19,13 @@ logger = logging.getLogger(__name__)
 
 
 def _save_and_upload_txt(
-    service: Any, mp4_name: str, text: str, folder_id: str, tmp_dir: Path,
+    service: Any,
+    mp4_name: str,
+    text: str,
+    folder_id: str,
+    tmp_dir: Path,
+    *,
+    txt_id: str | None = None,
 ) -> None:
     # Drive names may contain "/"; keep the original stem for the uploaded name but
     # sanitize the local temp filename so it stays filesystem-safe.
@@ -27,8 +33,15 @@ def _save_and_upload_txt(
     drive_txt_name = stem + ".txt"
     txt_path = tmp_dir / (drive.safe_local_name(stem) + ".txt")
     txt_path.write_text(text, encoding="utf-8")
-    drive.upload(service, txt_path, folder_id, mime_type=drive.TXT_MIME, name=drive_txt_name)
-    logger.info("Uploaded %s to folder %s", drive_txt_name, folder_id)
+    if txt_id:
+        # Overwrite the existing sibling .txt in place rather than creating a duplicate.
+        drive.update_file(service, txt_id, txt_path, mime_type=drive.TXT_MIME)
+        logger.info("Overwrote %s (id=%s) in folder %s", drive_txt_name, txt_id, folder_id)
+    else:
+        drive.upload(
+            service, txt_path, folder_id, mime_type=drive.TXT_MIME, name=drive_txt_name
+        )
+        logger.info("Uploaded %s to folder %s", drive_txt_name, folder_id)
 
 
 def _prepare_deepgram_audio(mp4_path: Path, config: Config) -> Path:
@@ -92,7 +105,12 @@ def process_item(service: Any, item: dict, folder_id: str, config: Config) -> No
             else:
                 stt_audio_path = mp3_path
             text = transcribe_file(stt_audio_path, config)
-            _save_and_upload_txt(service, file_name, text, folder_id, tmp_dir)
+            if config.stt_postprocess:
+                text = postprocess.postprocess_transcript(text, file_name)
+            _save_and_upload_txt(
+                service, file_name, text, folder_id, tmp_dir,
+                txt_id=item.get("txt_id"),
+            )
 
 
 def _pending_items(items: list[dict], config: Config) -> list[dict]:

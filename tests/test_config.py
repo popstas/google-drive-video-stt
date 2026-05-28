@@ -15,6 +15,7 @@ ENV_VARS = [
     "STT_PROVIDER",
     "STT_LANGUAGE",
     "STT_CHUNK_SECONDS",
+    "STT_POSTPROCESS",
     "OPENAI_API_KEY",
     "DEEPGRAM_API_KEY",
     "DEEPGRAM_API_KEY_FILE",
@@ -49,6 +50,13 @@ def test_defaults_when_no_env(monkeypatch):
     assert cfg.stt_provider == ""
     assert cfg.stt_chunk_seconds == 600
     assert cfg.stt_language == ""
+    assert cfg.stt_postprocess is True
+
+
+def test_stt_postprocess_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("STT_POSTPROCESS", "false")
+    cfg = load_config()
+    assert cfg.stt_postprocess is False
 
 
 def test_parses_single_folder_id(monkeypatch):

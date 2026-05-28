@@ -25,6 +25,7 @@ def make_config(
     stt_language="",
     stt_chunk_seconds=600,
     deepgram_audio_source="m4a_copy",
+    stt_postprocess=False,
 ) -> Config:
     return Config(
         folder_ids=folder_ids if folder_ids is not None else ["folderA"],
@@ -42,17 +43,22 @@ def make_config(
         asr_url=asr_url,
         stt_language=stt_language,
         stt_chunk_seconds=stt_chunk_seconds,
+        stt_postprocess=stt_postprocess,
         deepgram_audio_source=deepgram_audio_source,
     )
 
 
-def _item(file_id="fid", name="video.mp4", *, has_mp3=False, has_txt=False, mp3_id=None, mp3_name=None):
+def _item(
+    file_id="fid", name="video.mp4", *, has_mp3=False, has_txt=False,
+    mp3_id=None, mp3_name=None, txt_id=None,
+):
     return {
         "file": {"id": file_id, "name": name},
         "has_mp3": has_mp3,
         "has_txt": has_txt,
         "mp3_id": mp3_id,
         "mp3_name": mp3_name,
+        "txt_id": txt_id,
     }
 
 
@@ -714,3 +720,56 @@ def test_process_item_preserves_slash_name_on_upload(mocker, tmp_path):
     assert "Call 2026/05/28 Rec.txt" in uploads
     for drive_name, local_name in uploads.items():
         assert "/" not in local_name
+
+
+def test_save_and_upload_txt_creates_when_no_txt_id(mocker, tmp_path):
+    service = MagicMock()
+    upload_mock = mocker.patch("src.main.drive.upload")
+    update_mock = mocker.patch("src.main.drive.update_file")
+
+    main._save_and_upload_txt(service, "video.mp4", "hello", "folderA", tmp_path)
+
+    update_mock.assert_not_called()
+    upload_mock.assert_called_once()
+    assert upload_mock.call_args.kwargs["name"] == "video.txt"
+
+
+def test_save_and_upload_txt_overwrites_existing(mocker, tmp_path):
+    service = MagicMock()
+    upload_mock = mocker.patch("src.main.drive.upload")
+    update_mock = mocker.patch("src.main.drive.update_file")
+
+    main._save_and_upload_txt(
+        service, "video.mp4", "final text", "folderA", tmp_path, txt_id="t1",
+    )
+
+    upload_mock.assert_not_called()
+    update_mock.assert_called_once()
+    args = update_mock.call_args.args
+    assert args[1] == "t1"
+    assert args[2].read_text(encoding="utf-8") == "final text"
+
+
+def test_process_item_postprocesses_transcript_before_upload(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    captured = {}
+
+    def fake_upload(svc, local_path, folder, mime_type, name=None):
+        if mime_type == "text/plain":
+            captured["txt"] = local_path.read_text(encoding="utf-8")
+
+    mocker.patch("src.main.drive.upload", side_effect=fake_upload)
+    mocker.patch(
+        "src.main.transcribe_file",
+        return_value="Speaker 1: hi there\nSpeaker 2: hello back",
+    )
+
+    cfg = make_config(stt_provider="openai", openai_api_key="sk-x", stt_postprocess=True)
+    main.process_item(service, _item("fid", "Alice and Bob.mp4"), "f", cfg)
+
+    assert captured["txt"] == "Alice: hi there\nBob: hello back"

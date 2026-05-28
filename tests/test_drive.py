@@ -211,6 +211,44 @@ def test_upload_accepts_custom_mime_type(tmp_path, mocker):
     media_cls.assert_called_once_with(str(local), mimetype="video/mp4", resumable=True)
 
 
+def test_update_file_overwrites_in_place(tmp_path, mocker):
+    local = tmp_path / "video.txt"
+    local.write_text("final transcript", encoding="utf-8")
+
+    service = MagicMock()
+    update_request = MagicMock()
+    update_request.execute.return_value = {"id": "t1", "name": "video.txt"}
+    service.files.return_value.update.return_value = update_request
+
+    media_cls = mocker.patch("src.drive.MediaFileUpload", return_value="media-obj")
+
+    result = drive.update_file(service, "t1", local)
+
+    assert result == {"id": "t1", "name": "video.txt"}
+    media_cls.assert_called_once_with(str(local), mimetype="text/plain", resumable=True)
+    service.files.return_value.update.assert_called_once_with(
+        fileId="t1",
+        media_body="media-obj",
+        fields="id, name",
+        supportsAllDrives=True,
+    )
+
+
+def test_list_folder_state_includes_txt_id():
+    mp4 = [
+        {"id": "v1", "name": "a.mp4", "mimeType": "video/mp4"},
+        {"id": "v2", "name": "b.mp4", "mimeType": "video/mp4"},
+    ]
+    txt = [{"id": "t1", "name": "a.txt", "mimeType": "text/plain"}]
+    service = _make_list_service({"mp4": mp4, "mp3": [], "txt": txt})
+
+    items = drive.list_folder_state(service, "folder1")
+
+    by_id = {it["file"]["id"]: it for it in items}
+    assert by_id["v1"]["txt_id"] == "t1"
+    assert by_id["v2"]["txt_id"] is None
+
+
 def test_get_file_metadata_requests_expected_fields():
     service = MagicMock()
     get_request = MagicMock()

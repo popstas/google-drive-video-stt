@@ -94,18 +94,20 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
     txt_files = _list_files_by_mime(service, folder_id, TXT_MIME)
 
     mp3_by_stem = {drive_stem(f["name"]): f for f in mp3_files}
-    txt_basenames = {drive_stem(f["name"]) for f in txt_files}
+    txt_by_stem = {drive_stem(f["name"]): f for f in txt_files}
 
     items: list[dict] = []
     for mp4 in mp4_files:
         stem = drive_stem(mp4["name"])
         mp3 = mp3_by_stem.get(stem)
+        txt = txt_by_stem.get(stem)
         items.append({
             "file": mp4,
             "has_mp3": mp3 is not None,
-            "has_txt": stem in txt_basenames,
+            "has_txt": txt is not None,
             "mp3_id": mp3["id"] if mp3 else None,
             "mp3_name": mp3["name"] if mp3 else None,
+            "txt_id": txt["id"] if txt else None,
         })
     return items
 
@@ -145,6 +147,27 @@ def upload(
             body=metadata,
             media_body=media,
             fields="id, name, parents",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
+    return response
+
+
+def update_file(
+    service: Any,
+    file_id: str,
+    local_path: Path,
+    mime_type: str = TXT_MIME,
+) -> dict:
+    """Overwrite an existing Drive file's content in place (keeps id and name)."""
+    media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
+    response = (
+        service.files()
+        .update(
+            fileId=file_id,
+            media_body=media,
+            fields="id, name",
             supportsAllDrives=True,
         )
         .execute()
