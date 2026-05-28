@@ -97,13 +97,13 @@ dropped characters in output filenames, and a new OpenAI-based transcription/key
 
 ### Task 5: Add an OpenAI transcription/keypoints pipeline
 
-- [ ] Study the `keypoints-transcription` skill at `/home/popstas/projects/text/obsidian/ExpertizeMe/.claude/skills/keypoints-transcription` and base the pipeline + prompt on it
-- [ ] Add config: `openai_api_key`, `proxy_url`, model `gpt-5.4-mini` (wire into `load_config()` / `Config` with validation)
-- [ ] Implement the pipeline using the modern OpenAI Responses API (optionally the OpenAI Agents SDK so the agent can run the Python scripts referenced in the skill)
-- [ ] Integrate as an STT/post-processing provider path consistent with the existing `src/stt/` provider dispatch
-- [ ] Add batch-mode support (≈50% cost reduction) where applicable, behind config
-- [ ] write tests mocking the OpenAI API (no network) covering the pipeline and batch vs non-batch paths
-- [ ] run project tests - must pass before next task
+- [x] Study the `keypoints-transcription` skill at `/home/popstas/projects/text/obsidian/ExpertizeMe/.claude/skills/keypoints-transcription` and base the pipeline + prompt on it
+- [x] Add config: `openai_api_key`, `proxy_url`, model `gpt-5.4-mini` (wire into `load_config()` / `Config` with validation)
+- [x] Implement the pipeline using the modern OpenAI Responses API (optionally the OpenAI Agents SDK so the agent can run the Python scripts referenced in the skill)
+- [x] Integrate as an STT/post-processing provider path consistent with the existing `src/stt/` provider dispatch
+- [x] Add batch-mode support (≈50% cost reduction) where applicable, behind config
+- [x] write tests mocking the OpenAI API (no network) covering the pipeline and batch vs non-batch paths
+- [x] run project tests - must pass before next task
 
 ### Task 6: Verify acceptance criteria
 

@@ -17,6 +17,9 @@ ENV_VARS = [
     "STT_CHUNK_SECONDS",
     "STT_POSTPROCESS",
     "OPENAI_API_KEY",
+    "OPENAI_MODEL",
+    "OPENAI_POSTPROCESS",
+    "OPENAI_BATCH",
     "DEEPGRAM_API_KEY",
     "DEEPGRAM_API_KEY_FILE",
     "DEEPGRAM_MODEL",
@@ -57,6 +60,40 @@ def test_stt_postprocess_can_be_disabled(monkeypatch):
     monkeypatch.setenv("STT_POSTPROCESS", "false")
     cfg = load_config()
     assert cfg.stt_postprocess is False
+
+
+def test_openai_pipeline_defaults(monkeypatch):
+    cfg = load_config()
+    assert cfg.openai_model == "gpt-5.4-mini"
+    assert cfg.openai_postprocess is False
+    assert cfg.openai_batch is False
+
+
+def test_openai_postprocess_requires_api_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_POSTPROCESS", "true")
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        load_config()
+
+
+def test_openai_postprocess_with_api_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_POSTPROCESS", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
+    monkeypatch.setenv("OPENAI_BATCH", "true")
+    cfg = load_config()
+    assert cfg.openai_postprocess is True
+    assert cfg.openai_api_key == "sk-test"
+    assert cfg.openai_model == "gpt-5.4"
+    assert cfg.openai_batch is True
+
+
+def test_openai_postprocess_enabled_without_stt_provider(monkeypatch):
+    # OPENAI_POSTPROCESS is independent of STT_PROVIDER selection.
+    monkeypatch.setenv("OPENAI_POSTPROCESS", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    cfg = load_config()
+    assert cfg.stt_provider == ""
+    assert cfg.openai_postprocess is True
 
 
 def test_parses_single_folder_id(monkeypatch):

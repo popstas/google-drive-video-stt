@@ -35,6 +35,9 @@ class Config:
     stt_language: str
     stt_chunk_seconds: int
     stt_postprocess: bool = True
+    openai_model: str = "gpt-5.4-mini"
+    openai_postprocess: bool = False
+    openai_batch: bool = False
     deepgram_model: str = "nova-3"
     deepgram_diarize_model: str = "latest"
     deepgram_audio_source: str = "m4a_copy"
@@ -185,6 +188,12 @@ def load_config() -> Config:
         os.environ.get("STT_POSTPROCESS", ""), default=True
     )
 
+    openai_model = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini").strip() or "gpt-5.4-mini"
+    openai_postprocess = _parse_bool(
+        os.environ.get("OPENAI_POSTPROCESS", ""), default=False
+    )
+    openai_batch = _parse_bool(os.environ.get("OPENAI_BATCH", ""), default=False)
+
     chunk_raw = os.environ.get("STT_CHUNK_SECONDS", "600").strip() or "600"
     try:
         stt_chunk_seconds = int(chunk_raw)
@@ -199,6 +208,8 @@ def load_config() -> Config:
 
     if stt_provider == "openai" and not openai_api_key:
         raise ValueError("OPENAI_API_KEY is required when STT_PROVIDER=openai")
+    if openai_postprocess and not openai_api_key:
+        raise ValueError("OPENAI_API_KEY is required when OPENAI_POSTPROCESS is enabled")
     if stt_provider == "deepgram":
         if not deepgram_api_key:
             raise ValueError("DEEPGRAM_API_KEY is required when STT_PROVIDER=deepgram")
@@ -256,6 +267,9 @@ def load_config() -> Config:
         stt_language=stt_language,
         stt_chunk_seconds=stt_chunk_seconds,
         stt_postprocess=stt_postprocess,
+        openai_model=openai_model,
+        openai_postprocess=openai_postprocess,
+        openai_batch=openai_batch,
         deepgram_model=deepgram_model,
         deepgram_diarize_model=deepgram_diarize_model,
         deepgram_audio_source=deepgram_audio_source,

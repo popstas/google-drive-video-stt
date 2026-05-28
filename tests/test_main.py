@@ -26,6 +26,7 @@ def make_config(
     stt_chunk_seconds=600,
     deepgram_audio_source="m4a_copy",
     stt_postprocess=False,
+    openai_postprocess=False,
 ) -> Config:
     return Config(
         folder_ids=folder_ids if folder_ids is not None else ["folderA"],
@@ -44,6 +45,7 @@ def make_config(
         stt_language=stt_language,
         stt_chunk_seconds=stt_chunk_seconds,
         stt_postprocess=stt_postprocess,
+        openai_postprocess=openai_postprocess,
         deepgram_audio_source=deepgram_audio_source,
     )
 
@@ -773,3 +775,36 @@ def test_process_item_postprocesses_transcript_before_upload(mocker, tmp_path):
     main.process_item(service, _item("fid", "Alice and Bob.mp4"), "f", cfg)
 
     assert captured["txt"] == "Alice: hi there\nBob: hello back"
+
+
+def test_process_item_openai_postprocess_replaces_deterministic(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    captured = {}
+
+    def fake_upload(svc, local_path, folder, mime_type, name=None):
+        if mime_type == "text/plain":
+            captured["txt"] = local_path.read_text(encoding="utf-8")
+
+    mocker.patch("src.main.drive.upload", side_effect=fake_upload)
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    refine_mock = mocker.patch(
+        "src.main.openai_pipeline.refine_transcript", return_value="Alice: hi"
+    )
+    pp_mock = mocker.patch("src.main.postprocess.postprocess_transcript")
+
+    cfg = make_config(
+        stt_provider="openai",
+        openai_api_key="sk-x",
+        stt_postprocess=True,
+        openai_postprocess=True,
+    )
+    main.process_item(service, _item("fid", "Alice and Bob.mp4"), "f", cfg)
+
+    assert captured["txt"] == "Alice: hi"
+    refine_mock.assert_called_once()
+    pp_mock.assert_not_called()

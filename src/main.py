@@ -9,7 +9,7 @@ from typing import Any
 
 from google.auth.exceptions import RefreshError
 
-from src import drive, notify, postprocess
+from src import drive, notify, openai_pipeline, postprocess
 from src.auth import AuthError, build_drive_service
 from src.config import Config, load_config
 from src.extractor import extract_m4a_copy, extract_mp3
@@ -105,7 +105,9 @@ def process_item(service: Any, item: dict, folder_id: str, config: Config) -> No
             else:
                 stt_audio_path = mp3_path
             text = transcribe_file(stt_audio_path, config)
-            if config.stt_postprocess:
+            if config.openai_postprocess:
+                text = openai_pipeline.refine_transcript(text, file_name, config)
+            elif config.stt_postprocess:
                 text = postprocess.postprocess_transcript(text, file_name)
             _save_and_upload_txt(
                 service, file_name, text, folder_id, tmp_dir,
