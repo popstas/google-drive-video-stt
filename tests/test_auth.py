@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -9,6 +10,14 @@ import pytest
 from google.auth.exceptions import RefreshError
 
 from src import auth
+
+
+def _assert_secure_token_mode(path: Path) -> None:
+    # Windows does not expose POSIX owner-only permission bits through st_mode.
+    if os.name == "nt":
+        assert path.exists()
+        return
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def _write_token(path: Path, payload: dict | None = None) -> None:
@@ -286,7 +295,7 @@ def test_run_interactive_flow_writes_token(tmp_path, mocker):
     flow.run_local_server.assert_called_once_with(port=0, open_browser=False)
     token_file = tmp_path / "token.json"
     assert token_file.read_text() == '{"new": "token"}'
-    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+    _assert_secure_token_mode(token_file)
 
 
 def test_load_credentials_refresh_writes_token_with_secure_mode(tmp_path, mocker):
@@ -305,4 +314,4 @@ def test_load_credentials_refresh_writes_token_with_secure_mode(tmp_path, mocker
 
     auth.load_credentials(tmp_path)
 
-    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+    _assert_secure_token_mode(token_file)

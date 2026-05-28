@@ -18,11 +18,13 @@ def make_config(
     data_dir=Path("data"),
     stt_provider="",
     openai_api_key="",
+    deepgram_api_key="",
     google_cloud_project="",
     google_stt_gcs_bucket="",
     asr_url="",
     stt_language="",
     stt_chunk_seconds=600,
+    deepgram_audio_source="m4a_copy",
 ) -> Config:
     return Config(
         folder_ids=folder_ids if folder_ids is not None else ["folderA"],
@@ -34,11 +36,13 @@ def make_config(
         proxy_url="",
         stt_provider=stt_provider,
         openai_api_key=openai_api_key,
+        deepgram_api_key=deepgram_api_key,
         google_cloud_project=google_cloud_project,
         google_stt_gcs_bucket=google_stt_gcs_bucket,
         asr_url=asr_url,
         stt_language=stt_language,
         stt_chunk_seconds=stt_chunk_seconds,
+        deepgram_audio_source=deepgram_audio_source,
     )
 
 
@@ -166,6 +170,120 @@ def test_process_item_only_stt_when_mp3_already_exists(mocker, tmp_path):
     transcribe_mock.assert_called_once()
     upload_mock.assert_called_once()
     assert upload_mock.call_args.kwargs["mime_type"] == "text/plain"
+
+
+def test_process_item_deepgram_m4a_downloads_mp4_even_when_mp3_exists(
+    mocker,
+    tmp_path,
+):
+    service = MagicMock()
+
+    def fake_download(svc, file_id, dest_dir, name):
+        path = dest_dir / name
+        path.write_bytes(b"x")
+        return path
+
+    download_mock = mocker.patch("src.main.drive.download", side_effect=fake_download)
+    extract_mock = mocker.patch("src.main.extract_mp3")
+    m4a_path = tmp_path / "video.m4a"
+    m4a_mock = mocker.patch("src.main.extract_m4a_copy", return_value=m4a_path)
+    upload_mock = mocker.patch("src.main.drive.upload")
+    transcribe_mock = mocker.patch("src.main.transcribe_file", return_value="text")
+
+    cfg = make_config(
+        stt_provider="deepgram",
+        deepgram_api_key="dg-x",
+        stt_language="ru",
+        deepgram_audio_source="m4a_copy",
+    )
+    item = _item(
+        "fid",
+        "video.mp4",
+        has_mp3=True,
+        mp3_id="mp3id",
+        mp3_name="video.mp3",
+    )
+    main.process_item(service, item, "folderX", cfg)
+
+    assert download_mock.call_args.args[1] == "fid"
+    assert download_mock.call_args.args[3] == "video.mp4"
+    extract_mock.assert_not_called()
+    m4a_mock.assert_called_once()
+    transcribe_mock.assert_called_once_with(m4a_path, cfg)
+    upload_mock.assert_called_once()
+    assert upload_mock.call_args.args[1].name == "video.txt"
+
+
+def test_process_item_deepgram_mp3_96k_extracts_mp4_for_stt(mocker, tmp_path):
+    service = MagicMock()
+
+    def fake_download(svc, file_id, dest_dir, name):
+        path = dest_dir / name
+        path.write_bytes(b"x")
+        return path
+
+    download_mock = mocker.patch("src.main.drive.download", side_effect=fake_download)
+    mp3_path = tmp_path / "video.mp3"
+    extract_mock = mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    upload_mock = mocker.patch("src.main.drive.upload")
+    transcribe_mock = mocker.patch("src.main.transcribe_file", return_value="text")
+
+    cfg = make_config(
+        stt_provider="deepgram",
+        deepgram_api_key="dg-x",
+        stt_language="ru",
+        deepgram_audio_source="mp3_96k",
+    )
+    item = _item(
+        "fid",
+        "video.mp4",
+        has_mp3=True,
+        mp3_id="mp3id",
+        mp3_name="video.mp3",
+    )
+    main.process_item(service, item, "folderX", cfg)
+
+    assert download_mock.call_args.args[1] == "fid"
+    extract_mock.assert_called_once()
+    assert extract_mock.call_args.kwargs["bitrate"] == "96k"
+    transcribe_mock.assert_called_once_with(mp3_path, cfg)
+    upload_mock.assert_called_once()
+
+
+def test_process_item_deepgram_mp3_192k_extracts_mp4_for_stt(mocker, tmp_path):
+    service = MagicMock()
+
+    def fake_download(svc, file_id, dest_dir, name):
+        path = dest_dir / name
+        path.write_bytes(b"x")
+        return path
+
+    download_mock = mocker.patch("src.main.drive.download", side_effect=fake_download)
+    mp3_path = tmp_path / "video.mp3"
+    extract_mock = mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    upload_mock = mocker.patch("src.main.drive.upload")
+    transcribe_mock = mocker.patch("src.main.transcribe_file", return_value="text")
+
+    cfg = make_config(
+        stt_provider="deepgram",
+        deepgram_api_key="dg-x",
+        stt_language="ru",
+        deepgram_audio_source="mp3_192k",
+    )
+    item = _item(
+        "fid",
+        "video.mp4",
+        has_mp3=True,
+        mp3_id="mp3id",
+        mp3_name="video.mp3",
+    )
+    main.process_item(service, item, "folderX", cfg)
+
+    assert download_mock.call_args.args[1] == "fid"
+    extract_mock.assert_called_once()
+    assert extract_mock.call_args.kwargs["bitrate"] == "192k"
+    transcribe_mock.assert_called_once_with(mp3_path, cfg)
+    upload_mock.assert_called_once()
 
 
 def test_process_item_skips_completely_when_mp3_and_txt_present(mocker):

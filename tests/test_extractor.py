@@ -53,6 +53,28 @@ def test_extract_mp3_uses_custom_bitrate(tmp_path, mocker):
     assert "128k" in run_mock.call_args.args[0]
 
 
+def test_extract_m4a_copy_success(tmp_path, mocker):
+    mp4 = tmp_path / "video.mp4"
+    mp4.write_bytes(b"fake mp4 data")
+
+    mocker.patch("src.extractor.shutil.which", return_value="/usr/bin/ffmpeg")
+
+    def fake_run(cmd, **kwargs):
+        output = Path(cmd[-1])
+        output.write_bytes(b"m4a")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    run_mock = mocker.patch("src.extractor.subprocess.run", side_effect=fake_run)
+
+    result = extractor.extract_m4a_copy(mp4)
+
+    assert result == mp4.with_suffix(".m4a")
+    cmd = run_mock.call_args.args[0]
+    assert "-vn" in cmd
+    assert "-c:a" in cmd
+    assert "copy" in cmd
+
+
 def test_extract_mp3_missing_input(tmp_path):
     missing = tmp_path / "nope.mp4"
 

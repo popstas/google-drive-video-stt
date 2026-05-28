@@ -27,6 +27,18 @@ def get_provider(config: Config) -> STTProvider:
             data_dir=config.data_dir,
             language=config.stt_language,
         )
+    if name == "deepgram":
+        from src.stt.deepgram_provider import DeepgramProvider
+
+        return DeepgramProvider(
+            api_key=config.deepgram_api_key,
+            language=config.stt_language,
+            model=config.deepgram_model,
+            diarize_model=config.deepgram_diarize_model,
+            txt_formatter=config.deepgram_txt_formatter,
+            keyterms=config.deepgram_keyterms,
+            proxy_url=config.proxy_url,
+        )
     if name == "asr":
         from src.stt.asr_provider import ASRProvider
 
