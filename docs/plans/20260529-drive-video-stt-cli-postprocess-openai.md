@@ -107,9 +107,9 @@ dropped characters in output filenames, and a new OpenAI-based transcription/key
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] Verify all requirements from Overview are implemented (CLI, skill, filename fix, post-processing, OpenAI pipeline)
-- [ ] Run full project test suite (`uv run pytest`)
-- [ ] Run project linter (`uv run ruff check`) - all issues must be fixed
+- [x] Verify all requirements from Overview are implemented (CLI, skill, filename fix, post-processing, OpenAI pipeline)
+- [x] Run full project test suite (`uv run pytest`) — 243 passed, 1 skipped
+- [x] Run project linter (`uv run ruff check`) - all issues must be fixed — All checks passed
 
 ## Post-Completion
 
