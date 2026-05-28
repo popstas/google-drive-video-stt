@@ -11,6 +11,7 @@ uv run pytest tests/test_stt_google.py::test_name   # single test
 uv run ruff check            # lint (line-length 100, target py311)
 uv run python -m src.auth    # one-time interactive OAuth -> data/token.json
 uv run python -m src.main    # run the polling loop locally
+gdstt <auth|run|run-once|process|transcribe|list>   # operator CLI (src/cli.py); installed by uv sync
 docker compose up -d --build # containerized deployment (mounts ./data)
 ```
 
@@ -29,6 +30,19 @@ independent needs — `needs_mp3` (no sibling `.mp3`) and `needs_txt` (STT enabl
 sibling `.txt`) — so a file already having an MP3 can still get transcribed on a later
 cycle. Idempotency comes from `drive.list_folder_state` reporting sibling presence by
 basename. All work happens in a per-item `TemporaryDirectory`.
+
+`process_target` (`src/main.py`) is the on-demand entry the CLI's `process` command uses:
+it auto-detects file vs folder by `mimeType` (override with `is_folder`), then runs the same
+`process_item` over a single file or every pending file in a folder. The `gdstt` CLI
+(`src/cli.py`) wraps the same `load_config()`/Drive/STT layers behind argparse subcommands
+without duplicating business logic.
+
+**Post-processing** runs in `process_item` after `transcribe_file` and before upload, gated
+by config: `openai_postprocess` (LLM path, `src/openai_pipeline.py` — OpenAI Responses API,
+optional Batch path) takes precedence over `stt_postprocess` (local path, `src/postprocess.py`).
+Both clean whitespace, parse interlocutor names from the file name, map them onto diarized
+`Speaker N` labels, and merge spurious extra speakers. An existing sibling `.txt` is
+overwritten in place via `drive.update_file` (its `txt_id` flows through `list_folder_state`).
 
 **Error handling is tiered**: `RefreshError`/`AuthError` propagate up to `main()` and
 cause `SystemExit(1)` so the container restarts (after re-running `src.auth`); all other
@@ -56,4 +70,7 @@ Adding a scope to `SCOPES` requires deleting `data/token.json` and re-running `s
 - Tests mock all external services (Drive, OpenAI, Google STT, ffmpeg); one test file per
   `src` module. No network in tests.
 - `from __future__ import annotations` + `X | None` style type hints throughout.
+- Compute Drive-name stems with `drive.drive_stem` (`os.path.splitext`, string-based), never
+  `Path(...).stem`/`.name` — Drive names may contain `/`, which `Path` would treat as a path
+  separator and drop. Sanitize local temp filenames with `drive.safe_local_name`.
 - Secrets and tokens live in `./data` (gitignored); never commit `credentials.json` / `token.json`.

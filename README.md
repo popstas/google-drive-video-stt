@@ -8,6 +8,9 @@ Monitors Google Drive folders for new MP4 files, extracts MP3 audio with ffmpeg,
 - Idempotent: skips MP4s that already have a sibling `<basename>.mp3`
 - Audio extraction via ffmpeg (`libmp3lame`, configurable bitrate)
 - Optional Telegram error notifications (success is silent)
+- Operator CLI (`gdstt`) wrapping auth, the polling loop, on-demand processing, local-file transcription, and folder-state inspection
+- Optional transcript post-processing (local or OpenAI LLM) that maps diarized speakers to the interlocutor names in the file name
+- Sibling `.mp3`/`.txt` names preserve the full Drive file name, including `/` characters
 - Docker-first deployment, all mutable state in `./data`
 
 ## Requirements
@@ -156,7 +159,11 @@ All configuration is environment-driven. See `.env.example`.
 | `STT_PROVIDER` | (empty) | `openai`, `google`, `asr`, `deepgram`, or empty to disable transcription |
 | `STT_LANGUAGE` | (empty) | Language hint. `openai`/`asr`: optional (`en`, `ru`); empty = auto-detect. `google`: required BCP-47 (`en-US`, `ru-RU`); `deepgram`: empty defaults to `ru` |
 | `STT_CHUNK_SECONDS` | `600` | Chunk length for `openai`/`asr`. Ignored when `STT_PROVIDER=google` or `deepgram` |
-| `OPENAI_API_KEY` | — | Required when `STT_PROVIDER=openai` |
+| `STT_POSTPROCESS` | `true` | Clean the transcript and map diarized `Speaker N` labels to the interlocutor names parsed from the file name, merging spurious extra speakers |
+| `OPENAI_POSTPROCESS` | `false` | Use the OpenAI Responses LLM pipeline to refine the transcript instead of the local `STT_POSTPROCESS` cleanup. Takes precedence over `STT_POSTPROCESS`. Requires `OPENAI_API_KEY` |
+| `OPENAI_MODEL` | `gpt-5.4-mini` | Model for the OpenAI post-processing pipeline |
+| `OPENAI_BATCH` | `false` | Submit OpenAI post-processing via the Batch API (~50% cheaper, higher latency) |
+| `OPENAI_API_KEY` | — | Required when `STT_PROVIDER=openai` or `OPENAI_POSTPROCESS=true` |
 | `DEEPGRAM_API_KEY` | — | Required when `STT_PROVIDER=deepgram` unless `DEEPGRAM_API_KEY_FILE` is set |
 | `DEEPGRAM_API_KEY_FILE` | — | Optional file containing a raw Deepgram token or JSON with `api_key`, `deepgram_api_key`, or `DEEPGRAM_API_KEY` |
 | `DEEPGRAM_MODEL` | `nova-3` | Deepgram model name |
@@ -173,6 +180,24 @@ All configuration is environment-driven. See `.env.example`.
 
 Setting `STT_PROVIDER` to a non-empty value transcribes each MP3 and uploads a sibling
 `<basename>.txt` next to the MP4/MP3.
+
+### Transcript post-processing
+
+By default (`STT_POSTPROCESS=true`) the transcript is post-processed before upload rather
+than stored as raw STT output. The local post-processor (`src/postprocess.py`) normalizes
+whitespace, parses the interlocutor names from the recording file name (e.g.
+`Alice and Bob - 2026/05/28 ... .mp4` → `Alice`, `Bob`), maps them onto the diarized
+`Speaker N` labels by order of appearance, and merges any extra (spurious) diarization
+speakers into the real one whose turns they continue.
+
+Set `OPENAI_POSTPROCESS=true` to instead refine the transcript with the OpenAI Responses
+API (`src/openai_pipeline.py`), which performs the same speaker mapping/merging via an LLM
+while keeping every utterance verbatim. It requires `OPENAI_API_KEY`, honors `PROXY_URL`,
+uses `OPENAI_MODEL` (default `gpt-5.4-mini`), and can run through the OpenAI Batch API
+(`OPENAI_BATCH=true`) for ~50% lower cost at the price of higher latency. When enabled it
+takes precedence over the local `STT_POSTPROCESS` path.
+
+When a sibling `.txt` already exists it is overwritten in place rather than duplicated.
 
 ### Deepgram Nova-3 (diarization)
 
@@ -269,6 +294,25 @@ uv run python -m src.main
 
 The process loops forever, sleeping `POLL_INTERVAL` seconds between cycles.
 
+### CLI
+
+`uv sync` installs a `gdstt` console script that wraps every operation (equivalently
+`uv run python -m src.cli`). All commands read configuration from `.env` / the
+environment via `load_config()`.
+
+```bash
+gdstt auth [response_url]   # one-time interactive OAuth → data/token.json
+gdstt run                  # polling loop (same as python -m src.main)
+gdstt run-once             # a single poll cycle, then exit
+gdstt process <id> [--folder]   # process a Drive file or folder on demand
+gdstt transcribe <audio> [-o out.txt]   # STT-only on a local file; prints to stdout by default
+gdstt list [--folder ID]   # show sibling mp3/txt state without doing work (alias: status)
+```
+
+`process` auto-detects whether the ID is a file or a folder; pass `--folder` to force
+folder handling. `list`/`status` defaults to the configured `FOLDER_IDS` when `--folder`
+is omitted.
+
 ## Tests
 
 ```bash
@@ -315,7 +359,10 @@ src/
   drive.py       List / download / upload helpers
   extractor.py   ffmpeg MP4 → MP3 wrapper
   notify.py      Telegram error notifier
-  main.py        Polling loop entry point
+  main.py        Polling loop + on-demand process_target entry points
+  cli.py         gdstt operator CLI (argparse subcommands)
+  postprocess.py Local transcript cleanup + speaker-name mapping
+  openai_pipeline.py OpenAI Responses LLM transcript refinement (sync + batch)
   stt/
     base.py            STTProvider ABC (transcribe_chunk + transcribe_full hook)
     chunker.py         ffmpeg MP3 splitter (used by chunked providers)

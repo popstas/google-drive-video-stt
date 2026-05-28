@@ -7,7 +7,13 @@ from types import SimpleNamespace
 import pytest
 
 from src.config import Config
-from src.openai_pipeline import OpenAIPipeline, build_prompt, get_pipeline, refine_transcript
+from src.openai_pipeline import (
+    OpenAIPipeline,
+    _content_to_text,
+    build_prompt,
+    get_pipeline,
+    refine_transcript,
+)
 from src.stt.base import STTError
 
 
@@ -196,6 +202,72 @@ def test_refine_batch_empty_output_raises():
     pipeline._client = _fake_batch_client("\n")
     with pytest.raises(STTError, match="no transcript text"):
         pipeline.refine("Speaker 1: hi", "f.mp4")
+
+
+def _fake_batch_client_statuses(statuses, output_jsonl, *, calls=None):
+    """Batch client whose `retrieve` walks `statuses` then sticks on the last one."""
+    calls = calls if calls is not None else {}
+    seq = list(statuses)
+
+    def files_create(**kwargs):
+        return SimpleNamespace(id="file-in")
+
+    def batches_create(**kwargs):
+        return SimpleNamespace(id="batch-1")
+
+    def batches_retrieve(batch_id):
+        calls.setdefault("retrieve", []).append(batch_id)
+        idx = min(len(calls["retrieve"]) - 1, len(seq) - 1)
+        return SimpleNamespace(status=seq[idx], output_file_id="file-out")
+
+    def files_content(file_id):
+        return output_jsonl.encode("utf-8")
+
+    return SimpleNamespace(
+        files=SimpleNamespace(create=files_create, content=files_content),
+        batches=SimpleNamespace(create=batches_create, retrieve=batches_retrieve),
+    )
+
+
+def test_refine_batch_polls_until_completed(monkeypatch):
+    monkeypatch.setattr("src.openai_pipeline.time.sleep", lambda _s: None)
+    line = json.dumps(
+        {"response": {"status_code": 200, "body": {"output_text": "Alice: hi"}}}
+    )
+    calls: dict = {}
+    pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=1)
+    pipeline._client = _fake_batch_client_statuses(
+        ["in_progress", "in_progress", "completed"], line + "\n", calls=calls
+    )
+
+    assert pipeline.refine("Speaker 1: hi", "f.mp4") == "Alice: hi"
+    assert len(calls["retrieve"]) == 3
+
+
+def test_refine_batch_times_out(monkeypatch):
+    monkeypatch.setattr("src.openai_pipeline.time.sleep", lambda _s: None)
+    pipeline = OpenAIPipeline(
+        api_key="sk-test", use_batch=True, poll_interval=1, batch_timeout=2
+    )
+    pipeline._client = _fake_batch_client_statuses(["in_progress"], "")
+    with pytest.raises(STTError, match="timed out"):
+        pipeline.refine("Speaker 1: hi", "f.mp4")
+
+
+# --- files.content shape normalization -------------------------------------
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"line",
+        "line",
+        SimpleNamespace(text="line"),
+        SimpleNamespace(read=lambda: b"line"),
+        SimpleNamespace(read=lambda: "line"),
+    ],
+)
+def test_content_to_text_handles_shapes(content):
+    assert _content_to_text(content) == "line"
 
 
 # --- config integration ----------------------------------------------------
