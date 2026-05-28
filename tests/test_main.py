@@ -304,6 +304,106 @@ def test_process_item_skips_completely_when_mp3_and_txt_present(mocker):
     transcribe.assert_not_called()
 
 
+def test_process_target_single_file_resolves_parent(mocker):
+    service = MagicMock()
+    cfg = make_config()
+
+    mocker.patch(
+        "src.main.drive.get_file_metadata",
+        return_value={
+            "id": "v1",
+            "name": "a.mp4",
+            "mimeType": "video/mp4",
+            "parents": ["folderA"],
+        },
+    )
+    items = [_item("v1", "a.mp4"), _item("v2", "b.mp4")]
+    list_mock = mocker.patch("src.main.drive.list_folder_state", return_value=items)
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.process_target(service, "v1", cfg)
+
+    list_mock.assert_called_once_with(service, "folderA")
+    process_mock.assert_called_once()
+    assert process_mock.call_args.args[1]["file"]["id"] == "v1"
+    assert process_mock.call_args.args[2] == "folderA"
+
+
+def test_process_target_autodetects_folder(mocker):
+    service = MagicMock()
+    cfg = make_config()
+
+    mocker.patch(
+        "src.main.drive.get_file_metadata",
+        return_value={
+            "id": "folderX",
+            "name": "My Folder",
+            "mimeType": "application/vnd.google-apps.folder",
+        },
+    )
+    items = [_item("v1", "a.mp4"), _item("v2", "b.mp4", has_mp3=True)]
+    mocker.patch("src.main.drive.list_folder_state", return_value=items)
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.process_target(service, "folderX", cfg)
+
+    assert process_mock.call_count == 1
+    assert process_mock.call_args.args[1]["file"]["id"] == "v1"
+    assert process_mock.call_args.args[2] == "folderX"
+
+
+def test_process_target_force_folder_flag(mocker):
+    service = MagicMock()
+    cfg = make_config()
+
+    meta_mock = mocker.patch(
+        "src.main.drive.get_file_metadata",
+        return_value={"id": "folderX", "name": "f", "mimeType": "video/mp4"},
+    )
+    items = [_item("v1", "a.mp4")]
+    mocker.patch("src.main.drive.list_folder_state", return_value=items)
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.process_target(service, "folderX", cfg, is_folder=True)
+
+    meta_mock.assert_called_once()
+    process_mock.assert_called_once()
+    assert process_mock.call_args.args[2] == "folderX"
+
+
+def test_process_target_file_not_found_raises(mocker):
+    service = MagicMock()
+    cfg = make_config()
+
+    mocker.patch(
+        "src.main.drive.get_file_metadata",
+        return_value={
+            "id": "v9",
+            "name": "missing.mp4",
+            "mimeType": "video/mp4",
+            "parents": ["folderA"],
+        },
+    )
+    mocker.patch("src.main.drive.list_folder_state", return_value=[_item("v1", "a.mp4")])
+    mocker.patch("src.main.process_item")
+
+    with pytest.raises(RuntimeError):
+        main.process_target(service, "v9", cfg)
+
+
+def test_process_target_file_without_parent_raises(mocker):
+    service = MagicMock()
+    cfg = make_config()
+
+    mocker.patch(
+        "src.main.drive.get_file_metadata",
+        return_value={"id": "v1", "name": "a.mp4", "mimeType": "video/mp4"},
+    )
+
+    with pytest.raises(RuntimeError):
+        main.process_target(service, "v1", cfg)
+
+
 def test_run_once_iterates_all_folders_and_files(mocker):
     service = MagicMock()
     cfg = make_config(folder_ids=["f1", "f2"])

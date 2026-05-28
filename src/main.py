@@ -89,6 +89,46 @@ def process_item(service: Any, item: dict, folder_id: str, config: Config) -> No
             _save_and_upload_txt(service, file_name, text, folder_id, tmp_dir)
 
 
+def _pending_items(items: list[dict], config: Config) -> list[dict]:
+    stt_enabled = bool(config.stt_provider)
+    return [
+        item for item in items
+        if not item.get("has_mp3")
+        or (stt_enabled and not item.get("has_txt"))
+    ]
+
+
+def process_target(
+    service: Any, target_id: str, config: Config, *, is_folder: bool | None = None,
+) -> None:
+    """Process a single Drive file or every pending file in a folder, on demand."""
+    meta = drive.get_file_metadata(service, target_id)
+    mime = meta.get("mimeType", "")
+    treat_as_folder = is_folder if is_folder is not None else mime == drive.FOLDER_MIME
+
+    if treat_as_folder:
+        items = drive.list_folder_state(service, target_id)
+        pending = _pending_items(items, config)
+        logger.info("Folder %s: %d pending file(s)", target_id, len(pending))
+        for item in pending:
+            process_item(service, item, target_id, config)
+        return
+
+    parents = meta.get("parents") or []
+    if not parents:
+        raise RuntimeError(f"File {target_id} has no parent folder")
+    folder_id = parents[0]
+    items = drive.list_folder_state(service, folder_id)
+    match = next(
+        (it for it in items if it["file"]["id"] == target_id), None
+    )
+    if match is None:
+        raise RuntimeError(
+            f"File {target_id} is not an MP4 in folder {folder_id}"
+        )
+    process_item(service, match, folder_id, config)
+
+
 def run_once(service: Any, config: Config) -> None:
     for folder_id in config.folder_ids:
         try:
@@ -103,12 +143,7 @@ def run_once(service: Any, config: Config) -> None:
             )
             continue
 
-        stt_enabled = bool(config.stt_provider)
-        pending = [
-            item for item in items
-            if not item.get("has_mp3")
-            or (stt_enabled and not item.get("has_txt"))
-        ]
+        pending = _pending_items(items, config)
         logger.info("Folder %s: %d pending file(s)", folder_id, len(pending))
         for item in pending:
             try:

@@ -211,6 +211,28 @@ def test_upload_accepts_custom_mime_type(tmp_path, mocker):
     media_cls.assert_called_once_with(str(local), mimetype="video/mp4", resumable=True)
 
 
+def test_get_file_metadata_requests_expected_fields():
+    service = MagicMock()
+    get_request = MagicMock()
+    get_request.execute.return_value = {
+        "id": "fid",
+        "name": "video.mp4",
+        "mimeType": "video/mp4",
+        "parents": ["parent1"],
+    }
+    service.files.return_value.get.return_value = get_request
+
+    result = drive.get_file_metadata(service, "fid")
+
+    assert result["id"] == "fid"
+    assert result["parents"] == ["parent1"]
+    service.files.return_value.get.assert_called_once_with(
+        fileId="fid",
+        fields="id, name, mimeType, parents",
+        supportsAllDrives=True,
+    )
+
+
 def test_list_folder_state_returns_flags():
     mp4 = [
         {"id": "v1", "name": "a.mp4", "mimeType": "video/mp4"},

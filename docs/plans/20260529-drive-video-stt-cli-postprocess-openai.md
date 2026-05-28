@@ -57,16 +57,16 @@ dropped characters in output filenames, and a new OpenAI-based transcription/key
 
 ### Task 1: Build CLI interface wrapping all operations
 
-- [ ] Add a CLI entry point (e.g. `src/cli.py` with a console-script / `python -m` hook) using the standard arg-parsing approach for the project
-- [ ] `auth` subcommand → run the interactive OAuth flow (wraps `src/auth.py`)
-- [ ] `run` subcommand → the polling loop (wraps current `main()` in `src/main.py`)
-- [ ] `run-once` subcommand → a single polling cycle (wraps `run_once()`)
-- [ ] `process <file|folder>` subcommand → on-demand extraction (+ transcription) for a given Drive file or folder
-- [ ] `transcribe <mp3>` subcommand → STT-only on an existing MP3 via the configured provider
-- [ ] `list` / `status` subcommand → show folder state (sibling MP3/TXT presence) without doing work
-- [ ] Reuse `load_config()` and existing Drive/extractor/STT layers; do not duplicate business logic
-- [ ] write tests for the CLI argument parsing and subcommand dispatch (mock the underlying operations)
-- [ ] run project tests - must pass before next task
+- [x] Add a CLI entry point (e.g. `src/cli.py` with a console-script / `python -m` hook) using the standard arg-parsing approach for the project
+- [x] `auth` subcommand → run the interactive OAuth flow (wraps `src/auth.py`)
+- [x] `run` subcommand → the polling loop (wraps current `main()` in `src/main.py`)
+- [x] `run-once` subcommand → a single polling cycle (wraps `run_once()`)
+- [x] `process <file|folder>` subcommand → on-demand extraction (+ transcription) for a given Drive file or folder
+- [x] `transcribe <mp3>` subcommand → STT-only on an existing MP3 via the configured provider
+- [x] `list` / `status` subcommand → show folder state (sibling MP3/TXT presence) without doing work
+- [x] Reuse `load_config()` and existing Drive/extractor/STT layers; do not duplicate business logic
+- [x] write tests for the CLI argument parsing and subcommand dispatch (mock the underlying operations)
+- [x] run project tests - must pass before next task
 
 ### Task 2: Add a project skill documenting all CLI capabilities
 

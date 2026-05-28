@@ -12,7 +12,21 @@ logger = logging.getLogger(__name__)
 MP4_MIME = "video/mp4"
 MP3_MIME = "audio/mpeg"
 TXT_MIME = "text/plain"
+FOLDER_MIME = "application/vnd.google-apps.folder"
 PAGE_SIZE = 1000
+
+
+def get_file_metadata(service: Any, file_id: str) -> dict:
+    """Return id/name/mimeType/parents for a single Drive file."""
+    return (
+        service.files()
+        .get(
+            fileId=file_id,
+            fields="id, name, mimeType, parents",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
 
 
 def _list_files_by_mime(service: Any, folder_id: str, mime_type: str) -> list[dict]:
