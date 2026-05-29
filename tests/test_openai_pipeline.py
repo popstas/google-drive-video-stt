@@ -204,6 +204,34 @@ def test_refine_batch_empty_output_raises():
         pipeline.refine("Speaker 1: hi", "f.mp4")
 
 
+def test_refine_batch_non_200_status_raises():
+    line = json.dumps(
+        {
+            "custom_id": "transcript-0",
+            "response": {"status_code": 500, "body": {"output_text": "leaked"}},
+        }
+    )
+    pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
+    pipeline._client = _fake_batch_client(line + "\n")
+    with pytest.raises(STTError, match="HTTP 500"):
+        pipeline.refine("Speaker 1: hi", "f.mp4")
+
+
+def test_refine_batch_line_error_raises():
+    line = json.dumps({"custom_id": "transcript-0", "error": {"message": "boom"}})
+    pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
+    pipeline._client = _fake_batch_client(line + "\n")
+    with pytest.raises(STTError, match="batch request failed"):
+        pipeline.refine("Speaker 1: hi", "f.mp4")
+
+
+def test_refine_batch_malformed_json_raises():
+    pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
+    pipeline._client = _fake_batch_client("not json\n")
+    with pytest.raises(STTError, match="not valid JSON"):
+        pipeline.refine("Speaker 1: hi", "f.mp4")
+
+
 def _fake_batch_client_statuses(statuses, output_jsonl, *, calls=None):
     """Batch client whose `retrieve` walks `statuses` then sticks on the last one."""
     calls = calls if calls is not None else {}

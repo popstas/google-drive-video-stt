@@ -188,7 +188,9 @@ than stored as raw STT output. The local post-processor (`src/postprocess.py`) n
 whitespace, parses the interlocutor names from the recording file name (e.g.
 `Alice and Bob - 2026/05/28 ... .mp4` → `Alice`, `Bob`), maps them onto the diarized
 `Speaker N` labels by order of appearance, and merges any extra (spurious) diarization
-speakers into the real one whose turns they continue.
+speakers into the real one whose turns they continue. Speaker mapping only applies to
+diarized transcripts (`google` / `deepgram`); with non-diarizing providers (`openai` /
+`asr`) there are no `Speaker N` labels, so post-processing only normalizes whitespace.
 
 Set `OPENAI_POSTPROCESS=true` to instead refine the transcript with the OpenAI Responses
 API (`src/openai_pipeline.py`), which performs the same speaker mapping/merging via an LLM

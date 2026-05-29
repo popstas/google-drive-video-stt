@@ -49,7 +49,7 @@ cause `SystemExit(1)` so the container restarts (after re-running `src.auth`); a
 exceptions are logged + sent to Telegram via `notify.notify_error` and the loop continues.
 
 **STT layer** (`src/stt/`): `get_provider(config)` dispatches on `STT_PROVIDER` to one of
-three `STTProvider` implementations. The base class has two paths — `transcribe_full()`
+four `STTProvider` implementations. The base class has two paths — `transcribe_full()`
 returns `None` by default (fall back to chunking); providers that do whole-file
 transcription override it. `transcribe_file()` (`transcribe.py`) tries `transcribe_full`
 first, else splits with `chunk_mp3` (`STT_CHUNK_SECONDS`) and calls `transcribe_chunk` per part.

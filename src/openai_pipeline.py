@@ -104,9 +104,22 @@ def _extract_batch_text(content: object) -> str:
         line = line.strip()
         if not line:
             continue
-        record = json.loads(line)
-        body = (record.get("response") or {}).get("body") or {}
-        text = _output_text_from_body(body)
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise STTError(f"OpenAI batch output was not valid JSON: {exc}") from exc
+        # Surface a failed request rather than silently uploading an empty/wrong
+        # transcript over the sibling .txt: a per-line error or non-2xx status means
+        # this request did not produce a usable result.
+        if record.get("error"):
+            raise STTError(f"OpenAI batch request failed: {record['error']}")
+        response = record.get("response") or {}
+        status_code = response.get("status_code")
+        if status_code is not None and status_code != 200:
+            raise STTError(
+                f"OpenAI batch request returned HTTP {status_code}: {response.get('body')}"
+            )
+        text = _output_text_from_body(response.get("body") or {})
         if text:
             last = text
     if not last:
