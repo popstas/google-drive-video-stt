@@ -117,7 +117,7 @@ def _load_deepgram_keyterms(enabled: bool, keyterms_file: Path) -> tuple[str, ..
     return keyterms
 
 
-def load_config() -> Config:
+def load_config(*, validate_providers: bool = True) -> Config:
     if load_dotenv is not None:
         load_dotenv(override=False)
     folder_ids = _parse_folder_ids(os.environ.get("FOLDER_IDS", ""))
@@ -150,7 +150,12 @@ def load_config() -> Config:
     deepgram_keyterms_enabled = True
     deepgram_keyterms_file = DEEPGRAM_DEFAULT_KEYTERMS_FILE
     deepgram_keyterms: tuple[str, ...] = ()
-    if stt_provider == "deepgram":
+    # Deepgram parsing reads files (DEEPGRAM_API_KEY_FILE) and raises on bad
+    # values (DEEPGRAM_KEYTERMS_ENABLED), so it is gated like the validation
+    # below: Drive-only commands (`gdstt auth`, `gdstt list`) must not be
+    # blocked by unrelated Deepgram config. The parsed values are only consumed
+    # when validation runs (transcription always uses validate_providers=True).
+    if validate_providers and stt_provider == "deepgram":
         deepgram_api_key = _load_deepgram_api_key(
             os.environ.get("DEEPGRAM_API_KEY", ""),
             os.environ.get("DEEPGRAM_API_KEY_FILE", ""),
@@ -206,49 +211,53 @@ def load_config() -> Config:
             f"STT_CHUNK_SECONDS must be positive, got: {stt_chunk_seconds}"
         )
 
-    if stt_provider == "openai" and not openai_api_key:
-        raise ValueError("OPENAI_API_KEY is required when STT_PROVIDER=openai")
-    if openai_postprocess and not openai_api_key:
-        raise ValueError("OPENAI_API_KEY is required when OPENAI_POSTPROCESS is enabled")
-    if stt_provider == "deepgram":
-        if not deepgram_api_key:
-            raise ValueError("DEEPGRAM_API_KEY is required when STT_PROVIDER=deepgram")
-        if deepgram_diarize_model not in DEEPGRAM_DIARIZE_MODELS:
-            raise ValueError(
-                f"DEEPGRAM_DIARIZE_MODEL must be one of {DEEPGRAM_DIARIZE_MODELS!r}, "
-                f"got: {deepgram_diarize_model!r}"
+    # Provider-secret validation is skipped for commands that only need Drive/
+    # data-dir settings (e.g. `gdstt auth`, `gdstt list`), so an unconfigured STT
+    # provider can't block bootstrap/inspection commands.
+    if validate_providers:
+        if stt_provider == "openai" and not openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required when STT_PROVIDER=openai")
+        if openai_postprocess and not openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required when OPENAI_POSTPROCESS is enabled")
+        if stt_provider == "deepgram":
+            if not deepgram_api_key:
+                raise ValueError("DEEPGRAM_API_KEY is required when STT_PROVIDER=deepgram")
+            if deepgram_diarize_model not in DEEPGRAM_DIARIZE_MODELS:
+                raise ValueError(
+                    f"DEEPGRAM_DIARIZE_MODEL must be one of {DEEPGRAM_DIARIZE_MODELS!r}, "
+                    f"got: {deepgram_diarize_model!r}"
+                )
+            if deepgram_audio_source not in DEEPGRAM_AUDIO_SOURCES:
+                raise ValueError(
+                    f"DEEPGRAM_AUDIO_SOURCE must be one of {DEEPGRAM_AUDIO_SOURCES!r}, "
+                    f"got: {deepgram_audio_source!r}"
+                )
+            if deepgram_txt_formatter not in DEEPGRAM_TXT_FORMATTERS:
+                raise ValueError(
+                    f"DEEPGRAM_TXT_FORMATTER must be one of {DEEPGRAM_TXT_FORMATTERS!r}, "
+                    f"got: {deepgram_txt_formatter!r}"
+                )
+            deepgram_keyterms = _load_deepgram_keyterms(
+                deepgram_keyterms_enabled,
+                deepgram_keyterms_file,
             )
-        if deepgram_audio_source not in DEEPGRAM_AUDIO_SOURCES:
-            raise ValueError(
-                f"DEEPGRAM_AUDIO_SOURCE must be one of {DEEPGRAM_AUDIO_SOURCES!r}, "
-                f"got: {deepgram_audio_source!r}"
-            )
-        if deepgram_txt_formatter not in DEEPGRAM_TXT_FORMATTERS:
-            raise ValueError(
-                f"DEEPGRAM_TXT_FORMATTER must be one of {DEEPGRAM_TXT_FORMATTERS!r}, "
-                f"got: {deepgram_txt_formatter!r}"
-            )
-        deepgram_keyterms = _load_deepgram_keyterms(
-            deepgram_keyterms_enabled,
-            deepgram_keyterms_file,
-        )
-    if stt_provider == "google":
-        if not google_cloud_project:
-            raise ValueError(
-                "GOOGLE_CLOUD_PROJECT is required when STT_PROVIDER=google"
-            )
-        if not google_stt_gcs_bucket:
-            raise ValueError(
-                "GOOGLE_STT_GCS_BUCKET is required when STT_PROVIDER=google"
-            )
-        if not stt_language:
-            raise ValueError(
-                "STT_LANGUAGE is required when STT_PROVIDER=google "
-                "(BCP-47 code, e.g. en-US, ru-RU). The `long` model has no "
-                "auto-detect; only Chirp models accept `auto`."
-            )
-    if stt_provider == "asr" and not asr_url:
-        raise ValueError("ASR_URL is required when STT_PROVIDER=asr")
+        if stt_provider == "google":
+            if not google_cloud_project:
+                raise ValueError(
+                    "GOOGLE_CLOUD_PROJECT is required when STT_PROVIDER=google"
+                )
+            if not google_stt_gcs_bucket:
+                raise ValueError(
+                    "GOOGLE_STT_GCS_BUCKET is required when STT_PROVIDER=google"
+                )
+            if not stt_language:
+                raise ValueError(
+                    "STT_LANGUAGE is required when STT_PROVIDER=google "
+                    "(BCP-47 code, e.g. en-US, ru-RU). The `long` model has no "
+                    "auto-detect; only Chirp models accept `auto`."
+                )
+        if stt_provider == "asr" and not asr_url:
+            raise ValueError("ASR_URL is required when STT_PROVIDER=asr")
 
     return Config(
         folder_ids=folder_ids,

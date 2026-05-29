@@ -30,6 +30,16 @@ def test_auth_dispatch(mocker, tmp_path):
     flow_mock.assert_called_once_with(tmp_path, response_url=None)
 
 
+def test_auth_skips_provider_validation(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.run_interactive_flow")
+
+    cli.main(["auth"])
+
+    load_mock.assert_called_once_with(validate_providers=False)
+
+
 def test_auth_passes_response_url(mocker, tmp_path):
     cfg = make_config(data_dir=tmp_path)
     mocker.patch("src.cli.load_config", return_value=cfg)
@@ -157,3 +167,28 @@ def test_list_no_folders_exits(mocker, tmp_path):
         cli.main(["list"])
 
     assert excinfo.value.code == 1
+
+
+def test_list_no_folders_skips_authentication(mocker, tmp_path):
+    # The empty-folder check must short-circuit before authenticating, so a
+    # missing/expired token can't mask the intended local error.
+    cfg = make_config(folder_ids=[], data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    build_mock = mocker.patch("src.cli.auth.build_drive_service")
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["list"])
+
+    assert excinfo.value.code == 1
+    build_mock.assert_not_called()
+
+
+def test_list_skips_provider_validation(mocker, tmp_path):
+    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path)
+    load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.cli.drive.list_folder_state", return_value=[])
+
+    cli.main(["list"])
+
+    load_mock.assert_called_once_with(validate_providers=False)

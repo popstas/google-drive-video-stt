@@ -75,6 +75,26 @@ def test_openai_postprocess_requires_api_key(monkeypatch):
         load_config()
 
 
+def test_validate_providers_false_skips_openai_secret(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "openai")
+    cfg = load_config(validate_providers=False)
+    assert cfg.stt_provider == "openai"
+    assert cfg.openai_api_key == ""
+
+
+def test_validate_providers_false_skips_provider_secrets(monkeypatch):
+    # A partially configured provider must not block Drive-only commands.
+    monkeypatch.setenv("STT_PROVIDER", "google")
+    cfg = load_config(validate_providers=False)
+    assert cfg.stt_provider == "google"
+
+
+def test_validate_providers_true_is_default(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "openai")
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        load_config()
+
+
 def test_openai_postprocess_with_api_key(monkeypatch):
     monkeypatch.setenv("OPENAI_POSTPROCESS", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")

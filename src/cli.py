@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def cmd_auth(args: argparse.Namespace) -> None:
-    config = load_config()
+    config = load_config(validate_providers=False)
     config.data_dir.mkdir(parents=True, exist_ok=True)
     auth.run_interactive_flow(config.data_dir, response_url=args.response_url)
     logger.info("Token saved to %s", config.data_dir / "token.json")
@@ -48,12 +48,12 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
 
 
 def cmd_list(args: argparse.Namespace) -> None:
-    config = load_config()
-    service = auth.build_drive_service(data_dir=config.data_dir)
+    config = load_config(validate_providers=False)
     folder_ids = [args.folder] if args.folder else config.folder_ids
     if not folder_ids:
         logger.error("No folders to inspect; set FOLDER_IDS or pass --folder")
         raise SystemExit(1)
+    service = auth.build_drive_service(data_dir=config.data_dir)
     for folder_id in folder_ids:
         items = drive.list_folder_state(service, folder_id)
         print(f"Folder {folder_id}: {len(items)} mp4 file(s)")
