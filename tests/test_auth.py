@@ -278,7 +278,7 @@ def test_run_interactive_flow_missing_credentials(tmp_path):
 
 def test_run_interactive_flow_writes_token(tmp_path, mocker):
     creds_file = tmp_path / "credentials.json"
-    creds_file.write_text("{}")
+    creds_file.write_text(json.dumps({"installed": {"client_id": "cid"}}))
 
     fake_creds = MagicMock()
     fake_creds.to_json.return_value = '{"new": "token"}'
@@ -286,16 +286,41 @@ def test_run_interactive_flow_writes_token(tmp_path, mocker):
     flow = MagicMock()
     flow.run_local_server.return_value = fake_creds
     flow_cls = mocker.patch(
-        "src.auth.InstalledAppFlow.from_client_secrets_file", return_value=flow
+        "src.auth.InstalledAppFlow.from_client_config", return_value=flow
     )
 
     auth.run_interactive_flow(tmp_path)
 
-    flow_cls.assert_called_once_with(str(creds_file), auth.SCOPES)
+    flow_cls.assert_called_once_with({"installed": {"client_id": "cid"}}, auth.SCOPES)
     flow.run_local_server.assert_called_once_with(port=0, open_browser=False)
     token_file = tmp_path / "token.json"
     assert token_file.read_text() == '{"new": "token"}'
     _assert_secure_token_mode(token_file)
+
+
+def test_run_interactive_flow_accepts_credentials_json_with_utf8_bom(tmp_path, mocker):
+    creds_file = tmp_path / "credentials.json"
+    client_config = {
+        "installed": {
+            "client_id": "cid.apps.googleusercontent.com",
+            "client_secret": "csec",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": ["http://localhost"],
+        }
+    }
+    creds_file.write_text(json.dumps(client_config), encoding="utf-8-sig")
+
+    fake_creds = MagicMock()
+    fake_creds.to_json.return_value = '{"new": "token"}'
+    run_local_server = mocker.patch(
+        "src.auth.InstalledAppFlow.run_local_server", return_value=fake_creds
+    )
+
+    auth.run_interactive_flow(tmp_path)
+
+    run_local_server.assert_called_once_with(port=0, open_browser=False)
+    assert (tmp_path / "token.json").read_text() == '{"new": "token"}'
 
 
 def test_load_credentials_refresh_writes_token_with_secure_mode(tmp_path, mocker):

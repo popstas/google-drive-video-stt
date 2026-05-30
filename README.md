@@ -1,16 +1,22 @@
 # google-drive-video-stt
 
-Monitors Google Drive folders for new MP4 files, extracts MP3 audio with ffmpeg, and uploads the MP3 alongside the original. Designed as a headless preprocessing step for speech-to-text pipelines (e.g. NotebookLM, which rejects files over 200 MB, and Cloud STT, which doesn't accept MP4 directly).
+Monitors Google Drive folders for new MP4 files, optionally extracts MP3 audio
+with ffmpeg, and uploads transcripts alongside the original. Designed as a
+headless preprocessing step for speech-to-text pipelines (e.g. NotebookLM, which
+rejects files over 200 MB, and Cloud STT, which doesn't accept MP4 directly).
 
 ## Features
 
 - Polls one or more Google Drive folders on a configurable interval
-- Idempotent: skips MP4s that already have a sibling `<basename>.mp3`
+- Idempotent: skips already-created Drive artifacts, linked by source file id
+  metadata when available and by sibling name as a legacy fallback
 - Audio extraction via ffmpeg (`libmp3lame`, configurable bitrate)
 - Optional Telegram error notifications (success is silent)
 - Operator CLI (`gdstt`) wrapping auth, the polling loop, on-demand processing, local-file transcription, and folder-state inspection
 - Optional transcript post-processing (local or OpenAI LLM) that maps diarized speakers to the interlocutor names in the file name
 - Sibling `.mp3`/`.txt` names preserve the full Drive file name, including `/` characters
+- Explicit speaker names can be stored on the Drive MP4 when the filename is not
+  enough for reliable speaker mapping
 - Docker-first deployment, all mutable state in `./data`
 
 ## Requirements
@@ -153,6 +159,7 @@ All configuration is environment-driven. See `.env.example`.
 | `FOLDER_IDS` | (required) | Comma-separated Google Drive folder IDs to monitor |
 | `POLL_INTERVAL` | `600` | Seconds between poll cycles |
 | `BITRATE` | `96k` | MP3 audio bitrate passed to ffmpeg |
+| `DRIVE_MP3_ARTIFACT` | auto | Upload an MP3 artifact to Drive. Defaults to `false` for `STT_PROVIDER=deepgram` + `DEEPGRAM_AUDIO_SOURCE=m4a_copy`; defaults to `true` otherwise |
 | `TELEGRAM_BOT_TOKEN` | (empty) | If set with chat ID, errors are posted to Telegram |
 | `TELEGRAM_CHAT_ID` | (empty) | Telegram chat to receive error notifications |
 | `DATA_DIR` | `data` | Directory holding `credentials.json` and `token.json` |
@@ -178,8 +185,9 @@ All configuration is environment-driven. See `.env.example`.
 
 ## Speech-to-text
 
-Setting `STT_PROVIDER` to a non-empty value transcribes each MP3 and uploads a sibling
-`<basename>.txt` next to the MP4/MP3.
+Setting `STT_PROVIDER` to a non-empty value transcribes each pending recording
+through the selected provider and uploads a sibling `<basename>.txt` next to the
+MP4 and any optional generated audio artifact.
 
 ### Transcript post-processing
 
@@ -199,7 +207,11 @@ uses `OPENAI_MODEL` (default `gpt-5.4-mini`), and can run through the OpenAI Bat
 (`OPENAI_BATCH=true`) for ~50% lower cost at the price of higher latency. When enabled it
 takes precedence over the local `STT_POSTPROCESS` path.
 
-When a sibling `.txt` already exists it is overwritten in place rather than duplicated.
+When a sibling `.txt` already exists, normal polling skips it to avoid spending
+STT credits repeatedly. Use `gdstt process <file-id> --reprocess-txt` when you
+intentionally want to run STT again and overwrite the existing `.txt` in place.
+New `.txt` and `.mp3` artifacts are tagged with the source MP4 id, so future
+source renames do not break artifact detection.
 
 ### Deepgram Nova-3 (diarization)
 
@@ -236,9 +248,10 @@ DEEPGRAM_KEYTERMS_FILE=config/deepgram-keyterms.txt
 
 `m4a_copy` extracts a temporary AAC/M4A audio copy from the source MP4 for
 Deepgram without re-encoding. Use `mp3_96k` or `mp3_192k` to send a temporary
-MP3 instead. The sibling MP3 uploaded to Drive is still produced as before. If an
-MP3 already exists but TXT is missing, Deepgram downloads the MP4 again so it can
-use the selected high-quality audio source.
+MP3 instead. With the Deepgram `m4a_copy` default, no extra Drive MP3 is uploaded
+unless `DRIVE_MP3_ARTIFACT=true` is set. If an MP3 already exists but TXT is
+missing, Deepgram downloads the MP4 again so it can use the selected high-quality
+audio source.
 
 `word_speaker` is a Deepgram-only TXT formatter. It uses `utterances` for readable
 timing, but splits a line when `words[].speaker` changes inside the utterance.
@@ -304,16 +317,31 @@ environment via `load_config()`.
 
 ```bash
 gdstt auth [response_url]   # one-time interactive OAuth → data/token.json
+gdstt doctor [--drive]      # check Drive/OAuth configuration without changing it
 gdstt run                  # polling loop (same as python -m src.main)
-gdstt run-once             # a single poll cycle, then exit
-gdstt process <id> [--folder]   # process a Drive file or folder on demand
+gdstt run-once [--dry-run] [--max-size SIZE] [--confirm-large]
+gdstt process <id> [--folder] [--reprocess-txt] [--dry-run] [--max-size SIZE] [--confirm-large]
+gdstt speakers set <file-id> "Alice" "Bob"   # store explicit speaker names on an MP4
+gdstt refresh-names <file-id>   # rename linked MP3/TXT artifacts after an MP4 rename
 gdstt transcribe <audio> [-o out.txt]   # STT-only on a local file; prints to stdout by default
 gdstt list [--folder ID]   # show sibling mp3/txt state without doing work (alias: status)
 ```
 
 `process` auto-detects whether the ID is a file or a folder; pass `--folder` to force
 folder handling. `list`/`status` defaults to the configured `FOLDER_IDS` when `--folder`
-is omitted.
+is omitted. `--reprocess-txt` intentionally spends STT provider credits again and
+overwrites the linked `.txt` when one exists. `speakers set` affects future local
+post-processing; combine it with `process <file-id> --reprocess-txt` when an
+already-uploaded transcript needs to be regenerated with corrected names.
+
+Use `doctor` first when setting up a new agent or machine: it checks whether
+`credentials.json`, `token.json`, and `FOLDER_IDS` are present without validating STT
+provider secrets. Add `--drive` only when you want it to authenticate and list the
+configured folders. Use `--dry-run` on `run-once` or folder `process` to preview pending
+work without downloads, uploads, or STT calls. `--max-size` is off unless you pass it.
+Use it as an optional manual safety limit before processing folders, for example
+`--max-size 50MB`; files larger than the limit are skipped unless you also pass
+`--confirm-large` after confirming that large files should be processed.
 
 ## Tests
 

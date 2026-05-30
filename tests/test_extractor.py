@@ -27,6 +27,7 @@ def test_extract_mp3_success(tmp_path, mocker):
     assert result.exists()
 
     cmd = run_mock.call_args.args[0]
+    kwargs = run_mock.call_args.kwargs
     assert cmd[0] == "ffmpeg"
     assert "-y" in cmd
     assert "-vn" in cmd
@@ -34,6 +35,8 @@ def test_extract_mp3_success(tmp_path, mocker):
     assert "96k" in cmd
     assert str(mp4) in cmd
     assert str(result) in cmd
+    assert kwargs["encoding"] == "utf-8"
+    assert kwargs["errors"] == "replace"
 
 
 def test_extract_mp3_uses_custom_bitrate(tmp_path, mocker):
@@ -70,9 +73,12 @@ def test_extract_m4a_copy_success(tmp_path, mocker):
 
     assert result == mp4.with_suffix(".m4a")
     cmd = run_mock.call_args.args[0]
+    kwargs = run_mock.call_args.kwargs
     assert "-vn" in cmd
     assert "-c:a" in cmd
     assert "copy" in cmd
+    assert kwargs["encoding"] == "utf-8"
+    assert kwargs["errors"] == "replace"
 
 
 def test_extract_mp3_missing_input(tmp_path):

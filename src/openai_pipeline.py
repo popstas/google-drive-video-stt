@@ -33,9 +33,14 @@ DEFAULT_MODEL = "gpt-5.4-mini"
 RESPONSES_ENDPOINT = "/v1/responses"
 
 
-def build_prompt(transcript: str, file_name: str) -> str:
+def build_prompt(
+    transcript: str,
+    file_name: str,
+    *,
+    speaker_names: list[str] | None = None,
+) -> str:
     """Compose the user prompt: name hints from the file name + the raw transcript."""
-    names = extract_interlocutor_names(file_name)
+    names = speaker_names if speaker_names is not None else extract_interlocutor_names(file_name)
     if names:
         hint = (
             "Known interlocutor names (in no particular order): "
@@ -178,11 +183,17 @@ class OpenAIPipeline:
         self._client = OpenAI(**kwargs)
         return self._client
 
-    def refine(self, transcript: str, file_name: str) -> str:
+    def refine(
+        self,
+        transcript: str,
+        file_name: str,
+        *,
+        speaker_names: list[str] | None = None,
+    ) -> str:
         transcript = transcript.strip()
         if not transcript:
             return transcript
-        prompt = build_prompt(transcript, file_name)
+        prompt = build_prompt(transcript, file_name, speaker_names=speaker_names)
         if self._use_batch:
             return self._refine_batch(prompt)
         return self._refine_sync(prompt)
@@ -262,6 +273,12 @@ def get_pipeline(config: Config) -> OpenAIPipeline:
     )
 
 
-def refine_transcript(text: str, file_name: str, config: Config) -> str:
+def refine_transcript(
+    text: str,
+    file_name: str,
+    config: Config,
+    *,
+    speaker_names: list[str] | None = None,
+) -> str:
     """Run the configured OpenAI pipeline over a raw transcript."""
-    return get_pipeline(config).refine(text, file_name)
+    return get_pipeline(config).refine(text, file_name, speaker_names=speaker_names)

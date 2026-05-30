@@ -48,6 +48,18 @@ def test_build_prompt_includes_names():
     assert "Speaker 1: hi" in prompt
 
 
+def test_build_prompt_prefers_explicit_speaker_names():
+    prompt = build_prompt(
+        "Speaker 1: hi",
+        "Wrong One and Wrong Two - 2026-05-30.mp4",
+        speaker_names=["Alice", "Bob"],
+    )
+
+    assert "Alice, Bob" in prompt
+    assert "Wrong One" not in prompt
+    assert "Wrong Two" not in prompt
+
+
 def test_build_prompt_without_names():
     # A date-only name yields no extractable interlocutor names.
     prompt = build_prompt("Speaker 1: hi", "2026-05-28.mp4")

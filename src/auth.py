@@ -37,6 +37,21 @@ def _write_token(path: Path, payload: str) -> None:
     path.chmod(0o600)
 
 
+def _load_client_config(path: Path) -> dict:
+    try:
+        config = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        raise AuthError(
+            f"OAuth client credentials at {path} are malformed: {exc}. "
+            "Download a fresh Desktop app credentials JSON from Google Cloud Console."
+        ) from exc
+    if not isinstance(config, dict):
+        raise AuthError(
+            f"OAuth client credentials at {path} are malformed: expected a JSON object."
+        )
+    return config
+
+
 def load_credentials(data_dir: Path) -> Credentials:
     token_file = _token_path(data_dir)
     if not token_file.exists():
@@ -132,7 +147,7 @@ def run_interactive_flow(data_dir: Path, response_url: str | None = None) -> Cre
             "Console and place them at this path."
         )
 
-    flow = InstalledAppFlow.from_client_secrets_file(str(creds_file), SCOPES)
+    flow = InstalledAppFlow.from_client_config(_load_client_config(creds_file), SCOPES)
 
     if response_url is None:
         response_url = os.environ.get("OAUTH_RESPONSE_URL")

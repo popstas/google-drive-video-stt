@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from dotenv import load_dotenv as real_load_dotenv
 
 from src.config import load_config
 
@@ -16,6 +17,7 @@ ENV_VARS = [
     "STT_LANGUAGE",
     "STT_CHUNK_SECONDS",
     "STT_POSTPROCESS",
+    "DRIVE_MP3_ARTIFACT",
     "OPENAI_API_KEY",
     "OPENAI_MODEL",
     "OPENAI_POSTPROCESS",
@@ -60,6 +62,31 @@ def test_stt_postprocess_can_be_disabled(monkeypatch):
     monkeypatch.setenv("STT_POSTPROCESS", "false")
     cfg = load_config()
     assert cfg.stt_postprocess is False
+
+
+def test_drive_mp3_artifact_defaults_to_true_without_deepgram_m4a(monkeypatch):
+    cfg = load_config()
+    assert cfg.drive_mp3_artifact is True
+
+
+def test_drive_mp3_artifact_defaults_to_false_for_deepgram_m4a(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "deepgram")
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+
+    cfg = load_config()
+
+    assert cfg.deepgram_audio_source == "m4a_copy"
+    assert cfg.drive_mp3_artifact is False
+
+
+def test_drive_mp3_artifact_can_be_enabled_for_deepgram_m4a(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "deepgram")
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("DRIVE_MP3_ARTIFACT", "true")
+
+    cfg = load_config()
+
+    assert cfg.drive_mp3_artifact is True
 
 
 def test_openai_pipeline_defaults(monkeypatch):
@@ -119,6 +146,16 @@ def test_openai_postprocess_enabled_without_stt_provider(monkeypatch):
 def test_parses_single_folder_id(monkeypatch):
     monkeypatch.setenv("FOLDER_IDS", "abc123")
     cfg = load_config()
+    assert cfg.folder_ids == ["abc123"]
+
+
+def test_load_config_accepts_dotenv_with_utf8_bom(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("src.config.load_dotenv", real_load_dotenv)
+    (tmp_path / ".env").write_text("FOLDER_IDS=abc123\n", encoding="utf-8-sig")
+
+    cfg = load_config()
+
     assert cfg.folder_ids == ["abc123"]
 
 
@@ -351,6 +388,18 @@ def test_stt_deepgram_reads_raw_key_file(monkeypatch, tmp_path):
     assert cfg.deepgram_api_key == "raw-file-key"
 
 
+def test_stt_deepgram_reads_raw_key_file_with_utf8_bom(monkeypatch, tmp_path):
+    key_file = tmp_path / "deepgram_api_secret.json"
+    key_file.write_text("raw-file-key\n", encoding="utf-8-sig")
+    monkeypatch.setenv("STT_PROVIDER", "deepgram")
+    monkeypatch.setenv("STT_LANGUAGE", "ru")
+    monkeypatch.setenv("DEEPGRAM_API_KEY_FILE", str(key_file))
+
+    cfg = load_config()
+
+    assert cfg.deepgram_api_key == "raw-file-key"
+
+
 def test_stt_deepgram_reads_json_key_file(monkeypatch, tmp_path):
     key_file = tmp_path / "deepgram_api_secret.json"
     key_file.write_text('{"deepgram_api_key": "json-file-key"}', encoding="utf-8")
@@ -361,6 +410,30 @@ def test_stt_deepgram_reads_json_key_file(monkeypatch, tmp_path):
     cfg = load_config()
 
     assert cfg.deepgram_api_key == "json-file-key"
+
+
+def test_stt_deepgram_reads_json_key_file_with_utf8_bom(monkeypatch, tmp_path):
+    key_file = tmp_path / "deepgram_api_secret.json"
+    key_file.write_text('{"deepgram_api_key": "json-file-key"}', encoding="utf-8-sig")
+    monkeypatch.setenv("STT_PROVIDER", "deepgram")
+    monkeypatch.setenv("STT_LANGUAGE", "ru")
+    monkeypatch.setenv("DEEPGRAM_API_KEY_FILE", str(key_file))
+
+    cfg = load_config()
+
+    assert cfg.deepgram_api_key == "json-file-key"
+
+
+def test_stt_deepgram_reads_keyterms_file_with_utf8_bom(monkeypatch, tmp_path):
+    keyterms = tmp_path / "keyterms.txt"
+    keyterms.write_text("# header\nKubernetes\n", encoding="utf-8-sig")
+    monkeypatch.setenv("STT_PROVIDER", "deepgram")
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("DEEPGRAM_KEYTERMS_FILE", str(keyterms))
+
+    cfg = load_config()
+
+    assert cfg.deepgram_keyterms == ("Kubernetes",)
 
 
 def test_stt_deepgram_key_file_is_ignored_for_other_providers(monkeypatch, tmp_path):

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import re
+import sys
 from pathlib import Path
+from typing import TextIO
 
 from src import auth, drive
 from src import main as main_module
@@ -10,6 +14,54 @@ from src.config import load_config
 from src.stt.transcribe import transcribe_file
 
 logger = logging.getLogger(__name__)
+
+_SIZE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([kmgt]?i?b?)?\s*$", re.IGNORECASE)
+_SIZE_UNITS = {
+    "": 1,
+    "b": 1,
+    "k": 1000,
+    "kb": 1000,
+    "m": 1000**2,
+    "mb": 1000**2,
+    "g": 1000**3,
+    "gb": 1000**3,
+    "t": 1000**4,
+    "tb": 1000**4,
+    "ki": 1024,
+    "kib": 1024,
+    "mi": 1024**2,
+    "mib": 1024**2,
+    "gi": 1024**3,
+    "gib": 1024**3,
+    "ti": 1024**4,
+    "tib": 1024**4,
+}
+
+
+def _parse_size(raw: str) -> int:
+    match = _SIZE_RE.match(raw)
+    if not match:
+        raise argparse.ArgumentTypeError(
+            "expected a byte size like 50000000, 50MB, or 1.5GiB"
+        )
+    amount = float(match.group(1))
+    unit = (match.group(2) or "").lower()
+    if unit not in _SIZE_UNITS:
+        raise argparse.ArgumentTypeError(f"unknown size unit: {unit}")
+    return int(amount * _SIZE_UNITS[unit])
+
+
+def _configure_console_encoding(
+    *, stdout: TextIO | None = None, stderr: TextIO | None = None
+) -> None:
+    for stream in (stdout or sys.stdout, stderr or sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
 
 
 def cmd_auth(args: argparse.Namespace) -> None:
@@ -26,14 +78,69 @@ def cmd_run(args: argparse.Namespace) -> None:
 def cmd_run_once(args: argparse.Namespace) -> None:
     config = load_config()
     service = auth.build_drive_service(data_dir=config.data_dir)
-    main_module.run_once(service, config)
+    main_module.run_once(
+        service,
+        config,
+        dry_run=args.dry_run,
+        max_size_bytes=args.max_size,
+        confirm_large=args.confirm_large,
+    )
 
 
 def cmd_process(args: argparse.Namespace) -> None:
     config = load_config()
     service = auth.build_drive_service(data_dir=config.data_dir)
     is_folder = True if args.folder else None
-    main_module.process_target(service, args.target, config, is_folder=is_folder)
+    main_module.process_target(
+        service,
+        args.target,
+        config,
+        is_folder=is_folder,
+        reprocess_txt=args.reprocess_txt,
+        dry_run=args.dry_run,
+        max_size_bytes=args.max_size,
+        confirm_large=args.confirm_large,
+    )
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    config = load_config(validate_providers=False)
+    credentials_path = config.data_dir / "credentials.json"
+    token_path = config.data_dir / "token.json"
+
+    print(f"DATA_DIR: {config.data_dir}")
+    print(f"credentials.json: {'OK' if credentials_path.exists() else 'missing'}")
+    print(f"token.json: {'OK' if token_path.exists() else 'missing'}")
+    print(f"FOLDER_IDS: {len(config.folder_ids)} configured")
+    print(f"STT_PROVIDER: {config.stt_provider or 'not configured'}")
+
+    if not args.drive:
+        print("Drive auth: not checked (use --drive)")
+        return
+
+    service = auth.build_drive_service(data_dir=config.data_dir)
+    print("Drive auth: OK")
+    for folder_id in config.folder_ids:
+        items = drive.list_folder_state(service, folder_id)
+        print(f"Folder {folder_id}: OK, {len(items)} mp4 file(s)")
+
+
+def cmd_speakers_set(args: argparse.Namespace) -> None:
+    config = load_config(validate_providers=False)
+    service = auth.build_drive_service(data_dir=config.data_dir)
+    names = json.dumps(args.names, ensure_ascii=False)
+    drive.set_file_app_properties(
+        service,
+        args.target,
+        {drive.SPEAKER_NAMES_PROPERTY: names},
+    )
+    logger.info("Speaker names saved on %s", args.target)
+
+
+def cmd_refresh_names(args: argparse.Namespace) -> None:
+    config = load_config(validate_providers=False)
+    service = auth.build_drive_service(data_dir=config.data_dir)
+    main_module.refresh_artifact_names(service, args.target)
 
 
 def cmd_transcribe(args: argparse.Namespace) -> None:
@@ -64,6 +171,26 @@ def cmd_list(args: argparse.Namespace) -> None:
             print(f"  [{mp3}] [{txt}] {name}")
 
 
+def _add_processing_safety_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be processed without downloading, transcribing, or uploading",
+    )
+    parser.add_argument(
+        "--max-size",
+        type=_parse_size,
+        default=None,
+        metavar="SIZE",
+        help="Skip Drive videos larger than SIZE unless --confirm-large is passed",
+    )
+    parser.add_argument(
+        "--confirm-large",
+        action="store_true",
+        help="Allow processing files that exceed --max-size",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gdstt",
@@ -84,6 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.set_defaults(func=cmd_run)
 
     p_run_once = sub.add_parser("run-once", help="Run a single polling cycle")
+    _add_processing_safety_args(p_run_once)
     p_run_once.set_defaults(func=cmd_run_once)
 
     p_process = sub.add_parser(
@@ -95,7 +223,44 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Treat the target as a folder ID (default: auto-detect)",
     )
+    p_process.add_argument(
+        "--reprocess-txt",
+        action="store_true",
+        help="Run STT again and overwrite the existing TXT instead of skipping it",
+    )
+    _add_processing_safety_args(p_process)
     p_process.set_defaults(func=cmd_process)
+
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="Check local Drive/OAuth configuration without changing anything",
+    )
+    p_doctor.add_argument(
+        "--drive",
+        action="store_true",
+        help="Also authenticate and list configured Drive folders",
+    )
+    p_doctor.set_defaults(func=cmd_doctor)
+
+    p_speakers = sub.add_parser(
+        "speakers",
+        help="Manage explicit speaker names stored on a Drive MP4",
+    )
+    speakers_sub = p_speakers.add_subparsers(dest="speakers_command", required=True)
+    p_speakers_set = speakers_sub.add_parser(
+        "set",
+        help="Set speaker names for future post-processing of a Drive MP4",
+    )
+    p_speakers_set.add_argument("target", help="Drive MP4 file ID")
+    p_speakers_set.add_argument("names", nargs="+", help="Speaker names in order")
+    p_speakers_set.set_defaults(func=cmd_speakers_set)
+
+    p_refresh_names = sub.add_parser(
+        "refresh-names",
+        help="Rename linked MP3/TXT artifacts to match the current MP4 name",
+    )
+    p_refresh_names.add_argument("target", help="Drive MP4 file ID")
+    p_refresh_names.set_defaults(func=cmd_refresh_names)
 
     p_transcribe = sub.add_parser(
         "transcribe", help="Transcribe a local audio file with the configured provider"
@@ -125,6 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    _configure_console_encoding()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",

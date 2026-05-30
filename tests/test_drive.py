@@ -197,6 +197,28 @@ def test_upload_calls_create_with_metadata_and_media(tmp_path, mocker):
     )
 
 
+def test_upload_accepts_app_properties(tmp_path, mocker):
+    local = tmp_path / "audio.mp3"
+    local.write_bytes(b"id3-data")
+
+    service = MagicMock()
+    service.files.return_value.create.return_value.execute.return_value = {"id": "x"}
+    mocker.patch("src.drive.MediaFileUpload", return_value="media")
+
+    drive.upload(
+        service,
+        local,
+        "fld",
+        app_properties={"source_video_id": "v1", "artifact_type": "mp3"},
+    )
+
+    body = service.files.return_value.create.call_args.kwargs["body"]
+    assert body["appProperties"] == {
+        "source_video_id": "v1",
+        "artifact_type": "mp3",
+    }
+
+
 def test_upload_accepts_custom_mime_type(tmp_path, mocker):
     local = tmp_path / "video.mp4"
     local.write_bytes(b"mp4-data")
@@ -234,6 +256,59 @@ def test_update_file_overwrites_in_place(tmp_path, mocker):
     )
 
 
+def test_update_file_accepts_app_properties(tmp_path, mocker):
+    local = tmp_path / "video.txt"
+    local.write_text("final transcript", encoding="utf-8")
+
+    service = MagicMock()
+    service.files.return_value.update.return_value.execute.return_value = {"id": "t1"}
+    mocker.patch("src.drive.MediaFileUpload", return_value="media-obj")
+
+    drive.update_file(
+        service,
+        "t1",
+        local,
+        app_properties={"source_video_id": "v1", "artifact_type": "txt"},
+    )
+
+    kwargs = service.files.return_value.update.call_args.kwargs
+    assert kwargs["body"]["appProperties"] == {
+        "source_video_id": "v1",
+        "artifact_type": "txt",
+    }
+
+
+def test_set_file_app_properties_updates_metadata_only():
+    service = MagicMock()
+    service.files.return_value.update.return_value.execute.return_value = {"id": "v1"}
+
+    drive.set_file_app_properties(service, "v1", {"speaker_names": "[\"A\", \"B\"]"})
+
+    service.files.return_value.update.assert_called_once_with(
+        fileId="v1",
+        body={"appProperties": {"speaker_names": "[\"A\", \"B\"]"}},
+        fields="id, name, appProperties",
+        supportsAllDrives=True,
+    )
+
+
+def test_rename_file_updates_name_only():
+    service = MagicMock()
+    service.files.return_value.update.return_value.execute.return_value = {
+        "id": "t1",
+        "name": "new.txt",
+    }
+
+    drive.rename_file(service, "t1", "new.txt")
+
+    service.files.return_value.update.assert_called_once_with(
+        fileId="t1",
+        body={"name": "new.txt"},
+        fields="id, name",
+        supportsAllDrives=True,
+    )
+
+
 def test_list_folder_state_includes_txt_id():
     mp4 = [
         {"id": "v1", "name": "a.mp4", "mimeType": "video/mp4"},
@@ -266,7 +341,7 @@ def test_get_file_metadata_requests_expected_fields():
     assert result["parents"] == ["parent1"]
     service.files.return_value.get.assert_called_once_with(
         fileId="fid",
-        fields="id, name, mimeType, parents",
+        fields="id, name, mimeType, parents, size, appProperties",
         supportsAllDrives=True,
     )
 
@@ -300,6 +375,45 @@ def test_list_folder_state_returns_flags():
     assert by_id["v3"]["mp3_id"] is None
 
 
+def test_list_folder_state_matches_siblings_by_source_video_id_after_rename():
+    mp4 = [{"id": "v1", "name": "new name.mp4", "mimeType": "video/mp4"}]
+    mp3 = [{
+        "id": "m1",
+        "name": "old name.mp3",
+        "mimeType": "audio/mpeg",
+        "appProperties": {"source_video_id": "v1", "artifact_type": "mp3"},
+    }]
+    txt = [{
+        "id": "t1",
+        "name": "old name.txt",
+        "mimeType": "text/plain",
+        "appProperties": {"source_video_id": "v1", "artifact_type": "txt"},
+    }]
+    service = _make_list_service({"mp4": mp4, "mp3": mp3, "txt": txt})
+
+    items = drive.list_folder_state(service, "folder1")
+
+    assert items[0]["has_mp3"] is True
+    assert items[0]["mp3_id"] == "m1"
+    assert items[0]["has_txt"] is True
+    assert items[0]["txt_id"] == "t1"
+
+
+def test_list_unprocessed_mp4_matches_mp3_by_source_video_id_after_rename():
+    mp4 = [{"id": "v1", "name": "new name.mp4", "mimeType": "video/mp4"}]
+    mp3 = [{
+        "id": "m1",
+        "name": "old name.mp3",
+        "mimeType": "audio/mpeg",
+        "appProperties": {"source_video_id": "v1", "artifact_type": "mp3"},
+    }]
+    service = _make_list_service({"mp4": mp4, "mp3": mp3})
+
+    result = drive.list_unprocessed_mp4(service, "folder1")
+
+    assert result == []
+
+
 def test_drive_stem_preserves_slashes():
     name = "Call - 2026/05/28 17:27 GMT+04:00 – Recording.mp4"
     assert drive.drive_stem(name) == "Call - 2026/05/28 17:27 GMT+04:00 – Recording"
@@ -314,6 +428,15 @@ def test_safe_local_name_replaces_separators():
     safe = drive.safe_local_name(name)
     assert "/" not in safe
     assert safe == "Call - 2026_05_28 – Recording.mp4"
+
+
+def test_safe_local_name_replaces_windows_reserved_characters():
+    name = 'Call - 2026/05/28 17:27 GMT+04:00 <final>|draft?.mp4'
+    safe = drive.safe_local_name(name)
+
+    for char in '<>:"/\\|?*\0':
+        assert char not in safe
+    assert safe == "Call - 2026_05_28 17_27 GMT+04_00 _final__draft_.mp4"
 
 
 def test_list_folder_state_matches_siblings_with_slashes():

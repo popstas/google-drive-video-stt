@@ -52,5 +52,44 @@ def test_documented_commands_match_registered_subcommands():
 
 def test_skill_documents_provider_env_vars():
     text = SKILL_PATH.read_text(encoding="utf-8")
-    for var in ("STT_PROVIDER", "OPENAI_API_KEY", "DEEPGRAM_API_KEY", "ASR_URL", "FOLDER_IDS"):
+    for var in (
+        "STT_PROVIDER",
+        "OPENAI_API_KEY",
+        "OPENAI_POSTPROCESS",
+        "OPENAI_BATCH",
+        "DEEPGRAM_API_KEY",
+        "ASR_URL",
+        "FOLDER_IDS",
+    ):
         assert var in text, f"skill should document {var}"
+
+
+def test_skill_documents_drive_setup_as_drive_only_wizard():
+    text = SKILL_PATH.read_text(encoding="utf-8")
+
+    assert "Human-Facing Drive Setup Wizard" in text
+    assert "existing project id, or a new project name" in text
+    assert "Google Speech-to-Text is a separate setup step" in text
+    assert "Drive access is ready. Google STT is still not configured." in text
+    assert "Do not bundle Deepgram/OpenAI/Google STT setup into this wizard" in text
+    assert "changes the active project in the user's gcloud configuration" in text
+    assert "OAuth client id/secret" in text
+    assert "refresh token is not copied" in text
+
+
+def test_skill_documents_max_size_is_optional():
+    text = SKILL_PATH.read_text(encoding="utf-8")
+
+    assert "`--max-size` is optional and disabled by default" in text
+    assert "Do not invent a global default" in text
+
+
+def test_skill_documents_openai_full_drive_pipeline():
+    text = SKILL_PATH.read_text(encoding="utf-8")
+
+    assert "Full Drive MP4 To Final TXT With OpenAI Post-Processing" in text
+    assert "OPENAI_POSTPROCESS=true" in text
+    assert "STT_PROVIDER=openai" in text
+    assert "OpenAI does speech-to-text" in text
+    assert "OpenAI refines the text after any STT provider" in text
+    assert "There is no single local-MP4 CLI command" in text

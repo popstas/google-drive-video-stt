@@ -1,145 +1,444 @@
 ---
 name: gdstt-cli
-description: Operate the Google Drive video STT service via its `gdstt` CLI. Use when running OAuth, the polling loop, on-demand processing of a Drive file/folder, transcribing a local audio file, or inspecting folder state (sibling MP3/TXT presence). Triggers on "gdstt", "run the polling loop", "process a Drive file", "transcribe an mp3", "list folder state".
+description: Use when operating google-drive-video-stt through gdstt, setting up Google Drive OAuth access, inspecting Drive folder state, processing Drive MP4 files, setting speaker names, or transcribing local audio.
 ---
 
 # gdstt CLI
 
-Operator-facing CLI for the headless Google Drive video STT service. It wraps the
-existing operations (OAuth, polling loop, on-demand processing, STT, folder
-inspection) without duplicating business logic — every subcommand calls into the
-same `load_config()` / Drive / extractor / STT layers the service uses.
+Operator reference for the Google Drive video STT service. Prefer safe,
+single-target commands, avoid printing secrets, and ask before any command that
+changes Google Cloud, Drive, local auth files, or spends STT credits.
 
 ## Invocation
 
-The CLI is exposed two equivalent ways:
-
 ```bash
-gdstt <command> [args]            # console script (from `pip install -e .` / `uv sync`)
+gdstt <command> [args]
 uv run python -m src.cli <command> [args]
 ```
 
-`ffmpeg` must be on PATH for any command that extracts audio (`run`, `run-once`,
-`process`). All configuration is read from the environment (and a `.env` file if
-present) through `load_config()`; see `.env.example` for the full list.
+On Windows local checkouts, `gdstt` may not be on `PATH`; use:
+
+```powershell
+.\.venv\Scripts\gdstt.exe <command> [args]
+uv run python -m src.cli <command> [args]
+```
+
+Use `PYTHONIOENCODING=utf-8` or the installed `gdstt.exe` wrapper when printing
+Cyrillic names from ad-hoc Python/PowerShell scripts.
 
 ## Commands
 
 ### `auth [response_url]`
 
-Run the interactive OAuth flow and save `token.json` into `DATA_DIR` (default
-`data/`). The single user credential covers both Drive and Cloud STT (scopes
-`drive` + `cloud-platform`). Pass the redirect `response_url` only for the manual
-copy-paste flow; omit it for the normal browser flow.
+Run the app OAuth flow and save `token.json` into `DATA_DIR`.
 
 ```bash
 gdstt auth
 gdstt auth "http://localhost/?code=4/abc123&scope=..."
 ```
 
-Env: `DATA_DIR`. Requires `credentials.json` in `DATA_DIR`.
+Requires `credentials.json` in `DATA_DIR`.
+
+### `doctor [--drive]`
+
+Check local Drive/OAuth setup without changing anything. It does not validate STT
+provider secrets, so use it during first-time Drive setup before Deepgram/OpenAI
+is fully configured.
+
+```bash
+gdstt doctor
+gdstt doctor --drive
+```
+
+`--drive` authenticates and lists configured folders. Ask before using `--drive`
+if OAuth/browser prompts may appear.
+
+### `list` / `status`
+
+Read-only folder state.
+
+```bash
+gdstt list
+gdstt status --folder <folder-id>
+```
+
+Output format: `[mp3] [txt] <filename>`.
+
+### `status`
+
+Alias for `list`.
+
+```bash
+gdstt status
+gdstt status --folder <folder-id>
+```
 
 ### `run`
 
-Run the polling loop (`src/main.py:main`). Builds the Drive service once, then
-loops `run_once()` every `POLL_INTERVAL` seconds until interrupted. This is the
-same entry point the Docker container uses.
+Run the polling loop continuously. Ask before using it because it can process
+all pending configured folders and spend STT credits.
 
 ```bash
 gdstt run
 ```
 
-Env: `FOLDER_IDS`, `POLL_INTERVAL`, `BITRATE`, `DATA_DIR`, STT vars (see below),
-optional `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `PROXY_URL`.
-
 ### `run-once`
 
-Run a single polling cycle (one `run_once()`) and exit. Useful for cron-style
-invocation or manual one-shot processing of all configured folders.
+Run one polling cycle over all configured folders. Ask before using it because
+it can process every pending file in `FOLDER_IDS`.
 
 ```bash
 gdstt run-once
+gdstt run-once --dry-run
+gdstt run-once --max-size 50MB
+gdstt run-once --max-size 50MB --confirm-large
 ```
 
-Env: same as `run`.
+`--dry-run` previews work without downloading, uploading, or calling STT.
+`--max-size` skips larger videos unless `--confirm-large` is passed.
 
-### `process <target> [--folder]`
+### `process <target> [--folder] [--reprocess-txt] [--dry-run] [--max-size SIZE] [--confirm-large]`
 
-On-demand extraction (and transcription, if STT is enabled) for a specific Drive
-file or folder. By default the target type is auto-detected; pass `--folder` to
-force treating the ID as a folder.
+Process one Drive file or folder. Prefer a single file id. `--reprocess-txt`
+runs STT again and can spend provider credits.
 
 ```bash
-gdstt process 1AbCfileId            # auto-detect file vs folder
-gdstt process 1XyZfolderId --folder # force folder
+gdstt process <file-id>
+gdstt process <file-id> --reprocess-txt
+gdstt process <folder-id> --folder
+gdstt process <folder-id> --folder --dry-run
+gdstt process <folder-id> --folder --max-size 50MB
 ```
 
-Env: `BITRATE`, `DATA_DIR`, STT vars.
+For folder processing, use `--dry-run` first. Use `--max-size` when a folder may
+contain large videos; only pass `--confirm-large` after the human explicitly
+confirms the cost/risk.
 
-### `transcribe <audio> [-o/--output PATH]`
+### `speakers set <file-id> <name...>`
 
-STT-only on an existing local audio file (e.g. an MP3) using the configured
-provider. Prints the transcript to stdout, or writes it to `--output`. Does not
-touch Drive.
+Store explicit speaker names on a Drive MP4. Reprocess the file to apply them to
+an existing transcript.
 
 ```bash
-gdstt transcribe ./meeting.mp3
+gdstt speakers set <file-id> "Name 1" "Name 2"
+gdstt process <file-id> --reprocess-txt
+```
+
+### `refresh-names <file-id>`
+
+Rename linked generated MP3/TXT artifacts to match the current MP4 name without
+running STT.
+
+```bash
+gdstt refresh-names <file-id>
+```
+
+### `transcribe <audio> [-o PATH]`
+
+STT-only on a local audio file. Does not touch Drive and does not run the
+OpenAI post-processing pipeline.
+
+```bash
 gdstt transcribe ./meeting.mp3 -o ./meeting.txt
 ```
 
-Env: `STT_PROVIDER` (must be set to a real provider), `STT_LANGUAGE`,
-`STT_CHUNK_SECONDS`, and the provider-specific vars below.
+## Google Drive Auth Setup
 
-### `list` (alias `status`) `[--folder FOLDER_ID]`
+Use this when an agent needs Drive access. This is Drive-first setup; do not
+enable or configure Google STT unless the human explicitly asks for Google STT.
 
-Show folder state — which monitored MP4s already have a sibling `.mp3` / `.txt` —
-without doing any work. Inspects `FOLDER_IDS` by default, or a single folder via
-`--folder`. Exits 1 if no folders are configured and none is passed.
+### Human-Facing Drive Setup Wizard
 
-```bash
-gdstt list                          # all configured FOLDER_IDS
-gdstt status --folder 1XyZfolderId  # single folder (status is an alias)
+When Drive access is missing, guide the human with this flow:
+
+1. Say plainly:
+
+   ```text
+   I can set up Google Drive access for this agent. Please sign in to Google if
+   needed, then tell me which Google Cloud project to use. You can give me an
+   existing project id, or a new project name you want created.
+   ```
+
+2. Ask for exactly these choices before changing anything:
+
+   - Google account/project: existing project id, or new project name.
+   - Drive folder: existing folder id, or permission to create/select one later.
+   - Local app data: keep `DATA_DIR=data`, or use another path.
+   - Permission to run Drive-only setup commands.
+
+3. Explain the boundary:
+
+   ```text
+   I will configure Google Drive access only. Google Speech-to-Text is a separate setup step.
+   I will not enable Speech/Storage APIs or set STT_PROVIDER=google unless you ask for that separately.
+   ```
+
+4. Run read-only discovery first, then ask for confirmation before each mutating
+   group: selecting/creating a project, enabling Drive API, writing
+   `credentials.json`, running OAuth, and setting the folder id.
+
+   Before `gcloud config set project`, explain that it changes the active
+   project in the user's gcloud configuration, not only this repository.
+
+   Before creating `data/credentials.json` from ADC metadata, explain that only
+   OAuth client id/secret are copied and the ADC refresh token is not copied.
+
+5. Finish with:
+
+   ```text
+   Drive access is ready. Google STT is still not configured.
+   ```
+
+Do not bundle Deepgram/OpenAI/Google STT setup into this wizard. If the human asks
+for STT later, handle it as a separate command/task.
+
+### Required Questions Before Mutating Anything
+
+Ask and wait for answers before running setup commands:
+
+- Which Google Cloud project id should be used?
+- Use an existing project, or create a new one?
+- Is billing setup needed? Only ask if the user wants Google STT/GCS or project creation requires it.
+- Which Drive folder id should go into `FOLDER_IDS`?
+- Should `DATA_DIR` stay `data`, or use another path?
+- May I run `gcloud` commands that change config, enable APIs, or write `data/credentials.json`?
+- May I run `gdstt auth` and open the OAuth browser flow?
+
+The app currently requests both OAuth scopes from `src/auth.py`:
+
+```text
+https://www.googleapis.com/auth/drive
+https://www.googleapis.com/auth/cloud-platform
 ```
 
-Output line format: `[mp3] [txt] <filename>` (each tag shows `---` when absent).
+Explain this before auth and ask for confirmation. The `cloud-platform` OAuth
+scope is not the same as enabling Google STT APIs or setting `STT_PROVIDER=google`.
+Do not enable Speech/Storage APIs or configure Google STT without a separate
+explicit confirmation.
 
-Env: `FOLDER_IDS`, `DATA_DIR`.
+### Drive-Only Setup Flow
 
-## Environment variables
+Run read-only discovery first:
 
-Common (all commands that touch Drive/STT):
+```powershell
+Get-Command gcloud
+gcloud config get-value project
+gcloud auth list
+```
 
-- `FOLDER_IDS` — comma-separated Drive folder IDs to monitor.
-- `POLL_INTERVAL` — loop interval in seconds (default 600; `run` only).
-- `BITRATE` — MP3 bitrate for ffmpeg extraction (default `96k`).
-- `DATA_DIR` — holds `credentials.json` / `token.json` (default `data`).
-- `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — optional error notifications.
-- `PROXY_URL` — optional proxy for Telegram, OpenAI, ASR, Deepgram (http/https/socks5).
+After confirmation, set/select the project:
 
-STT selection:
+```powershell
+gcloud config set project <project-id>
+```
 
-- `STT_PROVIDER` — `""` (disabled), `openai`, `google`, `asr`, or `deepgram`.
-- `STT_LANGUAGE` — language hint. Optional for openai/asr (auto-detect when empty);
-  defaults to `ru` for deepgram; **required** BCP-47 (e.g. `en-US`) for google.
-- `STT_CHUNK_SECONDS` — chunk length for chunked providers (default 600; ignored by
-  google/deepgram which transcribe the whole file).
+Warn that this changes the active project in the user's gcloud configuration,
+not just this checkout.
 
-Provider-specific (validated by `load_config()` only when that provider is selected):
+For Drive-only access, enable only Drive API:
 
-- `openai`: `OPENAI_API_KEY` (required).
-- `deepgram`: `DEEPGRAM_API_KEY` or `DEEPGRAM_API_KEY_FILE` (required), plus optional
-  `DEEPGRAM_MODEL`, `DEEPGRAM_DIARIZE_MODEL`, `DEEPGRAM_AUDIO_SOURCE`,
-  `DEEPGRAM_TXT_FORMATTER`, `DEEPGRAM_KEYTERMS_ENABLED`, `DEEPGRAM_KEYTERMS_FILE`.
-- `google`: `GOOGLE_CLOUD_PROJECT` and `GOOGLE_STT_GCS_BUCKET` (required), plus
-  `STT_LANGUAGE` (required). Re-run `gdstt auth` after first enabling so the
-  `cloud-platform` scope is granted.
-- `asr`: `ASR_URL` (required) — base URL of a whisper-asr-webservice instance.
+```powershell
+gcloud services enable drive.googleapis.com
+```
+
+Do not enable these unless the human separately confirms Google STT:
+
+```text
+speech.googleapis.com
+storage.googleapis.com
+```
+
+Create `data/credentials.json` from local gcloud ADC client metadata only after
+confirmation. This writes OAuth client id/secret only; never copy the ADC
+`refresh_token` or print it:
+
+```powershell
+gcloud auth application-default login `
+  --scopes=https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/cloud-platform
+
+New-Item -ItemType Directory -Force data | Out-Null
+$adcPath = Join-Path $env:APPDATA "gcloud\application_default_credentials.json"
+$adc = Get-Content $adcPath | ConvertFrom-Json
+$client = @{
+  installed = @{
+    client_id = $adc.client_id
+    client_secret = $adc.client_secret
+    auth_uri = "https://accounts.google.com/o/oauth2/auth"
+    token_uri = "https://oauth2.googleapis.com/token"
+    redirect_uris = @("http://localhost")
+  }
+}
+$client | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 data\credentials.json
+```
+
+Then, after confirmation, run:
+
+```powershell
+.\.venv\Scripts\gdstt.exe auth
+```
+
+Verify without printing secrets:
+
+```powershell
+.\.venv\Scripts\gdstt.exe list
+```
+
+If `FOLDER_IDS` is not set, ask for a Drive folder id or permission to create
+one. Do not create folders without confirmation.
+
+## Operator Playbooks
+
+### Check What Is Ready
+
+Run read-only status first:
+
+```bash
+gdstt list
+gdstt status --folder <folder-id>
+```
+
+Explain `[mp3] [txt]` plainly:
+
+- `[txt]` means a transcript is linked or matched.
+- `[mp3]` means a Drive MP3 artifact is linked or matched.
+- `[---]` means missing or only present as an unlinked legacy file.
+
+If a large file is `[---] [---]`, do not run `run-once` or folder `process`
+without warning that STT may spend credits. Prefer:
+
+```bash
+gdstt run-once --dry-run
+gdstt process <folder-id> --folder --dry-run
+gdstt process <folder-id> --folder --max-size 50MB
+```
+
+Only use `--confirm-large` after the human explicitly confirms processing files
+larger than the `--max-size` threshold.
+
+`--max-size` is optional and disabled by default. Do not invent a global default;
+use it only when the human asks for a size guard or when you are about to run a
+folder-wide command and want to offer a manual safety limit.
+
+### Fix Speaker Names
+
+```bash
+gdstt speakers set <file-id> "Name 1" "Name 2"
+gdstt process <file-id> --reprocess-txt
+```
+
+Warn that `--reprocess-txt` runs STT again. Prefer a single file id.
+
+### Source MP4 Was Renamed
+
+```bash
+gdstt refresh-names <file-id>
+```
+
+Works for artifacts linked by `appProperties.source_video_id`. Legacy artifacts
+without metadata may need regeneration or manual cleanup.
+
+### Deepgram TXT Exists But MP3 Does Not
+
+Deepgram default uses temporary `m4a_copy` and does not upload a Drive MP3 unless
+requested:
+
+```env
+DRIVE_MP3_ARTIFACT=true
+```
+
+To create only MP3 for a file that already has TXT, set that env var for one
+command and do not pass `--reprocess-txt`.
+
+### Full Drive MP4 To Final TXT With OpenAI Post-Processing
+
+Use this when the human asks for the whole pipeline in one request: take a Drive
+MP4, run STT, refine the transcript with OpenAI, and upload/overwrite the linked
+TXT next to the source video.
+
+Requirements:
+
+- Drive access works (`gdstt doctor --drive` or `gdstt list` succeeds).
+- An STT provider is configured, usually `STT_PROVIDER=deepgram`.
+- `OPENAI_POSTPROCESS=true`.
+- `OPENAI_API_KEY` is set.
+- Optional: `OPENAI_MODEL` (defaults to `gpt-5.4-mini`).
+- Optional: `OPENAI_BATCH=true` for lower cost and higher latency.
+- Optional: `PROXY_URL` if OpenAI traffic must use a proxy.
+
+Safe operator flow:
+
+```bash
+gdstt doctor
+gdstt list
+gdstt process <drive-mp4-file-id> --dry-run
+gdstt process <drive-mp4-file-id>
+```
+
+If the TXT already exists and the human wants to regenerate it with OpenAI
+post-processing, ask before spending STT/OpenAI credits, then run:
+
+```bash
+gdstt process <drive-mp4-file-id> --reprocess-txt
+```
+
+For folder-wide processing, offer `--dry-run` first and optionally a manual
+`--max-size SIZE` guard. Do not invent a default size limit.
+
+The OpenAI post-processing pipeline is not the same as `STT_PROVIDER=openai`:
+
+- `STT_PROVIDER=openai` means OpenAI does speech-to-text.
+- `OPENAI_POSTPROCESS=true` means OpenAI refines the text after any STT provider.
+
+### Local MP3/MP4 Limits
+
+`gdstt transcribe <audio>` can transcribe a local audio file and write local TXT,
+but it currently does not run `OPENAI_POSTPROCESS` and does not upload anything
+to Drive. There is no single local-MP4 CLI command; Drive MP4 processing is the
+complete MP4-to-final-Drive-TXT pipeline.
+
+### Inspect Config Without Running Work
+
+Do not print API keys, OAuth tokens, or `data/token.json`.
+
+```bash
+python - <<'PY'
+from src.config import load_config
+cfg = load_config(validate_providers=False)
+print(cfg.folder_ids)
+print(cfg.stt_provider)
+print(cfg.deepgram_audio_source)
+print(cfg.drive_mp3_artifact)
+print(cfg.stt_postprocess)
+print(cfg.openai_postprocess)
+print(cfg.openai_batch)
+PY
+```
+
+## Environment Variables
+
+- `FOLDER_IDS` - comma-separated Drive folder IDs to monitor.
+- `POLL_INTERVAL` - loop interval in seconds.
+- `BITRATE` - MP3 bitrate for ffmpeg extraction.
+- `DRIVE_MP3_ARTIFACT` - upload a Drive MP3 artifact. Defaults false for
+  Deepgram `m4a_copy`, true otherwise.
+- `DATA_DIR` - holds `credentials.json` / `token.json`.
+- `STT_PROVIDER` - `""`, `openai`, `google`, `asr`, or `deepgram`.
+- `STT_LANGUAGE` - language hint; defaults to `ru` for deepgram.
+- `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, `DEEPGRAM_API_KEY_FILE`, `ASR_URL` -
+  provider secrets/settings; never print secret values.
+- `OPENAI_POSTPROCESS` - run OpenAI transcript refinement after STT.
+- `OPENAI_MODEL` - OpenAI post-processing model, default `gpt-5.4-mini`.
+- `OPENAI_BATCH` - submit OpenAI post-processing through Batch API.
+- `GOOGLE_CLOUD_PROJECT`, `GOOGLE_STT_GCS_BUCKET` - only required for
+  `STT_PROVIDER=google`; do not add or require these for Drive-only access.
 
 ## Notes
 
-- `auth` errors (`RefreshError` / `AuthError`) mean the saved token is missing a
-  scope or expired — re-run `gdstt auth`.
-- Idempotency is sibling-file based: a file with a sibling `.mp3` is not re-extracted;
-  a file with a sibling `.txt` is not re-transcribed. Use `list` to see current state.
-- Tests for the CLI live in `tests/test_cli.py`; the command surface documented here
-  is kept in sync by `tests/test_skill_docs.py`.
+- `auth` errors usually mean missing/expired token or missing scope; re-run
+  `gdstt auth` after confirming with the human.
+- Idempotency uses `appProperties.source_video_id` for new artifacts and
+  filename-stem matching as a legacy fallback.
+- `run-once` processes all pending configured folders; use single-file `process`
+  when testing or controlling spend.
+- Tests for this command surface live in `tests/test_cli.py` and
+  `tests/test_skill_docs.py`.

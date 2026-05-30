@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import tempfile
 import time
 import traceback
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 def _save_and_upload_txt(
     service: Any,
+    source_file_id: str,
     mp4_name: str,
     text: str,
     folder_id: str,
@@ -32,14 +34,29 @@ def _save_and_upload_txt(
     stem = drive.drive_stem(mp4_name)
     drive_txt_name = stem + ".txt"
     txt_path = tmp_dir / (drive.safe_local_name(stem) + ".txt")
+    app_properties = {
+        drive.SOURCE_VIDEO_ID_PROPERTY: source_file_id,
+        drive.ARTIFACT_TYPE_PROPERTY: "txt",
+    }
     txt_path.write_text(text, encoding="utf-8")
     if txt_id:
         # Overwrite the existing sibling .txt in place rather than creating a duplicate.
-        drive.update_file(service, txt_id, txt_path, mime_type=drive.TXT_MIME)
+        drive.update_file(
+            service,
+            txt_id,
+            txt_path,
+            mime_type=drive.TXT_MIME,
+            app_properties=app_properties,
+        )
         logger.info("Overwrote %s (id=%s) in folder %s", drive_txt_name, txt_id, folder_id)
     else:
         drive.upload(
-            service, txt_path, folder_id, mime_type=drive.TXT_MIME, name=drive_txt_name
+            service,
+            txt_path,
+            folder_id,
+            mime_type=drive.TXT_MIME,
+            name=drive_txt_name,
+            app_properties=app_properties,
         )
         logger.info("Uploaded %s to folder %s", drive_txt_name, folder_id)
 
@@ -54,7 +71,33 @@ def _prepare_deepgram_audio(mp4_path: Path, config: Config) -> Path:
     raise RuntimeError(f"Unknown Deepgram audio source: {config.deepgram_audio_source}")
 
 
-def process_item(service: Any, item: dict, folder_id: str, config: Config) -> None:
+def _should_make_mp3_artifact(config: Config) -> bool:
+    return config.drive_mp3_artifact
+
+
+def _speaker_names_from_file_info(file_info: dict) -> list[str] | None:
+    raw = file_info.get("appProperties", {}).get(drive.SPEAKER_NAMES_PROPERTY)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Ignoring invalid speaker_names appProperty on %s", file_info.get("id"))
+        return None
+    if not isinstance(parsed, list):
+        return None
+    names = [item.strip() for item in parsed if isinstance(item, str) and item.strip()]
+    return names or None
+
+
+def process_item(
+    service: Any,
+    item: dict,
+    folder_id: str,
+    config: Config,
+    *,
+    reprocess_txt: bool = False,
+) -> None:
     file_info = item["file"]
     file_id = file_info["id"]
     file_name = file_info["name"]
@@ -64,8 +107,8 @@ def process_item(service: Any, item: dict, folder_id: str, config: Config) -> No
     mp3_name = item.get("mp3_name")
 
     stt_enabled = bool(config.stt_provider)
-    needs_mp3 = not has_mp3
-    needs_txt = stt_enabled and not has_txt
+    needs_mp3 = _should_make_mp3_artifact(config) and not has_mp3
+    needs_txt = stt_enabled and (reprocess_txt or not has_txt)
 
     if not needs_mp3 and not needs_txt:
         return
@@ -86,7 +129,15 @@ def process_item(service: Any, item: dict, folder_id: str, config: Config) -> No
             mp3_path = extract_mp3(mp4_path, bitrate=config.bitrate)
             mp3_drive_name = drive.drive_stem(file_name) + ".mp3"
             drive.upload(
-                service, mp3_path, folder_id, mime_type=drive.MP3_MIME, name=mp3_drive_name
+                service,
+                mp3_path,
+                folder_id,
+                mime_type=drive.MP3_MIME,
+                name=mp3_drive_name,
+                app_properties={
+                    drive.SOURCE_VIDEO_ID_PROPERTY: file_id,
+                    drive.ARTIFACT_TYPE_PROPERTY: "mp3",
+                },
             )
             logger.info("Uploaded %s to folder %s", mp3_drive_name, folder_id)
 
@@ -105,12 +156,22 @@ def process_item(service: Any, item: dict, folder_id: str, config: Config) -> No
             else:
                 stt_audio_path = mp3_path
             text = transcribe_file(stt_audio_path, config)
+            speaker_names = _speaker_names_from_file_info(file_info)
             if config.openai_postprocess:
-                text = openai_pipeline.refine_transcript(text, file_name, config)
+                text = openai_pipeline.refine_transcript(
+                    text,
+                    file_name,
+                    config,
+                    speaker_names=speaker_names,
+                )
             elif config.stt_postprocess:
-                text = postprocess.postprocess_transcript(text, file_name)
+                text = postprocess.postprocess_transcript(
+                    text,
+                    file_name,
+                    speaker_names=speaker_names,
+                )
             _save_and_upload_txt(
-                service, file_name, text, folder_id, tmp_dir,
+                service, file_id, file_name, text, folder_id, tmp_dir,
                 txt_id=item.get("txt_id"),
             )
 
@@ -119,13 +180,86 @@ def _pending_items(items: list[dict], config: Config) -> list[dict]:
     stt_enabled = bool(config.stt_provider)
     return [
         item for item in items
-        if not item.get("has_mp3")
+        if (_should_make_mp3_artifact(config) and not item.get("has_mp3"))
         or (stt_enabled and not item.get("has_txt"))
     ]
 
 
+def _file_size_bytes(item: dict) -> int | None:
+    raw = item.get("file", {}).get("size")
+    if raw in (None, ""):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_bytes(value: int) -> str:
+    units = ("B", "KB", "MB", "GB", "TB")
+    amount = float(value)
+    for unit in units:
+        if amount < 1000 or unit == units[-1]:
+            if unit == "B":
+                return f"{value} B"
+            return f"{amount:.1f} {unit}"
+        amount /= 1000
+    return f"{value} B"
+
+
+def _items_allowed_by_size(
+    items: list[dict],
+    *,
+    max_size_bytes: int | None,
+    confirm_large: bool,
+) -> list[dict]:
+    if max_size_bytes is None or confirm_large:
+        return items
+
+    allowed = []
+    for item in items:
+        file_info = item.get("file", {})
+        size = _file_size_bytes(item)
+        if size is not None and size > max_size_bytes:
+            logger.warning(
+                "Skipping %s (id=%s): size %s exceeds --max-size %s; "
+                "pass --confirm-large to process it",
+                file_info.get("name"),
+                file_info.get("id"),
+                _format_bytes(size),
+                _format_bytes(max_size_bytes),
+            )
+            continue
+        allowed.append(item)
+    return allowed
+
+
+def _log_dry_run(folder_id: str, item: dict, config: Config, *, reprocess_txt: bool) -> None:
+    file_info = item["file"]
+    has_mp3 = item.get("has_mp3", False)
+    has_txt = item.get("has_txt", False)
+    needs_mp3 = _should_make_mp3_artifact(config) and not has_mp3
+    needs_txt = bool(config.stt_provider) and (reprocess_txt or not has_txt)
+    logger.info(
+        "DRY RUN: would process %s (id=%s) in folder %s [mp3=%s, txt=%s]",
+        file_info["name"],
+        file_info["id"],
+        folder_id,
+        "make" if needs_mp3 else "skip",
+        "make" if needs_txt else "skip",
+    )
+
+
 def process_target(
-    service: Any, target_id: str, config: Config, *, is_folder: bool | None = None,
+    service: Any,
+    target_id: str,
+    config: Config,
+    *,
+    is_folder: bool | None = None,
+    reprocess_txt: bool = False,
+    dry_run: bool = False,
+    max_size_bytes: int | None = None,
+    confirm_large: bool = False,
 ) -> None:
     """Process a single Drive file or every pending file in a folder, on demand."""
     meta = drive.get_file_metadata(service, target_id)
@@ -134,10 +268,19 @@ def process_target(
 
     if treat_as_folder:
         items = drive.list_folder_state(service, target_id)
-        pending = _pending_items(items, config)
+        pending = items if reprocess_txt else _pending_items(items, config)
+        pending = _items_allowed_by_size(
+            pending,
+            max_size_bytes=max_size_bytes,
+            confirm_large=confirm_large,
+        )
         logger.info("Folder %s: %d pending file(s)", target_id, len(pending))
+        if dry_run:
+            for item in pending:
+                _log_dry_run(target_id, item, config, reprocess_txt=reprocess_txt)
+            return
         for item in pending:
-            process_item(service, item, target_id, config)
+            process_item(service, item, target_id, config, reprocess_txt=reprocess_txt)
         return
 
     parents = meta.get("parents") or []
@@ -152,10 +295,46 @@ def process_target(
         raise RuntimeError(
             f"File {target_id} is not an MP4 in folder {folder_id}"
         )
-    process_item(service, match, folder_id, config)
+    allowed = _items_allowed_by_size(
+        [match],
+        max_size_bytes=max_size_bytes,
+        confirm_large=confirm_large,
+    )
+    if not allowed:
+        return
+    if dry_run:
+        _log_dry_run(folder_id, match, config, reprocess_txt=reprocess_txt)
+        return
+    process_item(service, match, folder_id, config, reprocess_txt=reprocess_txt)
 
 
-def run_once(service: Any, config: Config) -> None:
+def refresh_artifact_names(service: Any, file_id: str) -> None:
+    """Rename linked generated artifacts to match the current source MP4 stem."""
+    meta = drive.get_file_metadata(service, file_id)
+    parents = meta.get("parents") or []
+    if not parents:
+        raise RuntimeError(f"File {file_id} has no parent folder")
+    folder_id = parents[0]
+    items = drive.list_folder_state(service, folder_id)
+    item = next((it for it in items if it["file"]["id"] == file_id), None)
+    if item is None:
+        raise RuntimeError(f"File {file_id} is not an MP4 in folder {folder_id}")
+
+    stem = drive.drive_stem(item["file"]["name"])
+    if item.get("mp3_id"):
+        drive.rename_file(service, item["mp3_id"], stem + ".mp3")
+    if item.get("txt_id"):
+        drive.rename_file(service, item["txt_id"], stem + ".txt")
+
+
+def run_once(
+    service: Any,
+    config: Config,
+    *,
+    dry_run: bool = False,
+    max_size_bytes: int | None = None,
+    confirm_large: bool = False,
+) -> None:
     for folder_id in config.folder_ids:
         try:
             items = drive.list_folder_state(service, folder_id)
@@ -170,7 +349,16 @@ def run_once(service: Any, config: Config) -> None:
             continue
 
         pending = _pending_items(items, config)
+        pending = _items_allowed_by_size(
+            pending,
+            max_size_bytes=max_size_bytes,
+            confirm_large=confirm_large,
+        )
         logger.info("Folder %s: %d pending file(s)", folder_id, len(pending))
+        if dry_run:
+            for item in pending:
+                _log_dry_run(folder_id, item, config, reprocess_txt=False)
+            continue
         for item in pending:
             try:
                 process_item(service, item, folder_id, config)

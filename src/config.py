@@ -35,6 +35,7 @@ class Config:
     stt_language: str
     stt_chunk_seconds: int
     stt_postprocess: bool = True
+    drive_mp3_artifact: bool = True
     openai_model: str = "gpt-5.4-mini"
     openai_postprocess: bool = False
     openai_batch: bool = False
@@ -62,7 +63,7 @@ def _load_deepgram_api_key(api_key: str, api_key_file: str) -> str:
 
     path = Path(api_key_file)
     try:
-        raw = path.read_text(encoding="utf-8").strip()
+        raw = path.read_text(encoding="utf-8-sig").strip()
     except OSError as exc:
         raise ValueError(f"DEEPGRAM_API_KEY_FILE could not be read: {path}") from exc
     if not raw:
@@ -100,7 +101,7 @@ def _load_deepgram_keyterms(enabled: bool, keyterms_file: Path) -> tuple[str, ..
         return ()
 
     try:
-        raw_lines = keyterms_file.read_text(encoding="utf-8").splitlines()
+        raw_lines = keyterms_file.read_text(encoding="utf-8-sig").splitlines()
     except OSError as exc:
         raise ValueError(f"DEEPGRAM_KEYTERMS_FILE could not be read: {keyterms_file}") from exc
 
@@ -119,7 +120,7 @@ def _load_deepgram_keyterms(enabled: bool, keyterms_file: Path) -> tuple[str, ..
 
 def load_config(*, validate_providers: bool = True) -> Config:
     if load_dotenv is not None:
-        load_dotenv(override=False)
+        load_dotenv(dotenv_path=".env", override=False, encoding="utf-8-sig")
     folder_ids = _parse_folder_ids(os.environ.get("FOLDER_IDS", ""))
 
     poll_raw = os.environ.get("POLL_INTERVAL", "600").strip() or "600"
@@ -191,6 +192,13 @@ def load_config(*, validate_providers: bool = True) -> Config:
 
     stt_postprocess = _parse_bool(
         os.environ.get("STT_POSTPROCESS", ""), default=True
+    )
+    drive_mp3_artifact_raw = os.environ.get("DRIVE_MP3_ARTIFACT", "")
+    drive_mp3_artifact_default = not (
+        stt_provider == "deepgram" and deepgram_audio_source == "m4a_copy"
+    )
+    drive_mp3_artifact = _parse_bool(
+        drive_mp3_artifact_raw, default=drive_mp3_artifact_default
     )
 
     openai_model = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini").strip() or "gpt-5.4-mini"
@@ -276,6 +284,7 @@ def load_config(*, validate_providers: bool = True) -> Config:
         stt_language=stt_language,
         stt_chunk_seconds=stt_chunk_seconds,
         stt_postprocess=stt_postprocess,
+        drive_mp3_artifact=drive_mp3_artifact,
         openai_model=openai_model,
         openai_postprocess=openai_postprocess,
         openai_batch=openai_batch,
