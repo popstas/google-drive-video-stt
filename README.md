@@ -378,7 +378,36 @@ For recovery steps and provider-specific details, see
 Shared repository instructions live in [`AGENTS.md`](AGENTS.md). The portable operator
 skill lives in [`.agents/skills/gdstt-cli/`](.agents/skills/gdstt-cli/), with a
 compatibility mirror under [`.claude/skills/gdstt-cli/`](.claude/skills/gdstt-cli/).
-Keep the bundle synchronized with:
+
+Agents that support project-scoped skills can use those bundled copies directly from
+the checkout. To install the skill for Codex across projects, copy the portable bundle
+into `$CODEX_HOME/skills` (default: `~/.codex/skills`) and restart Codex:
+
+```powershell
+$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ".codex" }
+New-Item -ItemType Directory -Force (Join-Path $codexHome "skills") | Out-Null
+Copy-Item -Recurse -Force .agents\skills\gdstt-cli (Join-Path $codexHome "skills")
+```
+
+```bash
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+cp -R .agents/skills/gdstt-cli "${CODEX_HOME:-$HOME/.codex}/skills/"
+```
+
+For Claude-compatible loaders, install the synchronized compatibility mirror and start
+a new session:
+
+```powershell
+New-Item -ItemType Directory -Force (Join-Path $HOME ".claude\skills") | Out-Null
+Copy-Item -Recurse -Force .claude\skills\gdstt-cli (Join-Path $HOME ".claude\skills")
+```
+
+```bash
+mkdir -p "$HOME/.claude/skills"
+cp -R .claude/skills/gdstt-cli "$HOME/.claude/skills/"
+```
+
+After changing the bundled skill, keep all copies synchronized with:
 
 ```bash
 uv run python scripts/check-agent-skill.py
