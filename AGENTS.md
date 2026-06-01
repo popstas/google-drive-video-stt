@@ -25,15 +25,19 @@ The code is env-driven through `src/config.py`, the main runtime lives in
 ## Commands
 
 ```bash
+uv tool install --editable .   # install the global gdstt command from this checkout
+uv tool update-shell           # refresh PATH helpers for uv-installed tools
 uv sync --extra dev          # install deps incl. pytest/ruff (use .venv)
 uv run pytest                # run all tests
 uv run pytest tests/test_stt_google.py::test_name   # single test
 uv run ruff check            # lint (line-length 100, target py311)
 uv run python scripts/sync-agent-skills.py --check  # validate generated skill mirrors
 uv run python scripts/sync-agent-skills.py --write  # refresh generated skill mirrors
-uv run python -m src.auth    # one-time interactive OAuth -> data/token.json
+gdstt setup                  # first-time local setup wizard (env, auth, Drive check)
+gdstt auth [--manual]        # OAuth-only refresh or recovery flow
+uv run python -m src.auth    # module entry for the same OAuth flow
 uv run python -m src.main    # run the polling loop locally
-gdstt <auth|run|run-once|process|transcribe|list>   # operator CLI (src/cli.py); installed by uv sync
+gdstt <setup|auth|plan|execute|run|run-once|process|transcribe|list>  # operator CLI (src/cli.py)
 docker compose up -d --build # containerized deployment (mounts ./data)
 ```
 
@@ -58,6 +62,13 @@ it auto-detects file vs folder by `mimeType` (override with `is_folder`), then r
 `process_item` over a single file or every pending file in a folder. The `gdstt` CLI
 (`src/cli.py`) wraps the same `load_config()`/Drive/STT layers behind argparse subcommands
 without duplicating business logic.
+
+**Agent runtime policy** (`src/pipeline_profile.py`, `src/pipeline_policy.py`,
+`src/pipeline_executor.py`): `gdstt plan --json` parses a compact intent and
+expands `config/pipelines/default.json` plus optional gitignored
+`config/pipelines/local.json` into a deterministic plan. `gdstt execute --json`
+enforces the same confirmation and secret-readiness gates, then delegates to
+`process_target` instead of duplicating processing logic.
 
 **Post-processing** runs in `process_item` after `transcribe_file` and before upload, gated
 by config: `openai_postprocess` (LLM path, `src/openai_pipeline.py` — OpenAI Responses API,
@@ -93,20 +104,29 @@ first, else splits with `chunk_mp3` (`STT_CHUNK_SECONDS`) and calls `transcribe_
 - `deepgram`: full-file path — can use `m4a_copy`, `mp3_96k`, or `mp3_192k`; tuning stays
   provider-specific, but the CLI workflow stays the same.
 
-**Auth** (`src/auth.py`): single OAuth user credential covers both Drive and Cloud STT
-(scopes `drive` + `cloud-platform`) — no service account. `load_credentials` inspects the
-saved token's `scopes` directly (because `from_authorized_user_file` echoes the requested
-scopes, not the granted ones); a missing scope raises `AuthError` telling you to re-auth.
-Adding a scope to `SCOPES` requires deleting `data/token.json` and re-running `src.auth`.
+**Auth/setup** (`src/auth.py`, `src/setup.py`): single OAuth user credential covers both
+Drive and Cloud STT (scopes `drive` + `cloud-platform`) — no service account. `gdstt setup`
+is the first-run local wizard: it updates `.env`, defaults `STT_PROVIDER` to `deepgram`,
+prompts for API keys required by the active pipeline profile, prepares
+`data/credentials.json` from ADC client metadata, runs OAuth, and verifies Drive access.
+`gdstt auth` remains the smaller OAuth-only path for
+refresh, recovery, or headless/manual exchange. `load_credentials` inspects the saved token's
+`scopes` directly (because `from_authorized_user_file` echoes the requested scopes, not the
+granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding a scope to
+`SCOPES` requires deleting `data/token.json` and re-running auth.
 
 ## Core invariants
 
-- `STT_PROVIDER` selects the speech-to-text backend. The CLI flow should stay
-  stable even if the provider changes.
-- Drive-only commands use `load_config(validate_providers=False)`: `auth`,
-  `doctor`, `list` / `status`, `speakers set`, and `refresh-names`.
+- `STT_PROVIDER` selects the speech-to-text backend. When it is absent,
+  `load_config()` treats it as `deepgram`; set `STT_PROVIDER=disabled` to skip
+  transcription explicitly. The CLI flow should stay stable even if the provider changes.
+- Bootstrap and Drive-only commands use `load_config(validate_providers=False)`:
+  `setup`, `auth`, `doctor`, `list` / `status`, `speakers set`, `refresh-names`,
+  and `plan`.
 - Processing commands validate provider configuration and can spend credits:
-  `run`, `run-once`, `process`, and `transcribe`.
+  `run`, `run-once`, `process`, `transcribe`, and `execute`.
+- Agent JSON intents never contain API keys. Readiness output reports only
+  `configured` or `missing`.
 - `OPENAI_POSTPROCESS=true` is independent of `STT_PROVIDER` and can refine the
   transcript after any provider.
 - `STT_CHUNK_SECONDS` only matters for chunking providers. Deepgram and Google

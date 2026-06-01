@@ -3,14 +3,30 @@
 Use this reference when detailed syntax, aliases, examples, or flag
 interactions are needed. Start with the smallest safe command.
 
-## `auth [response_url]`
+## `setup`
+
+Run the first-time local setup wizard. It creates `.env` from `.env.example`
+when needed, writes `FOLDER_IDS`, defaults `STT_PROVIDER=deepgram`, prompts for
+the API keys required by the active pipeline profile, discovers gcloud and ADC
+client metadata when available, runs OAuth, verifies Drive access, and prints
+the safe next steps.
+
+```bash
+gdstt setup
+```
+
+## `auth [--manual] [response_url]`
 
 Run OAuth and save `token.json` into `DATA_DIR`.
 
 ```bash
 gdstt auth
+gdstt auth --manual
 gdstt auth "http://localhost/?code=4/abc123&scope=..."
 ```
+
+Normal mode opens a localhost browser flow. `--manual` prints the URL instead;
+passing `response_url` completes that manual exchange.
 
 ## `doctor [--drive]`
 
@@ -30,6 +46,31 @@ Read-only folder state. Output format: `[mp3] [txt] <filename>`.
 gdstt list
 gdstt status --folder <folder-id>
 ```
+
+## `plan --json '<intent>'`
+
+Expand a compact agent intent into a deterministic processing plan. Planning
+reports required secret readiness as booleans and does not mutate Drive.
+
+```bash
+gdstt plan --json '{"action":"process","targets":["<file-id>"]}'
+```
+
+On PowerShell, write the intent to a JSON file and use
+`gdstt plan --json-file .\intent.json` to avoid native process quoting issues.
+
+## `execute --json '<intent>' [--confirm]`
+
+Execute the same intent after policy checks. Folder-wide processing and
+`reprocess_txt` require `--confirm` unless the caller already supplied it after
+reviewing the plan.
+
+```bash
+gdstt execute --json '{"action":"process","targets":["<file-id>"]}'
+gdstt execute --json '{"action":"process","targets":["<folder-id>"],"target_type":"folder"}' --confirm
+```
+
+`execute` also accepts `--json-file <path>`.
 
 ## `run`
 

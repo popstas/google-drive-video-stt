@@ -17,6 +17,8 @@ rejects files over 200 MB, and Cloud STT, which doesn't accept MP4 directly).
 - Sibling `.mp3`/`.txt` names preserve the full Drive file name, including `/` characters
 - Explicit speaker names can be stored on the Drive MP4 when the filename is not
   enough for reliable speaker mapping
+- Agent JSON pipeline with deterministic planning, profile defaults, and
+  confirmation gates for broad or destructive processing
 - Docker-first deployment, all mutable state in `./data`
 
 ## Requirements
@@ -30,28 +32,34 @@ rejects files over 200 MB, and Cloud STT, which doesn't accept MP4 directly).
 
 ## Setup
 
-1. Clone the repo and install dependencies (use `--extra dev` for tests/lint tools):
+For an operator-style local install, use the global CLI first:
 
-   ```bash
-   uv sync --extra dev
-   ```
+```bash
+uv tool install --editable .
+uv tool update-shell
+gdstt setup
+```
 
-2. Create or select a Google Cloud project, enable the required APIs, and prepare
-   `./data/credentials.json`. The CLI path is documented below.
+`gdstt setup` creates `.env` from `.env.example` when needed, writes
+`FOLDER_IDS`, defaults `STT_PROVIDER` to Deepgram, prompts for
+the API keys required by the active pipeline profile, prepares
+`data/credentials.json` from Application Default Credentials when available,
+runs OAuth, verifies Drive access, and finishes with the safe next steps
+`gdstt list` then `gdstt process <file-id> --dry-run`.
 
-3. Copy `.env.example` to `.env` and fill in `FOLDER_IDS` (comma-separated Drive folder IDs) plus optional Telegram credentials:
+For development in this checkout, install the editable environment too:
 
-   ```bash
-   cp .env.example .env
-   ```
+```bash
+uv sync --extra dev
+```
 
-4. Run the OAuth flow once to mint a refresh token. This opens a browser and writes `data/token.json`:
-
-   ```bash
-   uv run python -m src.auth
-   ```
+If the default wizard cannot finish a step, the manual Google Cloud fallback
+below remains the reference path.
 
 ## Google Cloud and Drive setup with gcloud
+
+Use this section when `gdstt setup` cannot finish automatically or when you need
+to inspect or change the Google Cloud pieces directly.
 
 Install and initialize the Google Cloud CLI first:
 
@@ -119,7 +127,16 @@ $client | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 data\credentials.
 
 The generated `data/credentials.json` contains only the OAuth client metadata.
 Do not copy the ADC `refresh_token` into it. The app creates its own
-`data/token.json` when you run `uv run python -m src.auth`.
+`data/token.json` when you run `gdstt auth`.
+
+The OAuth-only flow remains available for refresh, recovery, or headless/manual
+exchange:
+
+```bash
+gdstt auth
+gdstt auth --manual
+gdstt auth "http://localhost/?code=4/abc123&scope=..."
+```
 
 If the ADC flow is not available in your environment, use the Google Cloud
 Console fallback: APIs & Services -> Credentials -> Create Credentials ->
@@ -163,7 +180,7 @@ All configuration is environment-driven. See `.env.example`.
 | `TELEGRAM_BOT_TOKEN` | (empty) | If set with chat ID, errors are posted to Telegram |
 | `TELEGRAM_CHAT_ID` | (empty) | Telegram chat to receive error notifications |
 | `DATA_DIR` | `data` | Directory holding `credentials.json` and `token.json` |
-| `STT_PROVIDER` | (empty) | `openai`, `google`, `asr`, `deepgram`, or empty to disable transcription |
+| `STT_PROVIDER` | `deepgram` | `deepgram` by default. Set `disabled` to skip transcription explicitly, or use `openai`, `google`, or `asr` |
 | `STT_LANGUAGE` | (empty) | Language hint. `openai`/`asr`: optional (`en`, `ru`); empty = auto-detect. `google`: required BCP-47 (`en-US`, `ru-RU`); `deepgram`: empty defaults to `ru` |
 | `STT_CHUNK_SECONDS` | `600` | Chunk length for `openai`/`asr`. Ignored when `STT_PROVIDER=google` or `deepgram` |
 | `STT_POSTPROCESS` | `true` | Clean the transcript and map diarized `Speaker N` labels to the interlocutor names parsed from the file name, merging spurious extra speakers |
@@ -188,6 +205,25 @@ All configuration is environment-driven. See `.env.example`.
 Setting `STT_PROVIDER` to a non-empty value transcribes each pending recording
 through the selected provider and uploads a sibling `<basename>.txt` next to the
 MP4 and any optional generated audio artifact.
+
+### Agent JSON pipeline
+
+For agent-driven requests, prefer a compact intent and deterministic expansion:
+
+```bash
+gdstt plan --json '{"action":"process","targets":["<drive-mp4-file-id>"]}'
+gdstt execute --json '{"action":"process","targets":["<drive-mp4-file-id>"]}'
+```
+
+On PowerShell, prefer `gdstt plan --json-file .\intent.json` and
+`gdstt execute --json-file .\intent.json` to avoid native process quoting
+issues.
+
+The versioned profile lives in `config/pipelines/default.json`; optional
+machine-specific overrides belong in gitignored `config/pipelines/local.json`.
+The default profile uses Deepgram `m4a_copy`, OpenAI refinement, TXT upload, no
+Drive MP3 artifact, and speaker names from the file name or Drive metadata.
+Folder-wide processing and transcript regeneration require `--confirm`.
 
 ### Transcript post-processing
 
@@ -322,6 +358,9 @@ that single-file path looks correct.
 ```bash
 gdstt auth [response_url]   # one-time interactive OAuth → data/token.json
 gdstt doctor [--drive]      # check Drive/OAuth configuration without changing it
+gdstt plan --json '<intent>'   # expand an agent JSON request without mutating Drive
+gdstt execute --json '<intent>' [--confirm]   # execute after deterministic policy checks
+gdstt plan --json-file <path>   # PowerShell-friendly JSON input; execute supports it too
 gdstt run                   # continuous polling; can spend STT credits across all pending configured folders
 gdstt run-once [--dry-run] [--max-size SIZE] [--confirm-large]   # single cycle; use --dry-run first
 gdstt process <id> [--folder] [--reprocess-txt] [--dry-run] [--max-size SIZE] [--confirm-large]   # single target or folder; use --dry-run first

@@ -152,7 +152,7 @@ def test_process_item_runs_stt_when_enabled(mocker, tmp_path):
     cfg = make_config(stt_provider="openai", openai_api_key="sk-x")
     main.process_item(service, _item("fid", "video.mp4"), "f", cfg)
 
-    transcribe_mock.assert_called_once_with(mp3_path, cfg)
+    transcribe_mock.assert_called_once_with(mp3_path, cfg, cost_usd={})
     # Two uploads: mp3 and txt
     assert upload_mock.call_count == 2
     second_call = upload_mock.call_args_list[1]
@@ -281,7 +281,7 @@ def test_process_item_deepgram_m4a_downloads_mp4_even_when_mp3_exists(
     assert download_mock.call_args.args[3] == "video.mp4"
     extract_mock.assert_not_called()
     m4a_mock.assert_called_once()
-    transcribe_mock.assert_called_once_with(m4a_path, cfg)
+    transcribe_mock.assert_called_once_with(m4a_path, cfg, cost_usd={})
     upload_mock.assert_called_once()
     assert upload_mock.call_args.args[1].name == "video.txt"
 
@@ -373,7 +373,7 @@ def test_process_item_deepgram_mp3_96k_extracts_mp4_for_stt(mocker, tmp_path):
     assert download_mock.call_args.args[1] == "fid"
     extract_mock.assert_called_once()
     assert extract_mock.call_args.kwargs["bitrate"] == "96k"
-    transcribe_mock.assert_called_once_with(mp3_path, cfg)
+    transcribe_mock.assert_called_once_with(mp3_path, cfg, cost_usd={})
     upload_mock.assert_called_once()
 
 
@@ -409,7 +409,7 @@ def test_process_item_deepgram_mp3_192k_extracts_mp4_for_stt(mocker, tmp_path):
     assert download_mock.call_args.args[1] == "fid"
     extract_mock.assert_called_once()
     assert extract_mock.call_args.kwargs["bitrate"] == "192k"
-    transcribe_mock.assert_called_once_with(mp3_path, cfg)
+    transcribe_mock.assert_called_once_with(mp3_path, cfg, cost_usd={})
     upload_mock.assert_called_once()
 
 

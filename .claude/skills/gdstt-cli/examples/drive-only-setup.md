@@ -1,15 +1,19 @@
-# Drive-Only Setup
+# Local Setup Wizard
 
 ## When to use
 
-Use this playbook when the human needs Google Drive access, folder inspection,
-or first-time operator setup, but has not asked to configure Google STT.
+Use this playbook when the human needs the first-run local setup flow, wants
+Drive access plus the default Deepgram configuration, or needs to resume the
+wizard after a missing gcloud/ADC step.
 
-## Human-Facing Drive Setup Wizard
+## Human-Facing Setup Wizard
 
-Say plainly that this wizard configures Drive only. Ask for an existing project
-id, or a new project name, a Drive folder id, and approval before each mutating
-group. Google Speech-to-Text is a separate setup step.
+Say plainly that `gdstt setup` is the default local setup path. Ask for an
+existing project id, or a new project name, a Drive folder id, and the
+Deepgram API key. The default agent profile also requires an OpenAI API key for
+transcript refinement. Explain each mutating group before confirmation. Google
+Speech-to-Text remains a separate opt-in step. Read keys through hidden input
+and never print their values.
 
 Before `gcloud config set project`, explain that it changes the active project
 in the user's gcloud configuration, not only this checkout.
@@ -20,16 +24,18 @@ OAuth client id/secret are copied and the ADC refresh token is not copied.
 Finish with:
 
 ```text
-Drive access is ready. Google STT is still not configured.
+Drive and default Deepgram setup are ready. Google STT is still not configured.
 ```
 
-Do not bundle Deepgram/OpenAI/Google STT setup into this wizard.
+Do not enable `speech.googleapis.com` or `storage.googleapis.com` in the default wizard.
 
 ## Ask or confirm first
 
 - Which Google Cloud project should be used: an existing project id or a new project name?
 - Which Drive folder id should go into `FOLDER_IDS`?
-- Should `DATA_DIR` stay `data`, or use another path?
+- Should `.env` be created from `.env.example` if it does not exist yet?
+- May the wizard write `STT_PROVIDER=deepgram`, `DEEPGRAM_API_KEY`, and
+  `OPENAI_API_KEY` into the gitignored `.env`?
 - May the agent run `gcloud` commands that change config or enable Drive API?
 - May the agent run `gdstt auth` and open the OAuth browser flow?
 
@@ -43,29 +49,33 @@ gcloud config get-value project
 gcloud auth list
 ```
 
-2. Explain that Drive-only setup does not imply Google STT setup.
-3. After confirmation, select the project:
+2. Create `.env` from `.env.example` when needed, write `FOLDER_IDS`, set
+  `STT_PROVIDER=deepgram`, and ask for profile-required keys without printing
+  them.
+3. Explain that Google Speech-to-Text remains separate from the default setup.
+4. After confirmation, select the project:
 
 ```powershell
 gcloud config set project <project-id>
 ```
 
-4. Enable only Drive API for this flow:
+5. Enable only Drive API for this flow:
 
 ```powershell
 gcloud services enable drive.googleapis.com
 ```
 
-5. Create `data/credentials.json` from ADC metadata only after confirmation.
-6. Run OAuth:
+6. Create `data/credentials.json` from ADC metadata only after confirmation.
+7. Run OAuth:
 
 ```powershell
 .\.venv\Scripts\gdstt.exe auth
 ```
 
-7. Verify with a read-only command:
+8. Verify with a read-only command:
 
 ```powershell
+.\.venv\Scripts\gdstt.exe doctor --drive
 .\.venv\Scripts\gdstt.exe list
 ```
 
