@@ -388,11 +388,6 @@ gh skill install wyrtensi/google-drive-video-stt gdstt-cli --agent codex --scope
 gh skill update --all
 ```
 
-Remote installs without a version resolve the latest release first, then the
-default branch. Until this package has landed in one of those places, use the
-local checkout flow below or pin a commit that already contains
-`skills/gdstt-cli/`.
-
 For local checkout testing before publishing:
 
 ```bash
@@ -405,10 +400,6 @@ Pin a known version when reproducibility matters:
 ```bash
 gh skill install wyrtensi/google-drive-video-stt gdstt-cli@YOUR_TAG_OR_COMMIT --agent codex --scope user
 ```
-
-Pinned installs are intentionally skipped by `gh skill update`. Reinstall
-without a pin after the package is available from a release or the default
-branch to follow normal updates.
 
 `gh skill install --help` lists supported hosts and their install locations.
 Current host choices include Codex, Claude Code, Cursor, Gemini CLI, GitHub
