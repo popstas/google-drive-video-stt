@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 import json
 import tempfile
@@ -9,14 +10,74 @@ from pathlib import Path
 from typing import Any
 
 from google.auth.exceptions import RefreshError
+from googleapiclient.errors import HttpError
+import requests
 
 from src import drive, notify, openai_pipeline, postprocess
 from src.auth import AuthError, build_drive_service
 from src.config import Config, load_config
 from src.extractor import extract_m4a_copy, extract_mp3
+from src.stt.google_provider import GoogleBlobRetainedTimeoutError
 from src.stt.transcribe import transcribe_file
 
 logger = logging.getLogger(__name__)
+
+_TRANSIENT_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
+_TRANSIENT_RETRY_ATTEMPTS = 3
+_TRANSIENT_RETRY_DELAYS = (1.0, 2.0)
+
+
+@dataclass
+class _RetryState:
+    retry_count: int = 0
+
+
+@dataclass
+class _ProcessTelemetry:
+    provider: str
+    processing_mode: str
+    retry_count: int
+    duration_s: float
+
+
+def _http_status_code(exc: Exception) -> int | None:
+    if isinstance(exc, HttpError):
+        return getattr(exc.resp, "status", None)
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        return exc.response.status_code
+    return None
+
+
+def _is_transient_runtime_error(exc: Exception) -> bool:
+    if isinstance(exc, (RefreshError, AuthError)):
+        return False
+    if isinstance(exc, drive.DownloadIntegrityError):
+        return True
+    if isinstance(exc, (TimeoutError, requests.ConnectionError, requests.Timeout)):
+        return True
+    status = _http_status_code(exc)
+    return status in _TRANSIENT_HTTP_STATUS_CODES
+
+
+def _call_with_transient_retries(operation, *, description: str, retry_state: _RetryState | None = None):
+    for attempt in range(1, _TRANSIENT_RETRY_ATTEMPTS + 1):
+        try:
+            return operation()
+        except Exception as exc:  # noqa: BLE001
+            if attempt >= _TRANSIENT_RETRY_ATTEMPTS or not _is_transient_runtime_error(exc):
+                raise
+            if retry_state is not None:
+                retry_state.retry_count += 1
+            delay = _TRANSIENT_RETRY_DELAYS[min(attempt - 1, len(_TRANSIENT_RETRY_DELAYS) - 1)]
+            logger.warning(
+                "Transient error during %s (attempt %d/%d): %s; retrying in %.1fs",
+                description,
+                attempt,
+                _TRANSIENT_RETRY_ATTEMPTS,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
 
 
 def _save_and_upload_txt(
@@ -90,6 +151,74 @@ def _speaker_names_from_file_info(file_info: dict) -> list[str] | None:
     return names or None
 
 
+def _coerce_size_bytes(raw: Any) -> int | None:
+    if raw in (None, ""):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _download_from_drive(
+    service: Any,
+    file_id: str,
+    dest_dir: Path,
+    file_name: str,
+    *,
+    expected_size_bytes: int | None,
+) -> Path:
+    if expected_size_bytes is None:
+        return drive.download(service, file_id, dest_dir, file_name)
+    return drive.download(
+        service,
+        file_id,
+        dest_dir,
+        file_name,
+        expected_size_bytes=expected_size_bytes,
+    )
+
+
+def _processing_provider(config: Config, *, needs_txt: bool) -> str:
+    if needs_txt and config.stt_provider:
+        return config.stt_provider
+    return "artifact-only"
+
+
+def _processing_mode(*, needs_mp3: bool, needs_txt: bool) -> str:
+    if needs_mp3 and needs_txt:
+        return "artifact-and-txt"
+    if needs_mp3:
+        return "artifact-only"
+    return "txt-only"
+
+
+def _processing_outcome(exc: Exception | None) -> str:
+    if exc is None:
+        return "success"
+    if isinstance(exc, GoogleBlobRetainedTimeoutError):
+        return "gcs_blob_retained_timeout"
+    return "failed"
+
+
+def _cycle_outcome(*, dry_run: bool, failed: int, folder_errors: int) -> str:
+    if dry_run:
+        return "dry_run"
+    if failed or folder_errors:
+        return "partial_failure"
+    return "success"
+
+
+def _retry_count_from_process_result(result: Any) -> int:
+    retry_count = getattr(result, "retry_count", None)
+    return retry_count if isinstance(retry_count, int) else 0
+
+
+def _retry_count_from_exception(exc: Exception) -> int:
+    retry_count = getattr(exc, "gdstt_retry_count", None)
+    return retry_count if isinstance(retry_count, int) else 0
+
+
 def process_item(
     service: Any,
     item: dict,
@@ -97,14 +226,16 @@ def process_item(
     config: Config,
     *,
     reprocess_txt: bool = False,
-) -> None:
+) -> _ProcessTelemetry | None:
     file_info = item["file"]
     file_id = file_info["id"]
     file_name = file_info["name"]
+    file_size = _coerce_size_bytes(file_info.get("size"))
     has_mp3 = item.get("has_mp3", False)
     has_txt = item.get("has_txt", False)
     mp3_id = item.get("mp3_id")
     mp3_name = item.get("mp3_name")
+    mp3_size = _coerce_size_bytes(item.get("mp3_size"))
 
     stt_enabled = bool(config.stt_provider)
     needs_mp3 = _should_make_mp3_artifact(config) and not has_mp3
@@ -113,67 +244,130 @@ def process_item(
     if not needs_mp3 and not needs_txt:
         return
 
+    provider = _processing_provider(config, needs_txt=needs_txt)
+    processing_mode = _processing_mode(needs_mp3=needs_mp3, needs_txt=needs_txt)
+    retry_state = _RetryState()
+    started_at = time.monotonic()
+    error: Exception | None = None
+
     logger.info(
         "Processing %s (id=%s) in folder %s [mp3=%s, txt=%s]",
         file_name, file_id, folder_id, "make" if needs_mp3 else "skip",
         "make" if needs_txt else "skip",
     )
 
-    with tempfile.TemporaryDirectory(prefix="gd-stt-") as tmp:
-        tmp_dir = Path(tmp)
-        mp4_path: Path | None = None
-        mp3_path: Path | None = None
+    duration_s = 0.0
 
-        if needs_mp3:
-            mp4_path = drive.download(service, file_id, tmp_dir, file_name)
-            mp3_path = extract_mp3(mp4_path, bitrate=config.bitrate)
-            mp3_drive_name = drive.drive_stem(file_name) + ".mp3"
-            drive.upload(
-                service,
-                mp3_path,
-                folder_id,
-                mime_type=drive.MP3_MIME,
-                name=mp3_drive_name,
-                app_properties={
-                    drive.SOURCE_VIDEO_ID_PROPERTY: file_id,
-                    drive.ARTIFACT_TYPE_PROPERTY: "mp3",
-                },
-            )
-            logger.info("Uploaded %s to folder %s", mp3_drive_name, folder_id)
+    try:
+        with tempfile.TemporaryDirectory(prefix="gd-stt-") as tmp:
+            tmp_dir = Path(tmp)
+            mp4_path: Path | None = None
+            mp3_path: Path | None = None
 
-        if needs_txt:
-            if config.stt_provider == "deepgram":
-                if mp4_path is None:
-                    mp4_path = drive.download(service, file_id, tmp_dir, file_name)
-                stt_audio_path = _prepare_deepgram_audio(mp4_path, config)
-            elif mp3_path is None:
-                if not mp3_id or not mp3_name:
-                    raise RuntimeError(
-                        f"mp3 marked present for {file_name} but id/name missing"
+            if needs_mp3:
+                mp4_path = _call_with_transient_retries(
+                    lambda: _download_from_drive(
+                        service,
+                        file_id,
+                        tmp_dir,
+                        file_name,
+                        expected_size_bytes=file_size,
+                    ),
+                    description=f"download source file {file_name} ({file_id})",
+                    retry_state=retry_state,
+                )
+                mp3_path = extract_mp3(mp4_path, bitrate=config.bitrate)
+                mp3_drive_name = drive.drive_stem(file_name) + ".mp3"
+                drive.upload(
+                    service,
+                    mp3_path,
+                    folder_id,
+                    mime_type=drive.MP3_MIME,
+                    name=mp3_drive_name,
+                    app_properties={
+                        drive.SOURCE_VIDEO_ID_PROPERTY: file_id,
+                        drive.ARTIFACT_TYPE_PROPERTY: "mp3",
+                    },
+                )
+                logger.info("Uploaded %s to folder %s", mp3_drive_name, folder_id)
+
+            if needs_txt:
+                if config.stt_provider == "deepgram":
+                    if mp4_path is None:
+                        mp4_path = _call_with_transient_retries(
+                            lambda: _download_from_drive(
+                                service,
+                                file_id,
+                                tmp_dir,
+                                file_name,
+                                expected_size_bytes=file_size,
+                            ),
+                            description=f"download source file {file_name} ({file_id})",
+                            retry_state=retry_state,
+                        )
+                    stt_audio_path = _prepare_deepgram_audio(mp4_path, config)
+                elif mp3_path is None:
+                    if not mp3_id or not mp3_name:
+                        raise RuntimeError(
+                            f"mp3 marked present for {file_name} but id/name missing"
+                        )
+                    mp3_path = _call_with_transient_retries(
+                        lambda: _download_from_drive(
+                            service,
+                            mp3_id,
+                            tmp_dir,
+                            mp3_name,
+                            expected_size_bytes=mp3_size,
+                        ),
+                        description=f"download mp3 artifact {mp3_name} ({mp3_id})",
+                        retry_state=retry_state,
                     )
-                mp3_path = drive.download(service, mp3_id, tmp_dir, mp3_name)
-                stt_audio_path = mp3_path
-            else:
-                stt_audio_path = mp3_path
-            text = transcribe_file(stt_audio_path, config)
-            speaker_names = _speaker_names_from_file_info(file_info)
-            if config.openai_postprocess:
-                text = openai_pipeline.refine_transcript(
-                    text,
-                    file_name,
-                    config,
-                    speaker_names=speaker_names,
+                    stt_audio_path = mp3_path
+                else:
+                    stt_audio_path = mp3_path
+                text = transcribe_file(stt_audio_path, config)
+                speaker_names = _speaker_names_from_file_info(file_info)
+                if config.openai_postprocess:
+                    text = openai_pipeline.refine_transcript(
+                        text,
+                        file_name,
+                        config,
+                        speaker_names=speaker_names,
+                    )
+                elif config.stt_postprocess:
+                    text = postprocess.postprocess_transcript(
+                        text,
+                        file_name,
+                        speaker_names=speaker_names,
+                    )
+                _save_and_upload_txt(
+                    service, file_id, file_name, text, folder_id, tmp_dir,
+                    txt_id=item.get("txt_id"),
                 )
-            elif config.stt_postprocess:
-                text = postprocess.postprocess_transcript(
-                    text,
-                    file_name,
-                    speaker_names=speaker_names,
-                )
-            _save_and_upload_txt(
-                service, file_id, file_name, text, folder_id, tmp_dir,
-                txt_id=item.get("txt_id"),
-            )
+    except Exception as exc:
+        error = exc
+        setattr(exc, "gdstt_retry_count", retry_state.retry_count)
+        raise
+    finally:
+        duration_s = time.monotonic() - started_at
+        logger.info(
+            "Process summary [file=%s, file_id=%s, folder=%s, provider=%s, processing_mode=%s, outcome=%s, retry_count=%d, duration_s=%.3f]",
+            file_name,
+            file_id,
+            folder_id,
+            provider,
+            processing_mode,
+            _processing_outcome(error),
+            retry_state.retry_count,
+            duration_s,
+        )
+
+    return _ProcessTelemetry(
+        provider=provider,
+        processing_mode=processing_mode,
+        retry_count=retry_state.retry_count,
+        duration_s=duration_s,
+    )
 
 
 def _pending_items(items: list[dict], config: Config) -> list[dict]:
@@ -186,13 +380,7 @@ def _pending_items(items: list[dict], config: Config) -> list[dict]:
 
 
 def _file_size_bytes(item: dict) -> int | None:
-    raw = item.get("file", {}).get("size")
-    if raw in (None, ""):
-        return None
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
+    return _coerce_size_bytes(item.get("file", {}).get("size"))
 
 
 def _format_bytes(value: int) -> str:
@@ -262,12 +450,18 @@ def process_target(
     confirm_large: bool = False,
 ) -> None:
     """Process a single Drive file or every pending file in a folder, on demand."""
-    meta = drive.get_file_metadata(service, target_id)
+    meta = _call_with_transient_retries(
+        lambda: drive.get_file_metadata(service, target_id),
+        description=f"get metadata for {target_id}",
+    )
     mime = meta.get("mimeType", "")
     treat_as_folder = is_folder if is_folder is not None else mime == drive.FOLDER_MIME
 
     if treat_as_folder:
-        items = drive.list_folder_state(service, target_id)
+        items = _call_with_transient_retries(
+            lambda: drive.list_folder_state(service, target_id),
+            description=f"list folder state for {target_id}",
+        )
         pending = items if reprocess_txt else _pending_items(items, config)
         pending = _items_allowed_by_size(
             pending,
@@ -287,7 +481,10 @@ def process_target(
     if not parents:
         raise RuntimeError(f"File {target_id} has no parent folder")
     folder_id = parents[0]
-    items = drive.list_folder_state(service, folder_id)
+    items = _call_with_transient_retries(
+        lambda: drive.list_folder_state(service, folder_id),
+        description=f"list folder state for {folder_id}",
+    )
     match = next(
         (it for it in items if it["file"]["id"] == target_id), None
     )
@@ -310,12 +507,18 @@ def process_target(
 
 def refresh_artifact_names(service: Any, file_id: str) -> None:
     """Rename linked generated artifacts to match the current source MP4 stem."""
-    meta = drive.get_file_metadata(service, file_id)
+    meta = _call_with_transient_retries(
+        lambda: drive.get_file_metadata(service, file_id),
+        description=f"get metadata for {file_id}",
+    )
     parents = meta.get("parents") or []
     if not parents:
         raise RuntimeError(f"File {file_id} has no parent folder")
     folder_id = parents[0]
-    items = drive.list_folder_state(service, folder_id)
+    items = _call_with_transient_retries(
+        lambda: drive.list_folder_state(service, folder_id),
+        description=f"list folder state for {folder_id}",
+    )
     item = next((it for it in items if it["file"]["id"] == file_id), None)
     if item is None:
         raise RuntimeError(f"File {file_id} is not an MP4 in folder {folder_id}")
@@ -335,36 +538,70 @@ def run_once(
     max_size_bytes: int | None = None,
     confirm_large: bool = False,
 ) -> None:
+    cycle_started_at = time.monotonic()
+    cycle_pending = 0
+    cycle_processed = 0
+    cycle_failed = 0
+    cycle_retry_total = 0
+    cycle_gcs_blob_orphans = 0
+    cycle_skipped_size = 0
+    cycle_folder_errors = 0
+
     for folder_id in config.folder_ids:
+        listing_retry_state = _RetryState()
         try:
-            items = drive.list_folder_state(service, folder_id)
-        except RefreshError:
+            items = _call_with_transient_retries(
+                lambda: drive.list_folder_state(service, folder_id),
+                description=f"list folder state for {folder_id}",
+                retry_state=listing_retry_state,
+            )
+        except (RefreshError, AuthError):
             raise
         except Exception as exc:
+            cycle_folder_errors += 1
             logger.exception("Failed to list folder %s", folder_id)
             notify.notify_error(
                 f"Failed to list folder {folder_id}: {exc}\n{traceback.format_exc()}",
                 proxy_url=config.proxy_url,
             )
             continue
+        finally:
+            cycle_retry_total += listing_retry_state.retry_count
 
         pending = _pending_items(items, config)
+        pending_before_size = len(pending)
         pending = _items_allowed_by_size(
             pending,
             max_size_bytes=max_size_bytes,
             confirm_large=confirm_large,
         )
-        logger.info("Folder %s: %d pending file(s)", folder_id, len(pending))
+        skipped_size = pending_before_size - len(pending)
+        cycle_pending += len(pending)
+        cycle_skipped_size += skipped_size
+        logger.info(
+            "Folder %s summary [total=%d, pending=%d, skipped_size=%d, dry_run=%s]",
+            folder_id,
+            len(items),
+            len(pending),
+            skipped_size,
+            dry_run,
+        )
         if dry_run:
             for item in pending:
                 _log_dry_run(folder_id, item, config, reprocess_txt=False)
             continue
         for item in pending:
             try:
-                process_item(service, item, folder_id, config)
-            except RefreshError:
+                telemetry = process_item(service, item, folder_id, config)
+                cycle_processed += 1
+                cycle_retry_total += _retry_count_from_process_result(telemetry)
+            except (RefreshError, AuthError):
                 raise
             except Exception as exc:
+                cycle_failed += 1
+                cycle_retry_total += _retry_count_from_exception(exc)
+                if isinstance(exc, GoogleBlobRetainedTimeoutError):
+                    cycle_gcs_blob_orphans += 1
                 file_name = item.get("file", {}).get("name")
                 logger.exception(
                     "Failed to process %s in folder %s", file_name, folder_id
@@ -374,6 +611,27 @@ def run_once(
                     f"{traceback.format_exc()}",
                     proxy_url=config.proxy_url,
                 )
+
+    logger.info(
+        "Cycle summary [provider=%s, outcome=%s, folders=%d, pending=%d, processed=%d, failed=%d, "
+        "retry_total=%d, gcs_blob_orphans=%d, skipped_size=%d, folder_errors=%d, dry_run=%s, duration_s=%.3f]",
+        config.stt_provider or "artifact-only",
+        _cycle_outcome(
+            dry_run=dry_run,
+            failed=cycle_failed,
+            folder_errors=cycle_folder_errors,
+        ),
+        len(config.folder_ids),
+        cycle_pending,
+        cycle_processed,
+        cycle_failed,
+        cycle_retry_total,
+        cycle_gcs_blob_orphans,
+        cycle_skipped_size,
+        cycle_folder_errors,
+        dry_run,
+        time.monotonic() - cycle_started_at,
+    )
 
 
 def main() -> None:

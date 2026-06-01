@@ -116,8 +116,8 @@ def test_transcribe_full_returning_string_skips_chunking(mocker, tmp_path):
     provider.transcribe_chunk.assert_not_called()
 
 
-def test_transcribe_full_empty_string_is_returned_verbatim(mocker, tmp_path):
-    """Empty string from transcribe_full is a valid result, not a fallback signal."""
+def test_transcribe_full_empty_string_raises(mocker, tmp_path):
+    """Empty transcript should fail instead of uploading a blank TXT later."""
     mp3 = tmp_path / "a.mp3"
     mp3.write_bytes(b"x")
 
@@ -126,11 +126,28 @@ def test_transcribe_full_empty_string_is_returned_verbatim(mocker, tmp_path):
     provider.transcribe_full.return_value = ""
     mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
 
-    result = transcribe_mod.transcribe_file(mp3, _cfg(provider="google"))
+    with pytest.raises(STTError, match="empty transcript"):
+        transcribe_mod.transcribe_file(mp3, _cfg(provider="google"))
 
-    assert result == ""
     chunk_mock.assert_not_called()
     provider.transcribe_chunk.assert_not_called()
+
+
+def test_transcribe_chunks_all_empty_raises(mocker, tmp_path):
+    mp3 = tmp_path / "a.mp3"
+    mp3.write_bytes(b"x")
+    chunks = [tmp_path / "c1.mp3", tmp_path / "c2.mp3"]
+    for chunk in chunks:
+        chunk.write_bytes(b"x")
+
+    mocker.patch("src.stt.transcribe.chunk_mp3", return_value=chunks)
+    provider = MagicMock()
+    provider.transcribe_full.return_value = None
+    provider.transcribe_chunk.side_effect = ["", ""]
+    mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
+
+    with pytest.raises(STTError, match="empty transcript"):
+        transcribe_mod.transcribe_file(mp3, _cfg(provider="openai"))
 
 
 def test_transcribe_file_deepgram_full_file_skips_chunking(mocker, tmp_path):

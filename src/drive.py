@@ -22,6 +22,10 @@ SPEAKER_NAMES_PROPERTY = "speaker_names"
 _LOCAL_FILENAME_UNSAFE_RE = re.compile(r'[<>:"/\\|?*\0]')
 
 
+class DownloadIntegrityError(RuntimeError):
+    """Raised when a Drive download completes with an unexpected local size."""
+
+
 def drive_stem(name: str) -> str:
     """Filename minus its extension, treating the Drive name as a flat string.
 
@@ -121,6 +125,7 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
             "has_txt": txt is not None,
             "mp3_id": mp3["id"] if mp3 else None,
             "mp3_name": mp3["name"] if mp3 else None,
+            "mp3_size": mp3.get("size") if mp3 else None,
             "txt_id": txt["id"] if txt else None,
         })
     return items
@@ -135,7 +140,14 @@ def _files_by_source_video_id(files: list[dict]) -> dict[str, dict]:
     return by_source_id
 
 
-def download(service: Any, file_id: str, dest_dir: Path, file_name: str) -> Path:
+def download(
+    service: Any,
+    file_id: str,
+    dest_dir: Path,
+    file_name: str,
+    *,
+    expected_size_bytes: int | None = None,
+) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
     safe_name = safe_local_name(file_name)
     if not safe_name or safe_name in {".", ".."}:
@@ -152,6 +164,14 @@ def download(service: Any, file_id: str, dest_dir: Path, file_name: str) -> Path
                 logger.debug(
                     "Downloading %s: %d%%", safe_name, int(status.progress() * 100)
                 )
+    if expected_size_bytes is not None:
+        actual_size = dest_path.stat().st_size
+        if actual_size != expected_size_bytes:
+            dest_path.unlink(missing_ok=True)
+            raise DownloadIntegrityError(
+                f"Downloaded file size mismatch for {file_name}: expected "
+                f"{expected_size_bytes} bytes, got {actual_size}"
+            )
     return dest_path
 
 

@@ -13,6 +13,14 @@ from src.stt.deepgram_usage import fetch_request_cost_usd
 logger = logging.getLogger(__name__)
 
 
+def _require_non_empty_transcript(text: str, *, audio_name: str, provider_name: str) -> str:
+    if text.strip():
+        return text
+    raise STTError(
+        f"{provider_name} returned an empty transcript for {audio_name}"
+    )
+
+
 def transcribe_file(mp3_path: Path, config: Config) -> str:
     """Transcribe the input audio path with the configured provider."""
     if not config.stt_provider:
@@ -28,7 +36,11 @@ def transcribe_file(mp3_path: Path, config: Config) -> str:
     if full_text is not None:
         logger.info("Transcribed full file: %s", mp3_path.name)
         _log_deepgram_cost(provider, config, mp3_path.name)
-        return full_text
+        return _require_non_empty_transcript(
+            full_text,
+            audio_name=mp3_path.name,
+            provider_name=config.stt_provider,
+        )
 
     with tempfile.TemporaryDirectory(prefix="stt-chunks-") as tmp:
         chunks = chunk_mp3(mp3_path, config.stt_chunk_seconds, Path(tmp))
@@ -39,7 +51,12 @@ def transcribe_file(mp3_path: Path, config: Config) -> str:
             text = provider.transcribe_chunk(chunk)
             parts.append(text)
 
-    return "\n\n".join(p for p in parts if p)
+    merged = "\n\n".join(p for p in parts if p)
+    return _require_non_empty_transcript(
+        merged,
+        audio_name=mp3_path.name,
+        provider_name=config.stt_provider,
+    )
 
 
 def _log_deepgram_cost(provider: object, config: Config, audio_name: str) -> None:

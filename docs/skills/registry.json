@@ -1,0 +1,51 @@
+{
+  "format_version": 1,
+  "registry_version": "1.3.0",
+  "last_updated": "2026-06-01",
+  "skills": {
+    "gdstt-cli": {
+      "name": "gdstt-cli",
+      "path": ".agents/skills/gdstt-cli/SKILL.md",
+      "description": "Use when operating google-drive-video-stt through gdstt, setting up Google Drive OAuth access, inspecting Drive folder state, processing Drive MP4 files, setting speaker names, or transcribing local audio.",
+      "version": "1.3.0",
+      "last_updated": "2026-06-01",
+      "shared_contract": "AGENTS.md",
+      "compatibility_skill_paths": [
+        ".claude/skills/gdstt-cli/SKILL.md"
+      ],
+      "companion_docs": [
+        {
+          "path": "docs/skills/provider-notes.md",
+          "required_sections": [
+            "Universal switching rules",
+            "Deepgram",
+            "Google STT",
+            "OpenAI STT",
+            "ASR"
+          ]
+        },
+        {
+          "path": "docs/skills/troubleshooting.md",
+          "required_sections": [
+            "Empty transcript failures",
+            "Transient Drive retries",
+            "Download size mismatch",
+            "Invalid `FOLDER_IDS`",
+            "Reading runtime summaries",
+            "Google STT timeout cleanup",
+            "Deepgram artifact surprises",
+            "First recovery commands"
+          ]
+        },
+        {
+          "path": "docs/skills/provider-extension.md",
+          "required_sections": [
+            "Invariants to preserve",
+            "Required code changes",
+            "Release checklist for a provider change"
+          ]
+        }
+      ]
+    }
+  }
+}

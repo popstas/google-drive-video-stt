@@ -179,8 +179,8 @@ def test_empty_folder_ids_returns_empty_list(monkeypatch):
 
 def test_folder_ids_only_commas(monkeypatch):
     monkeypatch.setenv("FOLDER_IDS", " , , ")
-    cfg = load_config()
-    assert cfg.folder_ids == []
+    with pytest.raises(ValueError, match="FOLDER_IDS"):
+        load_config()
 
 
 def test_custom_poll_interval(monkeypatch):
@@ -350,6 +350,17 @@ def test_stt_deepgram_can_disable_keyterms(monkeypatch):
 
     assert cfg.deepgram_keyterms_enabled is False
     assert cfg.deepgram_keyterms == ()
+
+
+def test_stt_deepgram_rejects_missing_keyterms_file_when_enabled(monkeypatch, tmp_path):
+    missing_keyterms = tmp_path / "missing-keyterms.txt"
+    monkeypatch.setenv("STT_PROVIDER", "deepgram")
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("DEEPGRAM_KEYTERMS_ENABLED", "true")
+    monkeypatch.setenv("DEEPGRAM_KEYTERMS_FILE", str(missing_keyterms))
+
+    with pytest.raises(ValueError, match="could not be read"):
+        load_config()
 
 
 def test_stt_deepgram_rejects_too_many_keyterms(monkeypatch, tmp_path):

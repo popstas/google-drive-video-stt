@@ -121,7 +121,12 @@ def _load_deepgram_keyterms(enabled: bool, keyterms_file: Path) -> tuple[str, ..
 def load_config(*, validate_providers: bool = True) -> Config:
     if load_dotenv is not None:
         load_dotenv(dotenv_path=".env", override=False, encoding="utf-8-sig")
-    folder_ids = _parse_folder_ids(os.environ.get("FOLDER_IDS", ""))
+    folder_ids_raw = os.environ.get("FOLDER_IDS", "")
+    folder_ids = _parse_folder_ids(folder_ids_raw)
+    if folder_ids_raw and not folder_ids:
+        raise ValueError(
+            "FOLDER_IDS was set but does not contain any non-empty folder ids"
+        )
 
     poll_raw = os.environ.get("POLL_INTERVAL", "600").strip() or "600"
     try:

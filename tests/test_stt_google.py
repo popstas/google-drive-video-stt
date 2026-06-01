@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.stt.base import STTError
-from src.stt.google_provider import GoogleProvider
+from src.stt.google_provider import GoogleBlobRetainedTimeoutError, GoogleProvider
 
 
 def _install_fake_google_modules(mocker, batch_response, *, raise_on_recognize=None):
@@ -426,7 +426,7 @@ def test_polling_timeout_retains_blob_and_cancels_operation(mocker, tmp_path):
     provider = GoogleProvider(
         project="p", bucket="b", data_dir=tmp_path, language="en"
     )
-    with pytest.raises(STTError, match="did not complete"):
+    with pytest.raises(GoogleBlobRetainedTimeoutError, match="did not complete"):
         provider.transcribe_full(audio)
 
     # Server-side job may still be running — input blob must be retained.
@@ -451,7 +451,7 @@ def test_polling_timeout_swallows_cancel_failure(mocker, tmp_path):
     provider = GoogleProvider(
         project="p", bucket="b", data_dir=tmp_path, language="en"
     )
-    with pytest.raises(STTError, match="did not complete"):
+    with pytest.raises(GoogleBlobRetainedTimeoutError, match="did not complete"):
         provider.transcribe_full(audio)
 
     mocks["blob"].delete.assert_not_called()
