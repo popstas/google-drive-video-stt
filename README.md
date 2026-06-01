@@ -351,11 +351,45 @@ Use it as an optional manual safety limit before processing folders, for example
 it keeps polling and can continue spending STT credits until you stop it. Use it
 only after the single-file or `run-once --dry-run` path already matches expectations.
 
+### Runtime reliability and summaries
+
+The runtime treats incomplete output as failure instead of silently uploading it:
+
+- Empty provider transcripts raise an STT error; a blank `.txt` is not uploaded.
+- Transient Drive metadata lookups, folder-state listings, and downloads retry with
+  bounded backoff. Uploads are not retried automatically.
+- Downloads are checked against Drive metadata size; mismatched partial temp files
+  are removed before retry or recovery.
+- `FOLDER_IDS` containing only commas or whitespace fails configuration loading
+  instead of producing a misleading no-op run.
+
+`run-once` logs one process summary per worked file, one folder summary per folder,
+and one cycle summary. The cycle summary includes pending, processed, failed,
+`retry_total`, `gcs_blob_orphans`, skipped-by-size, folder-error, and duration fields.
+`gcs_blob_orphans` is a subset of failed items: it means a Google STT timeout retained
+a GCS blob for manual inspection or cleanup.
+
+For recovery steps and provider-specific details, see
+[`docs/skills/troubleshooting.md`](docs/skills/troubleshooting.md) and
+[`docs/skills/provider-notes.md`](docs/skills/provider-notes.md).
+
+### Agent-facing documentation
+
+Shared repository instructions live in [`AGENTS.md`](AGENTS.md). The portable operator
+skill lives in [`.agents/skills/gdstt-cli/`](.agents/skills/gdstt-cli/), with a
+compatibility mirror under [`.claude/skills/gdstt-cli/`](.claude/skills/gdstt-cli/).
+Keep the bundle synchronized with:
+
+```bash
+uv run python scripts/check-agent-skill.py
+```
+
 ## Tests
 
 ```bash
 uv run pytest
 uv run ruff check
+uv run python scripts/check-agent-skill.py
 ```
 
 Deepgram has a gated live smoke test that can spend a small amount of credit. It is skipped
