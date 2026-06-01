@@ -39,6 +39,7 @@ class _ProcessTelemetry:
     retry_count: int
     duration_s: float
     cost_usd: dict[str, float | None] = field(default_factory=dict)
+    usage: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 def _http_status_code(exc: Exception) -> int | None:
@@ -259,6 +260,7 @@ def process_item(
 
     duration_s = 0.0
     cost_usd: dict[str, float | None] = {}
+    usage: dict[str, dict[str, int]] = {}
 
     try:
         with tempfile.TemporaryDirectory(prefix="gd-stt-") as tmp:
@@ -331,12 +333,16 @@ def process_item(
                 speaker_names = _speaker_names_from_file_info(file_info)
                 if config.openai_postprocess:
                     cost_usd.setdefault("openai", None)
+                    openai_usage: dict[str, int] = {}
                     text = openai_pipeline.refine_transcript(
                         text,
                         file_name,
                         config,
                         speaker_names=speaker_names,
+                        usage=openai_usage,
                     )
+                    if openai_usage:
+                        usage["openai"] = openai_usage
                 elif config.stt_postprocess:
                     text = postprocess.postprocess_transcript(
                         text,
@@ -371,6 +377,7 @@ def process_item(
         retry_count=retry_state.retry_count,
         duration_s=duration_s,
         cost_usd=cost_usd,
+        usage=usage,
     )
 
 

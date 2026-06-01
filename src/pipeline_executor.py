@@ -37,6 +37,24 @@ def _cost_report(telemetry: object, config: Config) -> dict[str, float | None]:
     return report
 
 
+def _usage_report(telemetry: object) -> dict[str, dict[str, int]]:
+    report: dict[str, dict[str, int]] = {}
+    if not isinstance(telemetry, list):
+        return report
+    for item in telemetry:
+        usage = getattr(item, "usage", {})
+        if not isinstance(usage, dict):
+            continue
+        for provider, counters in usage.items():
+            if not isinstance(counters, dict):
+                continue
+            provider_report = report.setdefault(provider, {})
+            for counter, value in counters.items():
+                if isinstance(value, int) and not isinstance(value, bool):
+                    provider_report[counter] = provider_report.get(counter, 0) + value
+    return report
+
+
 def execute_process(
     payload: dict[str, Any] | ProcessIntent,
     config: Config,
@@ -112,6 +130,7 @@ def execute_process(
                 "mp3_uploaded": runtime_config.drive_mp3_artifact,
                 "speakers": speakers or [],
                 "cost_usd": _cost_report(telemetry, runtime_config),
+                "usage": _usage_report(telemetry),
             }
         )
     return {"status": "completed", "files": results}

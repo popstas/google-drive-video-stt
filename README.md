@@ -224,6 +224,9 @@ machine-specific overrides belong in gitignored `config/pipelines/local.json`.
 The default profile uses Deepgram `m4a_copy`, OpenAI refinement, TXT upload, no
 Drive MP3 artifact, and speaker names from the file name or Drive metadata.
 Folder-wide processing and transcript regeneration require `--confirm`.
+Execution results include best-effort OpenAI refinement token counters under
+`usage.openai`. OpenAI dollar cost remains `null` because per-response billing
+is not exposed through the runtime API key.
 
 ### Transcript post-processing
 

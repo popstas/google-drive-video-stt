@@ -63,7 +63,8 @@ On PowerShell, write the intent to a JSON file and use
 
 Execute the same intent after policy checks. Folder-wide processing and
 `reprocess_txt` require `--confirm` unless the caller already supplied it after
-reviewing the plan.
+reviewing the plan. Completed JSON includes best-effort OpenAI refinement token
+counters under `usage.openai`; OpenAI dollar cost may remain `null`.
 
 ```bash
 gdstt execute --json '{"action":"process","targets":["<file-id>"]}'
