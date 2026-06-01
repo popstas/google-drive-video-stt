@@ -2,7 +2,7 @@
 name: gdstt-cli
 description: Use when operating google-drive-video-stt through gdstt, setting up Google Drive OAuth access, inspecting Drive folder state, processing Drive MP4 files, setting speaker names, or transcribing local audio.
 license: MIT
-version: 1.6.0
+version: 1.6.1
 last_updated: 2026-06-02
 ---
 
@@ -138,6 +138,8 @@ Transcribe a local audio file without touching Drive.
   run.
 - Prefer `gdstt plan --json ...` before agent-driven execution. `gdstt execute`
   enforces the same policy gates even when planning is skipped.
+- Report best-effort OpenAI refinement token counters from `usage.openai` after
+  execution. OpenAI dollar cost may remain `null`.
 - Secret readiness is reported only as `configured` or `missing`. Never place
   API keys in JSON intents or command output.
 - `--max-size` is optional and disabled by default. Do not invent a global

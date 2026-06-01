@@ -75,7 +75,30 @@ def test_execute_process_routes_speaker_metadata_and_existing_runtime(mocker):
     process_mock = mocker.patch(
         "src.pipeline_executor.main_module.process_target",
         return_value=[
-            SimpleNamespace(cost_usd={"deepgram": 0.012345, "openai": None})
+            SimpleNamespace(
+                cost_usd={"deepgram": 0.012345, "openai": None},
+                usage={
+                    "openai": {
+                        "input_tokens": 100,
+                        "cached_input_tokens": 20,
+                        "output_tokens": 30,
+                        "reasoning_tokens": 5,
+                        "total_tokens": 130,
+                    }
+                },
+            ),
+            SimpleNamespace(
+                cost_usd={"deepgram": 0.01, "openai": None},
+                usage={
+                    "openai": {
+                        "input_tokens": 50,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 10,
+                        "reasoning_tokens": 2,
+                        "total_tokens": 60,
+                    }
+                },
+            ),
         ],
     )
 
@@ -107,7 +130,16 @@ def test_execute_process_routes_speaker_metadata_and_existing_runtime(mocker):
                 "txt_uploaded": True,
                 "mp3_uploaded": False,
                 "speakers": ["Alice", "Bob"],
-                "cost_usd": {"deepgram": 0.012345, "openai": None},
+                "cost_usd": {"deepgram": 0.022345, "openai": None},
+                "usage": {
+                    "openai": {
+                        "input_tokens": 150,
+                        "cached_input_tokens": 20,
+                        "output_tokens": 40,
+                        "reasoning_tokens": 7,
+                        "total_tokens": 190,
+                    }
+                },
             }
         ],
     }
