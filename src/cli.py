@@ -191,10 +191,28 @@ def _add_processing_safety_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _set_parser_safety_description(
+    parser: argparse.ArgumentParser,
+    *,
+    summary: str,
+    safety_note: str,
+) -> None:
+    parser.description = summary
+    parser.epilog = f"Safety: {safety_note}"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gdstt",
-        description="Operator CLI for the Google Drive video STT service.",
+        description=(
+            "Operator CLI for the Google Drive video STT service. Prefer "
+            "doctor -> list -> process <file-id> --dry-run -> process <file-id> "
+            "before folder-wide run-once or run."
+        ),
+        epilog=(
+            "Safety: run and folder-wide processing can spend STT credits across pending "
+            "files. Start with --dry-run when the command supports it."
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -207,15 +225,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_auth.set_defaults(func=cmd_auth)
 
-    p_run = sub.add_parser("run", help="Run the polling loop")
+    p_run = sub.add_parser(
+        "run",
+        help="Run the polling loop for all pending configured folders",
+    )
+    _set_parser_safety_description(
+        p_run,
+        summary="Run the polling loop continuously.",
+        safety_note=(
+            "this command can process every pending configured folder and spend STT "
+            "credits repeatedly. Prefer run-once --dry-run or process <file-id> --dry-run "
+            "before using it."
+        ),
+    )
     p_run.set_defaults(func=cmd_run)
 
-    p_run_once = sub.add_parser("run-once", help="Run a single polling cycle")
+    p_run_once = sub.add_parser(
+        "run-once",
+        help="Run one polling cycle across pending configured folders",
+    )
+    _set_parser_safety_description(
+        p_run_once,
+        summary="Run a single polling cycle across the configured folders.",
+        safety_note=(
+            "this command can spend STT credits across multiple pending files. Use --dry-run "
+            "first and add --max-size only as an optional manual limit for larger folder runs."
+        ),
+    )
     _add_processing_safety_args(p_run_once)
     p_run_once.set_defaults(func=cmd_run_once)
 
     p_process = sub.add_parser(
-        "process", help="Process a Drive file or folder on demand"
+        "process",
+        help="Process one Drive file or folder on demand",
+    )
+    _set_parser_safety_description(
+        p_process,
+        summary="Process one Drive file or folder on demand.",
+        safety_note=(
+            "use --dry-run first. When the target is a folder, this command can process many "
+            "files and spend STT credits. --reprocess-txt intentionally reruns STT and overwrites "
+            "the linked .txt."
+        ),
     )
     p_process.add_argument("target", help="Drive file ID or folder ID")
     p_process.add_argument(

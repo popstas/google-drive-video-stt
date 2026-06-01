@@ -315,12 +315,16 @@ The process loops forever, sleeping `POLL_INTERVAL` seconds between cycles.
 `uv run python -m src.cli`). All commands read configuration from `.env` / the
 environment via `load_config()`.
 
+Safe operator flow: `gdstt doctor` -> `gdstt list` -> `gdstt process <file-id> --dry-run`
+-> `gdstt process <file-id>`. Move to `run-once` or continuous `run` only after
+that single-file path looks correct.
+
 ```bash
 gdstt auth [response_url]   # one-time interactive OAuth → data/token.json
 gdstt doctor [--drive]      # check Drive/OAuth configuration without changing it
-gdstt run                  # polling loop (same as python -m src.main)
-gdstt run-once [--dry-run] [--max-size SIZE] [--confirm-large]
-gdstt process <id> [--folder] [--reprocess-txt] [--dry-run] [--max-size SIZE] [--confirm-large]
+gdstt run                   # continuous polling; can spend STT credits across all pending configured folders
+gdstt run-once [--dry-run] [--max-size SIZE] [--confirm-large]   # single cycle; use --dry-run first
+gdstt process <id> [--folder] [--reprocess-txt] [--dry-run] [--max-size SIZE] [--confirm-large]   # single target or folder; use --dry-run first
 gdstt speakers set <file-id> "Alice" "Bob"   # store explicit speaker names on an MP4
 gdstt refresh-names <file-id>   # rename linked MP3/TXT artifacts after an MP4 rename
 gdstt transcribe <audio> [-o out.txt]   # STT-only on a local file; prints to stdout by default
@@ -342,6 +346,10 @@ work without downloads, uploads, or STT calls. `--max-size` is off unless you pa
 Use it as an optional manual safety limit before processing folders, for example
 `--max-size 50MB`; files larger than the limit are skipped unless you also pass
 `--confirm-large` after confirming that large files should be processed.
+
+`run` has no preview mode and is intentionally the least safe operator entrypoint:
+it keeps polling and can continue spending STT credits until you stop it. Use it
+only after the single-file or `run-once --dry-run` path already matches expectations.
 
 ## Tests
 

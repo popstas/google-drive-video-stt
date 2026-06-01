@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from src import drive
 
 
@@ -172,6 +174,34 @@ def test_download_creates_missing_dest_dir(tmp_path, mocker):
 
     assert dest.is_dir()
     assert result.parent == dest
+
+
+def test_download_raises_on_size_mismatch_and_cleans_partial_file(tmp_path, mocker):
+    service = MagicMock()
+    service.files.return_value.get_media.return_value = MagicMock()
+
+    def make_downloader(fh, _request):
+        downloader = MagicMock()
+
+        def next_chunk():
+            fh.write(b"short")
+            return None, True
+
+        downloader.next_chunk.side_effect = next_chunk
+        return downloader
+
+    mocker.patch("src.drive.MediaIoBaseDownload", side_effect=make_downloader)
+
+    with pytest.raises(RuntimeError, match="size mismatch"):
+        drive.download(
+            service,
+            "fid",
+            tmp_path,
+            "video.mp4",
+            expected_size_bytes=10,
+        )
+
+    assert not (tmp_path / "video.mp4").exists()
 
 
 def test_upload_calls_create_with_metadata_and_media(tmp_path, mocker):

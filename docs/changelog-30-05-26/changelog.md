@@ -2,6 +2,69 @@
 
 Review and validation notes for PR #4.
 
+## 2026-06-01 - Follow-up changelog relative to PR4 review
+
+This section summarizes the diff that landed after the main PR4 review memo in
+`docs/2026-06-01-project-skill-review.md`.
+
+### Runtime hardening and observability
+
+- Empty transcript output is now treated as failure instead of a silent success.
+- Transient Drive read paths now retry with bounded retry accounting.
+- Downloaded files are validated against expected size and fail fast on mismatch.
+- Google STT timeout-retained GCS blobs are surfaced explicitly via
+  `gcs_blob_orphans` in cycle summaries.
+- Per-item process summaries now expose provider, `processing_mode`, outcome,
+  retry count, and duration.
+- Cycle summaries now expose provider, overall outcome, `retry_total`,
+  `gcs_blob_orphans`, and duration.
+
+### CLI and operator UX
+
+- CLI help now pushes the safe operator path: `doctor -> list -> process --dry-run`
+  before folder-wide or continuous processing.
+- `run`, `run-once`, and `process` help text now warns more clearly about cost,
+  folder scope, and `--reprocess-txt` behavior.
+- README CLI guidance now matches the same safe operator flow.
+
+### Skill and documentation contract
+
+- `AGENTS.md` is now the canonical shared contract and `CLAUDE.md` is a thin
+  compatibility shim.
+- Skill metadata is centralized in `docs/skills/registry.json` with version and
+  `last_updated` parity checks.
+- Companion docs for provider notes, troubleshooting, and provider extension are
+  now formalized and validated.
+- `tests/test_skill_docs.py` now guards command parity, Start Here routing,
+  scenario grouping, mirror sync, bundled references, and validator presence.
+
+### Portable bundle packaging
+
+- The main operator skill now has a portable installable bundle at
+  `.agents/skills/gdstt-cli/`.
+- `.claude/skills/gdstt-cli/` is now a compatibility mirror instead of the
+  primary source of truth.
+- `scripts/check-agent-skill.py` validates bundle sync, bundled references, and
+  the compatibility mirror.
+- Bundled playbooks are intentionally limited to supporting setup, folder-wide
+  safety, and recovery. Ordinary project usage stays in the main skill flow.
+
+### Additional regression coverage
+
+- Added/expanded runtime coverage in `tests/test_main.py`, `tests/test_drive.py`,
+  `tests/test_stt_google.py`, and `tests/test_stt_transcribe.py`.
+- Added `tests/test_stt_contract.py` for provider-factory/base-contract checks.
+- Added missing config coverage for enabled Deepgram keyterms with an unreadable
+  file path.
+- `tests/test_skill_docs.py` now invokes the agent-skill validator via pytest,
+  so bundle drift is no longer only a manual check.
+
+### Intentional non-goals
+
+- No nested subskills were added inside the main `gdstt-cli` bundle.
+- Supporting playbooks were kept only for setup/safety/recovery, not for normal
+  day-to-day project usage.
+
 ## Open Finding - Existing `.txt` is not overwritten by normal processing
 
 ### Status

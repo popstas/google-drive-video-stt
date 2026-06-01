@@ -10,6 +10,10 @@ from src import cli
 from tests.test_main import make_config
 
 
+def _normalized_help(text: str) -> str:
+    return " ".join(text.split())
+
+
 def test_build_parser_requires_subcommand():
     parser = cli.build_parser()
     with pytest.raises(SystemExit):
@@ -121,15 +125,55 @@ def test_run_dispatch_calls_main(mocker):
     main_mock.assert_called_once_with()
 
 
+def test_top_level_help_recommends_safe_operator_flow(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+
+    out = _normalized_help(capsys.readouterr().out)
+    assert "doctor -> list -> process <file-id> --dry-run -> process <file-id>" in out
+    assert "run and folder-wide processing can spend STT credits across pending files" in out
+
+
+def test_run_help_warns_about_continuous_processing(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--help"])
+
+    out = _normalized_help(capsys.readouterr().out)
+    assert "Run the polling loop continuously." in out
+    assert "can process every pending configured folder and spend STT credits repeatedly" in out
+
+
+def test_run_once_help_warns_and_points_to_dry_run(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["run-once", "--help"])
+
+    out = _normalized_help(capsys.readouterr().out)
+    assert "Run a single polling cycle across the configured folders." in out
+    assert "can spend STT credits across multiple pending files" in out
+    assert "Use --dry-run first" in out
+
+
+def test_process_help_warns_about_folder_scope_and_reprocess(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["process", "--help"])
+
+    out = _normalized_help(capsys.readouterr().out)
+    assert "Process one Drive file or folder on demand." in out
+    assert "use --dry-run first" in out
+    assert "can process many files and spend STT credits" in out
+    assert "--reprocess-txt intentionally reruns STT and overwrites the linked .txt" in out
+
+
 def test_run_once_dispatch(mocker, tmp_path):
     cfg = make_config(data_dir=tmp_path)
-    mocker.patch("src.cli.load_config", return_value=cfg)
+    load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
     service = MagicMock()
     build_mock = mocker.patch("src.cli.auth.build_drive_service", return_value=service)
     run_once_mock = mocker.patch("src.cli.main_module.run_once")
 
     cli.main(["run-once"])
 
+    load_mock.assert_called_once_with()
     build_mock.assert_called_once_with(data_dir=tmp_path)
     run_once_mock.assert_called_once_with(
         service,
@@ -160,13 +204,14 @@ def test_run_once_dispatches_safety_flags(mocker, tmp_path):
 
 def test_process_dispatch_autodetect(mocker, tmp_path):
     cfg = make_config(data_dir=tmp_path)
-    mocker.patch("src.cli.load_config", return_value=cfg)
+    load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
     service = MagicMock()
     mocker.patch("src.cli.auth.build_drive_service", return_value=service)
     target_mock = mocker.patch("src.cli.main_module.process_target")
 
     cli.main(["process", "file123"])
 
+    load_mock.assert_called_once_with()
     target_mock.assert_called_once_with(
         service,
         "file123",
@@ -244,13 +289,14 @@ def test_process_dispatches_safety_flags(mocker, tmp_path):
 
 def test_speakers_set_writes_drive_app_property(mocker, tmp_path):
     cfg = make_config(data_dir=tmp_path)
-    mocker.patch("src.cli.load_config", return_value=cfg)
+    load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
     service = MagicMock()
     mocker.patch("src.cli.auth.build_drive_service", return_value=service)
     set_mock = mocker.patch("src.cli.drive.set_file_app_properties")
 
     cli.main(["speakers", "set", "file123", "Alice", "Bob"])
 
+    load_mock.assert_called_once_with(validate_providers=False)
     set_mock.assert_called_once_with(
         service,
         "file123",
@@ -260,25 +306,27 @@ def test_speakers_set_writes_drive_app_property(mocker, tmp_path):
 
 def test_refresh_names_dispatches_to_main(mocker, tmp_path):
     cfg = make_config(data_dir=tmp_path)
-    mocker.patch("src.cli.load_config", return_value=cfg)
+    load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
     service = MagicMock()
     mocker.patch("src.cli.auth.build_drive_service", return_value=service)
     refresh_mock = mocker.patch("src.cli.main_module.refresh_artifact_names")
 
     cli.main(["refresh-names", "file123"])
 
+    load_mock.assert_called_once_with(validate_providers=False)
     refresh_mock.assert_called_once_with(service, "file123")
 
 
 def test_transcribe_prints_to_stdout(mocker, capsys, tmp_path):
     cfg = make_config(data_dir=tmp_path)
-    mocker.patch("src.cli.load_config", return_value=cfg)
+    load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
     transcribe_mock = mocker.patch(
         "src.cli.transcribe_file", return_value="hello world"
     )
 
     cli.main(["transcribe", "audio.mp3"])
 
+    load_mock.assert_called_once_with()
     transcribe_mock.assert_called_once()
     args, _ = transcribe_mock.call_args
     assert args[0] == Path("audio.mp3")

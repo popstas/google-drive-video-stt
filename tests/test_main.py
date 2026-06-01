@@ -9,6 +9,8 @@ from google.auth.exceptions import RefreshError
 from src import main
 from src.auth import AuthError
 from src.config import Config
+from src.stt.base import STTError
+from src.stt.google_provider import GoogleBlobRetainedTimeoutError
 
 
 def make_config(
@@ -159,6 +161,28 @@ def test_process_item_runs_stt_when_enabled(mocker, tmp_path):
     assert txt_path.name == "video.txt"
 
 
+def test_process_item_does_not_upload_blank_txt_when_transcript_is_empty(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    upload_mock = mocker.patch("src.main.drive.upload")
+    mocker.patch(
+        "src.main.transcribe_file",
+        side_effect=STTError("openai returned an empty transcript for video.mp3"),
+    )
+
+    cfg = make_config(stt_provider="openai", openai_api_key="sk-x")
+
+    with pytest.raises(STTError, match="empty transcript"):
+        main.process_item(service, _item("fid", "video.mp4"), "f", cfg)
+
+    assert upload_mock.call_count == 1
+    assert upload_mock.call_args.kwargs["mime_type"] == "audio/mpeg"
+
+
 def test_process_item_only_stt_when_mp3_already_exists(mocker, tmp_path):
     service = MagicMock()
 
@@ -188,6 +212,36 @@ def test_process_item_only_stt_when_mp3_already_exists(mocker, tmp_path):
     transcribe_mock.assert_called_once()
     upload_mock.assert_called_once()
     assert upload_mock.call_args.kwargs["mime_type"] == "text/plain"
+
+
+def test_process_item_passes_expected_mp3_size_to_download(mocker, tmp_path):
+    service = MagicMock()
+    mp3_path = tmp_path / "video.mp3"
+
+    download_mock = mocker.patch("src.main.drive.download", return_value=mp3_path)
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="text")
+
+    cfg = make_config(stt_provider="openai", openai_api_key="sk-x", drive_mp3_artifact=False)
+    item = _item(
+        "fid",
+        "video.mp4",
+        has_mp3=True,
+        has_txt=False,
+        mp3_id="mp3id",
+        mp3_name="video.mp3",
+    )
+    item["mp3_size"] = "456"
+
+    main.process_item(service, item, "folderX", cfg)
+
+    assert download_mock.call_args.args[:4] == (
+        service,
+        "mp3id",
+        download_mock.call_args.args[2],
+        "video.mp3",
+    )
+    assert download_mock.call_args.kwargs == {"expected_size_bytes": 456}
 
 
 def test_process_item_deepgram_m4a_downloads_mp4_even_when_mp3_exists(
@@ -429,6 +483,33 @@ def test_process_target_single_file_resolves_parent(mocker):
     assert process_mock.call_args.args[2] == "folderA"
 
 
+def test_process_target_retries_transient_metadata_error(mocker):
+    service = MagicMock()
+    cfg = make_config()
+
+    meta_mock = mocker.patch(
+        "src.main.drive.get_file_metadata",
+        side_effect=[
+            TimeoutError("temporary metadata timeout"),
+            {
+                "id": "v1",
+                "name": "a.mp4",
+                "mimeType": "video/mp4",
+                "parents": ["folderA"],
+            },
+        ],
+    )
+    mocker.patch("src.main.time.sleep")
+    items = [_item("v1", "a.mp4")]
+    mocker.patch("src.main.drive.list_folder_state", return_value=items)
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.process_target(service, "v1", cfg)
+
+    assert meta_mock.call_count == 2
+    process_mock.assert_called_once()
+
+
 def test_process_target_folder_dry_run_does_not_process_items(mocker, caplog):
     service = MagicMock()
     cfg = make_config(stt_provider="deepgram", deepgram_api_key="dg-x")
@@ -639,6 +720,58 @@ def test_run_once_iterates_all_folders_and_files(mocker):
     assert ("f2", "v3") in calls
 
 
+def test_run_once_retries_transient_listing_error(mocker, caplog):
+    service = MagicMock()
+    cfg = make_config(folder_ids=["f1"])
+
+    list_mock = mocker.patch(
+        "src.main.drive.list_folder_state",
+        side_effect=[TimeoutError("temporary api timeout"), [_item("v1", "a.mp4")]],
+    )
+    sleep_mock = mocker.patch("src.main.time.sleep")
+    process_mock = mocker.patch("src.main.process_item")
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    with caplog.at_level("INFO"):
+        main.run_once(service, cfg)
+
+    assert list_mock.call_count == 2
+    sleep_mock.assert_called_once()
+    process_mock.assert_called_once()
+    notify_mock.assert_not_called()
+    assert "retry_total=1" in caplog.text
+
+
+def test_run_once_propagates_auth_error_from_listing(mocker):
+    service = MagicMock()
+    cfg = make_config(folder_ids=["f1"])
+
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        side_effect=AuthError("token gone"),
+    )
+
+    with pytest.raises(AuthError, match="token gone"):
+        main.run_once(service, cfg)
+
+
+def test_run_once_propagates_auth_error_from_processing(mocker):
+    service = MagicMock()
+    cfg = make_config(folder_ids=["f1"])
+
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_item("v1", "a.mp4")],
+    )
+    mocker.patch(
+        "src.main.process_item",
+        side_effect=AuthError("token gone"),
+    )
+
+    with pytest.raises(AuthError, match="token gone"):
+        main.run_once(service, cfg)
+
+
 def test_run_once_dry_run_does_not_process_items(mocker, caplog):
     service = MagicMock()
     cfg = make_config(
@@ -658,6 +791,7 @@ def test_run_once_dry_run_does_not_process_items(mocker, caplog):
     process_mock.assert_not_called()
     assert "DRY RUN" in caplog.text
     assert "pending.mp4" in caplog.text
+    assert "Cycle summary" in caplog.text
 
 
 def test_run_once_skips_large_pending_items_without_confirmation(mocker, caplog):
@@ -742,6 +876,124 @@ def test_run_once_continues_on_per_file_error(mocker):
     assert "fail.mp4" in notify_mock.call_args.args[0]
 
 
+def test_process_item_retries_transient_download_error(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    download_mock = mocker.patch(
+        "src.main.drive.download",
+        side_effect=[TimeoutError("temporary download timeout"), mp4_path],
+    )
+    sleep_mock = mocker.patch("src.main.time.sleep")
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    upload_mock = mocker.patch("src.main.drive.upload", return_value={"id": "uploaded"})
+
+    cfg = make_config(bitrate="128k")
+    telemetry = main.process_item(service, _item("fid1", "video.mp4"), "folderA", cfg)
+
+    assert download_mock.call_count == 2
+    sleep_mock.assert_called_once()
+    upload_mock.assert_called_once()
+    assert telemetry.processing_mode == "artifact-only"
+    assert telemetry.retry_count == 1
+
+
+def test_process_item_retries_download_size_mismatch(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    download_mock = mocker.patch(
+        "src.main.drive.download",
+        side_effect=[
+            main.drive.DownloadIntegrityError("Downloaded file size mismatch"),
+            mp4_path,
+        ],
+    )
+    sleep_mock = mocker.patch("src.main.time.sleep")
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    upload_mock = mocker.patch("src.main.drive.upload", return_value={"id": "uploaded"})
+
+    cfg = make_config(bitrate="128k")
+    main.process_item(service, _item("fid1", "video.mp4", size=123), "folderA", cfg)
+
+    assert download_mock.call_count == 2
+    assert download_mock.call_args_list[0].kwargs == {"expected_size_bytes": 123}
+    sleep_mock.assert_called_once()
+    upload_mock.assert_called_once()
+
+
+def test_process_item_logs_process_summary(mocker, tmp_path, caplog):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    mocker.patch("src.main.drive.upload", return_value={"id": "uploaded"})
+    mocker.patch("src.main.time.monotonic", side_effect=[10.0, 11.5])
+
+    cfg = make_config(stt_provider="", drive_mp3_artifact=True)
+
+    with caplog.at_level("INFO"):
+        main.process_item(service, _item("fid1", "video.mp4"), "folderA", cfg)
+
+    assert (
+        "Process summary [file=video.mp4, file_id=fid1, folder=folderA, "
+        "provider=artifact-only, processing_mode=artifact-only, outcome=success, retry_count=0, duration_s=1.500]"
+    ) in caplog.text
+
+
+def test_process_item_logs_failed_summary(mocker, tmp_path, caplog):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", side_effect=STTError("provider failed"))
+    mocker.patch("src.main.time.monotonic", side_effect=[20.0, 21.0])
+
+    cfg = make_config(stt_provider="openai", openai_api_key="sk-x")
+
+    with caplog.at_level("INFO"):
+        with pytest.raises(STTError, match="provider failed"):
+            main.process_item(service, _item("fid1", "video.mp4"), "folderA", cfg)
+
+    assert (
+        "Process summary [file=video.mp4, file_id=fid1, folder=folderA, "
+        "provider=openai, processing_mode=artifact-and-txt, outcome=failed, retry_count=0, duration_s=1.000]"
+    ) in caplog.text
+
+
+def test_process_item_logs_txt_only_processing_mode(mocker, tmp_path, caplog):
+    service = MagicMock()
+    mp3_path = tmp_path / "existing.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp3_path)
+    mocker.patch("src.main.transcribe_file", return_value="hello")
+    mocker.patch("src.main.drive.upload", return_value={"id": "uploaded"})
+    mocker.patch("src.main.time.monotonic", side_effect=[30.0, 31.25])
+
+    cfg = make_config(stt_provider="openai", openai_api_key="sk-x", drive_mp3_artifact=True)
+
+    with caplog.at_level("INFO"):
+        telemetry = main.process_item(
+            service,
+            _item("fid1", "video.mp4", has_mp3=True, has_txt=False, mp3_id="m1", mp3_name="video.mp3"),
+            "folderA",
+            cfg,
+        )
+
+    assert telemetry.processing_mode == "txt-only"
+    assert (
+        "Process summary [file=video.mp4, file_id=fid1, folder=folderA, "
+        "provider=openai, processing_mode=txt-only, outcome=success, retry_count=0, duration_s=1.250]"
+    ) in caplog.text
+
+
 def test_run_once_continues_on_listing_error(mocker):
     service = MagicMock()
     cfg = make_config(folder_ids=["bad_folder", "good_folder"])
@@ -789,6 +1041,83 @@ def test_run_once_passes_config_to_process(mocker):
     main.run_once(service, cfg)
 
     assert process_mock.call_args.args[3] is cfg
+
+
+def test_run_once_logs_folder_and_cycle_summary(mocker, caplog):
+    service = MagicMock()
+    cfg = make_config(folder_ids=["f1"], stt_provider="openai", openai_api_key="sk-x")
+
+    items = [
+        _item("v1", "a.mp4", has_mp3=True, has_txt=False, mp3_id="m1", mp3_name="a.mp3"),
+        _item("v2", "b.mp4", has_mp3=True, has_txt=True, mp3_id="m2", mp3_name="b.mp3"),
+    ]
+    mocker.patch("src.main.drive.list_folder_state", return_value=items)
+    mocker.patch("src.main.process_item")
+    mocker.patch("src.main.time.monotonic", side_effect=[100.0, 101.25])
+
+    with caplog.at_level("INFO"):
+        main.run_once(service, cfg)
+
+    assert "Folder f1 summary [total=2, pending=1, skipped_size=0, dry_run=False]" in caplog.text
+    assert (
+        "Cycle summary [provider=openai, outcome=success, folders=1, pending=1, "
+        "processed=1, failed=0, retry_total=0, gcs_blob_orphans=0, skipped_size=0, "
+        "folder_errors=0, dry_run=False, duration_s=1.250]"
+    ) in caplog.text
+
+
+def test_run_once_aggregates_retry_total_from_process_telemetry(mocker, caplog):
+    service = MagicMock()
+    cfg = make_config(folder_ids=["f1"], stt_provider="openai", openai_api_key="sk-x")
+
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_item("v1", "a.mp4", has_mp3=True, has_txt=False, mp3_id="m1", mp3_name="a.mp3")],
+    )
+    mocker.patch(
+        "src.main.process_item",
+        return_value=main._ProcessTelemetry(
+            provider="openai",
+            processing_mode="txt-only",
+            retry_count=2,
+            duration_s=0.5,
+        ),
+    )
+    mocker.patch("src.main.time.monotonic", side_effect=[200.0, 201.0])
+
+    with caplog.at_level("INFO"):
+        main.run_once(service, cfg)
+
+    assert "retry_total=2" in caplog.text
+
+
+def test_run_once_counts_google_timeout_blob_retention(mocker, caplog):
+    service = MagicMock()
+    cfg = make_config(folder_ids=["f1"], stt_provider="google", google_cloud_project="proj", google_stt_gcs_bucket="bucket", stt_language="en-US")
+
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_item("v1", "a.mp4", has_mp3=True, has_txt=False, mp3_id="m1", mp3_name="a.mp3")],
+    )
+    mocker.patch(
+        "src.main.process_item",
+        side_effect=GoogleBlobRetainedTimeoutError(
+            "Google Cloud STT batch_recognize did not complete within 3600.0s; GCS blob gs://bucket/blob retained for manual cleanup",
+            gcs_uri="gs://bucket/blob",
+        ),
+    )
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+    mocker.patch("src.main.time.monotonic", side_effect=[40.0, 42.0])
+
+    with caplog.at_level("INFO"):
+        main.run_once(service, cfg)
+
+    notify_mock.assert_called_once()
+    assert (
+        "Cycle summary [provider=google, outcome=partial_failure, folders=1, pending=1, "
+        "processed=0, failed=1, retry_total=0, gcs_blob_orphans=1, skipped_size=0, folder_errors=0, "
+        "dry_run=False, duration_s=2.000]"
+    ) in caplog.text
 
 
 def test_main_runs_loop_and_sleeps(mocker):
