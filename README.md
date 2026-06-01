@@ -375,66 +375,45 @@ For recovery steps and provider-specific details, see
 
 ### Agent-facing documentation
 
-Shared repository instructions live in [`AGENTS.md`](AGENTS.md). The portable operator
-skill lives in [`.agents/skills/gdstt-cli/`](.agents/skills/gdstt-cli/), with a
-compatibility mirror under [`.claude/skills/gdstt-cli/`](.claude/skills/gdstt-cli/).
+Shared repository instructions live in [`AGENTS.md`](AGENTS.md). The canonical
+installable package lives in [`skills/gdstt-cli/`](skills/gdstt-cli/). It contains
+one discoverable `SKILL.md`; references and examples are installed recursively as
+resources that the main skill opens only when needed.
 
-The bundle follows the open Agent Skills format. Supported hosts can use these paths:
-
-| Host | Project-scoped use from this checkout | Personal install path |
-| --- | --- | --- |
-| Codex | Use the portable bundle as the source | `$CODEX_HOME/skills/gdstt-cli` (default: `~/.codex/skills/gdstt-cli`) |
-| Claude Code / Claude Agent SDK | `.claude/skills/gdstt-cli` | `~/.claude/skills/gdstt-cli` |
-| GitHub Copilot cloud agent, Copilot CLI, and VS Code agent mode | `.agents/skills/gdstt-cli` | `~/.agents/skills/gdstt-cli` or `~/.copilot/skills/gdstt-cli` |
-| Gemini CLI | `.agents/skills/gdstt-cli` workspace alias | `~/.agents/skills/gdstt-cli` or `~/.gemini/skills/gdstt-cli` |
-
-For another editor or agent host, check its Agent Skills documentation before
-installing. The portable source is `.agents/skills/gdstt-cli`; do not assume an
-editor-specific discovery path without confirming that the host supports it.
-
-To install the skill for Codex across projects, copy the portable bundle into
-`$CODEX_HOME/skills` and restart Codex:
-
-```powershell
-$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ".codex" }
-New-Item -ItemType Directory -Force (Join-Path $codexHome "skills") | Out-Null
-Copy-Item -Recurse -Force .agents\skills\gdstt-cli (Join-Path $codexHome "skills")
-```
+Prefer the `gh skill` workflow for installation:
 
 ```bash
-mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
-cp -R .agents/skills/gdstt-cli "${CODEX_HOME:-$HOME/.codex}/skills/"
+gh skill preview wyrtensi/google-drive-video-stt gdstt-cli
+gh skill install wyrtensi/google-drive-video-stt gdstt-cli --agent codex --scope user
+gh skill update --all
 ```
 
-For Claude-compatible loaders, install the synchronized compatibility mirror and start
-a new session:
-
-```powershell
-New-Item -ItemType Directory -Force (Join-Path $HOME ".claude\skills") | Out-Null
-Copy-Item -Recurse -Force .claude\skills\gdstt-cli (Join-Path $HOME ".claude\skills")
-```
+For local checkout testing before publishing:
 
 ```bash
-mkdir -p "$HOME/.claude/skills"
-cp -R .claude/skills/gdstt-cli "$HOME/.claude/skills/"
+gh skill publish --dry-run
+gh skill install . gdstt-cli --from-local --agent codex --scope user
 ```
 
-GitHub Copilot and Gemini CLI can use the committed `.agents/skills/gdstt-cli`
-workspace bundle directly. For a personal installation shared across projects:
-
-```powershell
-New-Item -ItemType Directory -Force (Join-Path $HOME ".agents\skills") | Out-Null
-Copy-Item -Recurse -Force .agents\skills\gdstt-cli (Join-Path $HOME ".agents\skills")
-```
+Pin a known version when reproducibility matters:
 
 ```bash
-mkdir -p "$HOME/.agents/skills"
-cp -R .agents/skills/gdstt-cli "$HOME/.agents/skills/"
+gh skill install wyrtensi/google-drive-video-stt gdstt-cli@YOUR_TAG_OR_COMMIT --agent codex --scope user
 ```
+
+`gh skill install --help` lists supported hosts and their install locations.
+Current host choices include Codex, Claude Code, Cursor, Gemini CLI, GitHub
+Copilot, Windsurf, and many more. VS Code agent mode can discover Copilot Agent
+Skills from supported workspace layouts. Workspace loaders can also discover the generated
+[`.agents/skills/gdstt-cli/`](.agents/skills/gdstt-cli/) and
+[`.claude/skills/gdstt-cli/`](.claude/skills/gdstt-cli/) mirrors when supported.
+
+For a host without `gh skill` integration, manually copy the canonical
+`skills/gdstt-cli` directory into that host's documented skills directory. Check
+the host documentation first instead of assuming an editor-specific path.
 
 Gemini CLI can refresh workspace discovery without restarting by running
-`/skills reload` in an interactive session. GitHub Copilot also supports the
-`gh skill` workflow for previewing and installing skills from GitHub repositories.
+`/skills reload` in an interactive session.
 
 Official references:
 
@@ -443,9 +422,12 @@ Official references:
 - [Claude Code skills](https://code.claude.com/docs/en/slash-commands)
 - [Gemini CLI Agent Skills](https://geminicli.com/docs/cli/skills/)
 
-After changing the bundled skill, keep all copies synchronized with:
+After changing the canonical package or companion docs, refresh and validate the
+generated mirrors with:
 
 ```bash
+uv run python scripts/sync-agent-skills.py --write
+uv run python scripts/sync-agent-skills.py --check
 uv run python scripts/check-agent-skill.py
 ```
 

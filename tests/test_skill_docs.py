@@ -13,8 +13,11 @@ SKILL_ID = "gdstt-cli"
 AGENTS_PATH = REPO_ROOT / "AGENTS.md"
 CLAUDE_PATH = REPO_ROOT / "CLAUDE.md"
 REGISTRY_PATH = REPO_ROOT / "docs" / "skills" / "registry.json"
+CANONICAL_SKILL_ROOT = REPO_ROOT / "skills" / SKILL_ID
+AGENTS_SKILL_ROOT = REPO_ROOT / ".agents" / "skills" / SKILL_ID
 CLAUDE_SKILL_PATH = REPO_ROOT / ".claude" / "skills" / SKILL_ID / "SKILL.md"
 AGENT_SKILL_CHECK_SCRIPT = REPO_ROOT / "scripts" / "check-agent-skill.py"
+AGENT_SKILL_SYNC_SCRIPT = REPO_ROOT / "scripts" / "sync-agent-skills.py"
 
 
 def _registered_commands() -> set[str]:
@@ -79,8 +82,8 @@ def _skill_path() -> Path:
     return _resolve_repo_path(_skill_entry()["path"])
 
 
-def _compatibility_skill_paths() -> list[Path]:
-    return [_resolve_repo_path(path) for path in _skill_entry().get("compatibility_skill_paths", [])]
+def _generated_mirror_skill_paths() -> list[Path]:
+    return [_resolve_repo_path(path) for path in _skill_entry().get("generated_mirror_paths", [])]
 
 
 def _portable_reference_path(relative_path: str) -> Path:
@@ -112,6 +115,10 @@ def _normalized_text(path: Path) -> str:
     return path.read_text(encoding="utf-8").replace("\r\n", "\n").rstrip("\n")
 
 
+def _collapsed_text(path: Path) -> str:
+    return " ".join(_normalized_text(path).split())
+
+
 def test_skill_file_exists_with_frontmatter_and_registry_parity():
     assert REGISTRY_PATH.exists(), f"missing skill registry: {REGISTRY_PATH}"
 
@@ -133,14 +140,46 @@ def test_skill_file_exists_with_frontmatter_and_registry_parity():
     assert frontmatter["version"] == entry["version"]
     assert frontmatter["last_updated"] == entry["last_updated"]
     assert entry["name"] == SKILL_ID
-    assert entry["path"] == ".agents/skills/gdstt-cli/SKILL.md"
+    assert entry["path"] == "skills/gdstt-cli/SKILL.md"
     assert entry["shared_contract"] == "AGENTS.md"
-    assert entry["compatibility_skill_paths"] == [".claude/skills/gdstt-cli/SKILL.md"]
+    assert entry["generated_mirror_paths"] == [
+        ".agents/skills/gdstt-cli/SKILL.md",
+        ".claude/skills/gdstt-cli/SKILL.md",
+    ]
     assert re.fullmatch(r"\d+\.\d+\.\d+", entry["version"])
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", entry["last_updated"])
 
 
-def test_compatibility_skill_mirror_matches_portable_bundle():
+def test_canonical_skill_package_exists_and_primary_skill_is_compact():
+    skill_path = CANONICAL_SKILL_ROOT / "SKILL.md"
+
+    assert skill_path.exists(), f"missing canonical skill: {skill_path}"
+    assert len(skill_path.read_text(encoding="utf-8").splitlines()) <= 400
+
+
+def test_skill_package_contains_one_discoverable_skill_and_routes_every_resource():
+    skill_text = (CANONICAL_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    skill_files = list(CANONICAL_SKILL_ROOT.rglob("SKILL.md"))
+    resources = [
+        path
+        for resource_dir in ("references", "examples")
+        for path in (CANONICAL_SKILL_ROOT / resource_dir).glob("*")
+        if path.is_file()
+    ]
+
+    assert skill_files == [CANONICAL_SKILL_ROOT / "SKILL.md"]
+    for path in resources:
+        relative_path = path.relative_to(CANONICAL_SKILL_ROOT).as_posix()
+        assert relative_path in skill_text, f"primary skill must route to {relative_path}"
+
+
+def test_agent_skill_sync_script_exists():
+    assert AGENT_SKILL_SYNC_SCRIPT.exists(), (
+        f"missing agent skill sync script: {AGENT_SKILL_SYNC_SCRIPT}"
+    )
+
+
+def test_generated_skill_mirrors_match_canonical_bundle():
     portable_root = _skill_path().parent
     portable_files = {
         path.relative_to(portable_root)
@@ -148,7 +187,7 @@ def test_compatibility_skill_mirror_matches_portable_bundle():
         if path.is_file()
     }
 
-    for compatibility_path in _compatibility_skill_paths():
+    for compatibility_path in _generated_mirror_skill_paths():
         compatibility_root = compatibility_path.parent
         compatibility_files = {
             path.relative_to(compatibility_root)
@@ -185,7 +224,7 @@ def test_documented_commands_match_registered_subcommands():
 
 
 def test_skill_documents_provider_env_vars():
-    text = _skill_path().read_text(encoding="utf-8")
+    text = _portable_reference_path("configuration.md").read_text(encoding="utf-8")
     for var in (
         "STT_PROVIDER",
         "OPENAI_API_KEY",
@@ -200,16 +239,17 @@ def test_skill_documents_provider_env_vars():
 
 def test_skill_has_start_here_and_scenario_env_sections():
     text = _skill_path().read_text(encoding="utf-8")
+    config_text = _portable_reference_path("configuration.md").read_text(encoding="utf-8")
 
     assert "## Start Here" in text
     assert "First-time Drive-only setup" in text
     assert "Safe single-file processing" in text
-    assert "### Drive-only setup" in text
-    assert "### Common runtime behavior" in text
-    assert "### Deepgram default setup" in text
-    assert "### OpenAI setup and post-processing" in text
-    assert "### Google STT setup" in text
-    assert "### ASR and other provider-specific settings" in text
+    assert "## Drive-only setup" in config_text
+    assert "## Common runtime behavior" in config_text
+    assert "## Deepgram" in config_text
+    assert "## OpenAI" in config_text
+    assert "## Google STT" in config_text
+    assert "## ASR" in config_text
 
 
 def test_skill_start_here_routes_common_operator_intents():
@@ -222,8 +262,7 @@ def test_skill_start_here_routes_common_operator_intents():
     assert "gdstt list" in start_here
     assert "gdstt process <file-id> --dry-run" in start_here
     assert "gdstt process <file-id>" in start_here
-    assert "references/provider-notes.md" in start_here
-    assert "references/troubleshooting.md" in start_here
+    assert "routing table below" in start_here
 
 
 def test_skill_start_here_stays_compact_and_ordered():
@@ -235,19 +274,20 @@ def test_skill_start_here_stays_compact_and_ordered():
     assert numbered_routes == [
         "First-time Drive-only setup: `gdstt auth` -> `gdstt doctor` -> `gdstt list`",
         "Safe single-file processing: `gdstt process <file-id> --dry-run` -> `gdstt process <file-id>`",
-        "Provider or failure detail: stay in this skill for command routing, then open",
+        "Folder-wide work: preview first with `gdstt run-once --dry-run` or folder `process --dry-run`",
+        "Provider or failure detail: read the matching resource from the routing table below",
     ]
 
 
 def test_skill_keeps_env_vars_grouped_by_operator_scenario():
-    text = _skill_path().read_text(encoding="utf-8")
+    text = _portable_reference_path("configuration.md").read_text(encoding="utf-8")
 
     drive_setup = _markdown_section(text, "Drive-only setup")
     common_runtime = _markdown_section(text, "Common runtime behavior")
-    deepgram = _markdown_section(text, "Deepgram default setup")
-    openai = _markdown_section(text, "OpenAI setup and post-processing")
-    google = _markdown_section(text, "Google STT setup")
-    asr = _markdown_section(text, "ASR and other provider-specific settings")
+    deepgram = _markdown_section(text, "Deepgram")
+    openai = _markdown_section(text, "OpenAI")
+    google = _markdown_section(text, "Google STT")
+    asr = _markdown_section(text, "ASR")
 
     assert "FOLDER_IDS" in drive_setup
     assert "DATA_DIR" in drive_setup
@@ -274,7 +314,7 @@ def test_skill_keeps_env_vars_grouped_by_operator_scenario():
 
 
 def test_skill_documents_runtime_and_deepgram_env_vars():
-    text = _skill_path().read_text(encoding="utf-8")
+    text = _portable_reference_path("configuration.md").read_text(encoding="utf-8")
     for var in (
         "POLL_INTERVAL",
         "PROXY_URL",
@@ -300,11 +340,11 @@ def test_skill_documents_command_boundaries_and_provider_switching():
     assert "Processing commands validate provider config and can spend STT credits" in text
     assert "Current operational default examples assume `STT_PROVIDER=deepgram`" in text
     assert "the same CLI flow if the provider changes later." in text
-    assert "ignored by Deepgram and Google full-file paths" in text
+    assert "Deepgram and Google full-file paths" in _collapsed_text(_skill_path())
 
 
 def test_skill_documents_drive_setup_as_drive_only_wizard():
-    text = _skill_path().read_text(encoding="utf-8")
+    text = _collapsed_text(_portable_example_path("drive-only-setup.md"))
 
     assert "Human-Facing Drive Setup Wizard" in text
     assert "existing project id, or a new project name" in text
@@ -317,31 +357,31 @@ def test_skill_documents_drive_setup_as_drive_only_wizard():
 
 
 def test_skill_documents_max_size_is_optional():
-    text = _skill_path().read_text(encoding="utf-8")
+    text = _collapsed_text(_skill_path())
 
     assert "`--max-size` is optional and disabled by default" in text
-    assert "Do not invent a global default" in text
+    assert "Do not invent a global threshold" in text
 
 
 def test_skill_documents_openai_full_drive_pipeline():
-    text = _skill_path().read_text(encoding="utf-8")
+    text = _portable_example_path("openai-full-pipeline.md").read_text(encoding="utf-8")
 
-    assert "Full Drive MP4 To Final TXT With OpenAI Post-Processing" in text
+    assert "Drive MP4 To Final TXT With OpenAI Post-Processing" in text
     assert "OPENAI_POSTPROCESS=true" in text
     assert "STT_PROVIDER=openai" in text
-    assert "OpenAI does speech-to-text" in text
-    assert "OpenAI refines the text after any STT provider" in text
-    assert "There is no single local-MP4 CLI command" in text
+    assert "OpenAI performs speech-to-text" in text
+    assert "OpenAI refines text after any STT provider" in text
+    assert "Do not treat local `gdstt transcribe` as the complete Drive MP4 pipeline" in text
 
 
 def test_skill_documents_cycle_summary_interpretation():
     text = _skill_path().read_text(encoding="utf-8")
 
     assert "gcs_blob_orphans" in text
-    assert "`run-once` now logs folder summaries and one cycle summary" in text
-    assert "process summary per worked file" in text
+    assert "`run-once` logs folder summaries and one cycle summary" in text
+    assert "`process_item` logs provider" in text
     assert "processing_mode" in text
-    assert "provider, overall outcome" in text
+    assert "provider, overall" in text
     assert "retry_total" in text
     assert "duration" in text
     assert "references/troubleshooting.md" in text
@@ -350,12 +390,13 @@ def test_skill_documents_cycle_summary_interpretation():
 def test_skill_bundle_has_scenario_playbooks():
     text = _skill_path().read_text(encoding="utf-8")
 
-    assert "### Supporting Playbooks" in text
-    assert "Ordinary project use should stay in the main skill flow" in text
+    assert "## Resource Routing" in text
+    assert "Bundled references and examples are installed resources, not nested skills" in text
     for example_name in (
         "drive-only-setup.md",
         "folder-dry-run-size-guard.md",
         "google-timeout-recovery.md",
+        "openai-full-pipeline.md",
     ):
         example_path = _portable_example_path(example_name)
         assert example_path.exists(), f"missing scenario playbook: {example_path}"
@@ -382,7 +423,7 @@ def test_agents_doc_exists_with_portable_contract():
     assert "Deepgram is the current operational default" in text
     assert "Keep one primary operator skill" in text
     assert "Prefer companion reference docs over separate active subskills" in text
-    assert "not as nested subskills inside the main `gdstt-cli` bundle" in text
+    assert "not as nested subskills inside the main `gdstt-cli` package" in text
 
 
 def test_agent_skill_validator_script_exists():
@@ -430,9 +471,6 @@ def test_companion_reference_docs_exist_and_match_promised_sections():
 
         headings = _markdown_headings(doc_path.read_text(encoding="utf-8"))
         for section in companion["required_sections"]:
-            assert section in skill_text, (
-                f"skill should point humans to the `{section}` section in {companion['path']}"
-            )
             assert section in headings, (
                 f"{companion['path']} should include the promised section `{section}`"
             )

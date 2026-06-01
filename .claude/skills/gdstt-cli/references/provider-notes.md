@@ -1,7 +1,7 @@
 # Provider Notes
 
 Reference notes for provider tuning. The main operator workflow stays in
-`.agents/skills/gdstt-cli/SKILL.md`; use this file only for deeper comparisons
+`skills/gdstt-cli/SKILL.md`; use this file only for deeper comparisons
 or when changing STT provider behavior.
 
 ## Universal switching rules
@@ -58,6 +58,6 @@ Do not confuse `STT_PROVIDER=openai` with `OPENAI_POSTPROCESS=true`.
 ## When changing provider defaults
 
 - Update `AGENTS.md` if a provider-level invariant changes.
-- Update `.agents/skills/gdstt-cli/SKILL.md` if the default operator flow changes.
+- Update `skills/gdstt-cli/SKILL.md` if the default operator flow changes.
 - Update `tests/test_skill_docs.py` whenever new required env vars or operator
   behaviors become part of the contract.
