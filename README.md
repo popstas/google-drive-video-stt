@@ -379,9 +379,21 @@ Shared repository instructions live in [`AGENTS.md`](AGENTS.md). The portable op
 skill lives in [`.agents/skills/gdstt-cli/`](.agents/skills/gdstt-cli/), with a
 compatibility mirror under [`.claude/skills/gdstt-cli/`](.claude/skills/gdstt-cli/).
 
-Agents that support project-scoped skills can use those bundled copies directly from
-the checkout. To install the skill for Codex across projects, copy the portable bundle
-into `$CODEX_HOME/skills` (default: `~/.codex/skills`) and restart Codex:
+The bundle follows the open Agent Skills format. Supported hosts can use these paths:
+
+| Host | Project-scoped use from this checkout | Personal install path |
+| --- | --- | --- |
+| Codex | Use the portable bundle as the source | `$CODEX_HOME/skills/gdstt-cli` (default: `~/.codex/skills/gdstt-cli`) |
+| Claude Code / Claude Agent SDK | `.claude/skills/gdstt-cli` | `~/.claude/skills/gdstt-cli` |
+| GitHub Copilot cloud agent, Copilot CLI, and VS Code agent mode | `.agents/skills/gdstt-cli` | `~/.agents/skills/gdstt-cli` or `~/.copilot/skills/gdstt-cli` |
+| Gemini CLI | `.agents/skills/gdstt-cli` workspace alias | `~/.agents/skills/gdstt-cli` or `~/.gemini/skills/gdstt-cli` |
+
+For another editor or agent host, check its Agent Skills documentation before
+installing. The portable source is `.agents/skills/gdstt-cli`; do not assume an
+editor-specific discovery path without confirming that the host supports it.
+
+To install the skill for Codex across projects, copy the portable bundle into
+`$CODEX_HOME/skills` and restart Codex:
 
 ```powershell
 $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ".codex" }
@@ -406,6 +418,30 @@ Copy-Item -Recurse -Force .claude\skills\gdstt-cli (Join-Path $HOME ".claude\ski
 mkdir -p "$HOME/.claude/skills"
 cp -R .claude/skills/gdstt-cli "$HOME/.claude/skills/"
 ```
+
+GitHub Copilot and Gemini CLI can use the committed `.agents/skills/gdstt-cli`
+workspace bundle directly. For a personal installation shared across projects:
+
+```powershell
+New-Item -ItemType Directory -Force (Join-Path $HOME ".agents\skills") | Out-Null
+Copy-Item -Recurse -Force .agents\skills\gdstt-cli (Join-Path $HOME ".agents\skills")
+```
+
+```bash
+mkdir -p "$HOME/.agents/skills"
+cp -R .agents/skills/gdstt-cli "$HOME/.agents/skills/"
+```
+
+Gemini CLI can refresh workspace discovery without restarting by running
+`/skills reload` in an interactive session. GitHub Copilot also supports the
+`gh skill` workflow for previewing and installing skills from GitHub repositories.
+
+Official references:
+
+- [GitHub Copilot Agent Skills](https://docs.github.com/en/copilot/concepts/agents/about-agent-skills)
+- [VS Code Agent Skills](https://code.visualstudio.com/docs/copilot/customization/agent-skills)
+- [Claude Code skills](https://code.claude.com/docs/en/slash-commands)
+- [Gemini CLI Agent Skills](https://geminicli.com/docs/cli/skills/)
 
 After changing the bundled skill, keep all copies synchronized with:
 
