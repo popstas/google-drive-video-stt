@@ -73,4 +73,4 @@
 - [x] Run `uv run pytest`.
 - [x] Run `uv run ruff check`.
 - [x] Run `git diff --check`.
-- [ ] Commit from `wyrtensi`, push a stacked branch, open and merge a PR into `codex/pr-4-review`, and update `popstas/google-drive-video-stt#5`.
+- [x] Commit from `wyrtensi`, push a stacked branch, open and merge a PR into `codex/pr-4-review`, and update `popstas/google-drive-video-stt#5`.
