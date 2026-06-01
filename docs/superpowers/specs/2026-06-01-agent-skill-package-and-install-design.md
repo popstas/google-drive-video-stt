@@ -53,6 +53,11 @@ The primary `SKILL.md` is a router and safe-workflow guide. It must remain usefu
 on its own for ordinary operation, but detailed setup, configuration, provider
 notes, and recovery material load only when needed.
 
+The files under `references/` and `examples/` are bundled resources, not nested
+skills. They must not contain `SKILL.md` files or skill frontmatter. Installing
+`gdstt-cli` recursively installs these resources with the primary skill, but
+only the primary `SKILL.md` participates in discovery and triggering.
+
 Target size:
 
 - preferred: 250-350 lines
@@ -148,6 +153,17 @@ Keep these sections in `skills/gdstt-cli/SKILL.md`:
 7. A routing table describing exactly when to open each reference or example.
 8. A short notes section for core invariants that are unsafe to omit.
 
+Every bundled resource must be linked directly from the primary `SKILL.md` with
+a task-oriented read condition, for example:
+
+```text
+For first-time Drive OAuth setup, read `examples/drive-only-setup.md`.
+For empty transcripts or retained GCS blobs, read `references/troubleshooting.md`.
+```
+
+Do not rely on an agent browsing the package tree and guessing which resource
+contains the required workflow.
+
 Move these details out of the primary skill:
 
 - full Drive OAuth wizard and PowerShell commands
@@ -236,6 +252,8 @@ Update `scripts/check-agent-skill.py` and tests so validation covers:
 - bundled reference equality
 - required playbook presence
 - direct routing links from the primary `SKILL.md`
+- one task-oriented read condition for every bundled reference and example
+- no nested `SKILL.md` files under `references/` or `examples/`
 - primary `SKILL.md` hard limit of 400 lines
 - `gh skill publish --dry-run` success when supported by the installed GitHub CLI
 - local install smoke test into a temporary directory:
@@ -340,6 +358,9 @@ Extend `tests/test_skill_docs.py` to assert:
 - command coverage remains complete after compaction
 - common safe-flow routing remains in the primary skill
 - detailed material exists in references and examples
+- every bundled resource is directly linked from the primary skill with a
+  task-oriented read condition
+- references and examples are installed resources, not nested skills
 - canonical package and mirrors are identical
 - registry points to the canonical package
 - primary `SKILL.md` remains within the 400-line hard limit
@@ -354,6 +375,7 @@ gh skill install . gdstt-cli --from-local --dir <temp-dir>
 ```
 
 Verify the installed tree contains `SKILL.md`, references, and examples.
+Verify it contains exactly one `SKILL.md`: the primary discoverable skill.
 
 ### Forward Tests
 
