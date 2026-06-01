@@ -57,7 +57,7 @@ Check `src/main.py` for provider-specific behavior:
 Update these docs when provider behavior changes:
 
 - `AGENTS.md` for shared invariants
-- `.agents/skills/gdstt-cli/SKILL.md` if the default operator flow changes
+- `skills/gdstt-cli/SKILL.md` if the default operator flow changes
 - `docs/skills/provider-notes.md` for provider-specific env vars and tuning
 - `docs/skills/troubleshooting.md` for new failure or recovery paths
 

@@ -8,9 +8,10 @@ Markdown and shared repo docs over editor-specific overlays.
 - `README.md` - human quickstart and deployment overview.
 - `AGENTS.md` - canonical shared repo contract, commands, architecture, and conventions.
 - `docs/skills/registry.json` - shared, versioned skill metadata map for cross-editor reuse.
-- `.agents/skills/gdstt-cli/` - portable installable operator skill bundle (`SKILL.md` + bundled references).
+- `skills/gdstt-cli/` - canonical installable operator skill package (`SKILL.md` + bundled resources).
+- `.agents/skills/gdstt-cli/` - generated workspace mirror for shared Agent Skills loaders.
 - `CLAUDE.md` - thin compatibility shim that points back to `AGENTS.md`.
-- `.claude/skills/gdstt-cli/` - compatibility mirror for loaders that still expect editor-specific skill paths.
+- `.claude/skills/gdstt-cli/` - generated mirror for Claude-compatible workspace loaders.
 
 ## Project snapshot
 
@@ -28,6 +29,8 @@ uv sync --extra dev          # install deps incl. pytest/ruff (use .venv)
 uv run pytest                # run all tests
 uv run pytest tests/test_stt_google.py::test_name   # single test
 uv run ruff check            # lint (line-length 100, target py311)
+uv run python scripts/sync-agent-skills.py --check  # validate generated skill mirrors
+uv run python scripts/sync-agent-skills.py --write  # refresh generated skill mirrors
 uv run python -m src.auth    # one-time interactive OAuth -> data/token.json
 uv run python -m src.main    # run the polling loop locally
 gdstt <auth|run|run-once|process|transcribe|list>   # operator CLI (src/cli.py); installed by uv sync
@@ -115,10 +118,10 @@ Adding a scope to `SCOPES` requires deleting `data/token.json` and re-running `s
 
 ## Skill layering policy
 
-- Keep one primary operator skill in `.agents/skills/gdstt-cli/SKILL.md`.
+- Keep one primary operator skill in `skills/gdstt-cli/SKILL.md`.
 - The main skill must stay sufficient for the default workflow: auth, inspect,
   single-file processing, reprocess, folder safety, and provider switching basics.
-- Use bundled scenario playbooks under `.agents/skills/gdstt-cli/examples/`
+- Use bundled scenario playbooks under `skills/gdstt-cli/examples/`
   only for external setup, folder-wide safety, or recovery tasks. Ordinary
   project use should stay in the main skill flow instead of being routed
   through a scenario file.
@@ -131,7 +134,7 @@ Adding a scope to `SCOPES` requires deleting `data/token.json` and re-running `s
   point to them, but the base workflow must stay usable from one skill.
 - Use separate skills only if they have a genuinely different trigger, audience,
   and decision tree. If that day comes, add them as sibling folders under
-  `.agents/skills/`, not as nested subskills inside the main `gdstt-cli` bundle.
+  `skills/`, not as nested subskills inside the main `gdstt-cli` package.
 
 ## Current provider posture
 
@@ -159,15 +162,16 @@ Today that means:
 
 - Shared rules belong in `AGENTS.md`.
 - Shared skill metadata belongs in `docs/skills/registry.json`.
-- Portable operator playbooks belong in `.agents/skills/gdstt-cli/SKILL.md`.
+- Canonical portable operator guidance belongs in `skills/gdstt-cli/SKILL.md`.
 - Portable interaction assets belong next to the skill under
-  `.agents/skills/gdstt-cli/examples/` and `references/`, but they should stay
+  `skills/gdstt-cli/examples/` and `references/`, but they should stay
   limited to supporting setup, folder-wide safety, and recovery.
-- `.claude/skills/gdstt-cli/` stays as a compatibility mirror for current editor loaders.
+- `.agents/skills/gdstt-cli/` and `.claude/skills/gdstt-cli/` are generated
+  workspace mirrors. Refresh them with `python scripts/sync-agent-skills.py --write`.
 - Prefer universal docs over editor-specific overlays.
 - Keep bundled references under each installable skill so the bundle remains usable
   outside this repository.
-- Validate the bundle and its mirrors with `python scripts/check-agent-skill.py`.
+- Validate the package and its mirrors with `python scripts/check-agent-skill.py`.
 - When cross-editor metadata or promised companion sections change, update
   `docs/skills/registry.json` and refresh its `registry_version`, skill `version`,
   and `last_updated` fields.

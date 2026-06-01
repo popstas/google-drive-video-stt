@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""Validate the bundled gdstt Agent Skill and synchronized compatibility mirror."""
+"""Validate the canonical gdstt Agent Skill package and generated mirrors."""
 
 from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ID = "gdstt-cli"
 REGISTRY_PATH = REPO_ROOT / "docs" / "skills" / "registry.json"
-PORTABLE_SKILL_ROOT = REPO_ROOT / ".agents" / "skills" / SKILL_ID
-COMPATIBILITY_SKILL_ROOTS = (
+SYNC_SCRIPT = REPO_ROOT / "scripts" / "sync-agent-skills.py"
+CANONICAL_SKILL_ROOT = REPO_ROOT / "skills" / SKILL_ID
+GENERATED_MIRROR_ROOTS = (
+    REPO_ROOT / ".agents" / "skills" / SKILL_ID,
     REPO_ROOT / ".claude" / "skills" / SKILL_ID,
 )
 CANONICAL_COMPANIONS = (
@@ -19,10 +25,18 @@ CANONICAL_COMPANIONS = (
     REPO_ROOT / "docs" / "skills" / "troubleshooting.md",
     REPO_ROOT / "docs" / "skills" / "provider-extension.md",
 )
-REQUIRED_EXAMPLE_FILES = (
+REQUIRED_REFERENCES = (
+    "commands.md",
+    "configuration.md",
+    "provider-notes.md",
+    "troubleshooting.md",
+    "provider-extension.md",
+)
+REQUIRED_EXAMPLES = (
     "drive-only-setup.md",
     "folder-dry-run-size-guard.md",
     "google-timeout-recovery.md",
+    "openai-full-pipeline.md",
 )
 
 
@@ -48,19 +62,18 @@ def skill_frontmatter(text: str) -> dict[str, str]:
     return data
 
 
-def validate_required_files() -> None:
-    required = [PORTABLE_SKILL_ROOT / "SKILL.md"]
-    for companion in CANONICAL_COMPANIONS:
-        required.append(PORTABLE_SKILL_ROOT / "references" / companion.name)
-    for example_name in REQUIRED_EXAMPLE_FILES:
-        required.append(PORTABLE_SKILL_ROOT / "examples" / example_name)
-    for root in COMPATIBILITY_SKILL_ROOTS:
-        required.append(root / "SKILL.md")
-        for companion in CANONICAL_COMPANIONS:
-            required.append(root / "references" / companion.name)
-        for example_name in REQUIRED_EXAMPLE_FILES:
-            required.append(root / "examples" / example_name)
+def package_files(root: Path) -> set[Path]:
+    return {
+        path.relative_to(root)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
 
+
+def validate_required_files() -> None:
+    required = [CANONICAL_SKILL_ROOT / "SKILL.md", SYNC_SCRIPT]
+    required.extend(CANONICAL_SKILL_ROOT / "references" / name for name in REQUIRED_REFERENCES)
+    required.extend(CANONICAL_SKILL_ROOT / "examples" / name for name in REQUIRED_EXAMPLES)
     for path in required:
         assert path.is_file(), f"Missing Agent Skill file: {path}"
 
@@ -68,68 +81,67 @@ def validate_required_files() -> None:
 def validate_registry_sync() -> None:
     registry = load_registry()
     entry = registry["skills"][SKILL_ID]
-    skill_path = PORTABLE_SKILL_ROOT / "SKILL.md"
+    skill_path = CANONICAL_SKILL_ROOT / "SKILL.md"
     frontmatter = skill_frontmatter(skill_path.read_text(encoding="utf-8"))
 
     assert registry["format_version"] == 1
-    assert entry["path"] == ".agents/skills/gdstt-cli/SKILL.md"
-    assert entry["compatibility_skill_paths"] == [".claude/skills/gdstt-cli/SKILL.md"]
+    assert entry["path"] == "skills/gdstt-cli/SKILL.md"
+    assert entry["generated_mirror_paths"] == [
+        ".agents/skills/gdstt-cli/SKILL.md",
+        ".claude/skills/gdstt-cli/SKILL.md",
+    ]
     assert frontmatter["name"] == entry["name"] == SKILL_ID
     assert frontmatter["description"] == entry["description"]
     assert frontmatter["version"] == entry["version"]
     assert frontmatter["last_updated"] == entry["last_updated"]
 
 
-def validate_reference_sync(root: Path) -> None:
+def validate_package_shape() -> None:
+    skill_text = (CANONICAL_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    skill_files = list(CANONICAL_SKILL_ROOT.rglob("SKILL.md"))
+    assert skill_files == [CANONICAL_SKILL_ROOT / "SKILL.md"], (
+        "The installable package must contain exactly one discoverable SKILL.md"
+    )
+    assert len(skill_text.splitlines()) <= 400, "Primary SKILL.md must stay at or below 400 lines"
+
+    for relative_path in sorted(package_files(CANONICAL_SKILL_ROOT)):
+        if relative_path == Path("SKILL.md"):
+            continue
+        resource = relative_path.as_posix()
+        assert resource in skill_text, f"Primary skill must route agents to {resource}"
+
+
+def validate_reference_sync() -> None:
     for canonical_path in CANONICAL_COMPANIONS:
-        bundled_path = root / "references" / canonical_path.name
+        bundled_path = CANONICAL_SKILL_ROOT / "references" / canonical_path.name
         assert normalized_text(bundled_path) == normalized_text(canonical_path), (
             f"Out-of-sync bundled reference: {bundled_path}"
         )
 
 
-def validate_compatibility_mirror_sync() -> None:
-    portable_files = {
-        path.relative_to(PORTABLE_SKILL_ROOT)
-        for path in PORTABLE_SKILL_ROOT.rglob("*")
-        if path.is_file()
-    }
-    for root in COMPATIBILITY_SKILL_ROOTS:
-        mirror_files = {
-            path.relative_to(root)
-            for path in root.rglob("*")
-            if path.is_file()
-        }
-        assert mirror_files == portable_files, f"Compatibility mirror file list is out of sync: {root}"
-        for relative_path in portable_files:
-            assert normalized_text(root / relative_path) == normalized_text(PORTABLE_SKILL_ROOT / relative_path), (
-                f"Compatibility mirror is out of sync: {root / relative_path}"
+def validate_generated_mirrors() -> None:
+    canonical_files = package_files(CANONICAL_SKILL_ROOT)
+    for root in GENERATED_MIRROR_ROOTS:
+        assert package_files(root) == canonical_files, f"Generated mirror file list is out of sync: {root}"
+        for relative_path in canonical_files:
+            assert normalized_text(root / relative_path) == normalized_text(CANONICAL_SKILL_ROOT / relative_path), (
+                f"Generated mirror is out of sync: {root / relative_path}"
             )
 
 
-def validate_portable_skill_text() -> None:
-    skill_text = (PORTABLE_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
-    for required_text in (
-        ".agents/skills/gdstt-cli/",
-        "references/provider-notes.md",
-        "references/troubleshooting.md",
-        "references/provider-extension.md",
-        "### Supporting Playbooks",
-        "Ordinary project use should stay in the main skill flow",
-        "examples/drive-only-setup.md",
-        "examples/folder-dry-run-size-guard.md",
-        "examples/google-timeout-recovery.md",
-        "Repo maintainer note: when editing this repository, the canonical docs live at:",
-        "docs/skills/provider-notes.md",
-        "docs/skills/troubleshooting.md",
-        "docs/skills/provider-extension.md",
-    ):
-        assert required_text in skill_text, f"Missing portable skill guidance: {required_text}"
+def validate_sync_script_check_mode() -> None:
+    result = subprocess.run(
+        [sys.executable, str(SYNC_SCRIPT), "--check"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def validate_example_playbooks() -> None:
-    for example_name in REQUIRED_EXAMPLE_FILES:
-        text = normalized_text(PORTABLE_SKILL_ROOT / "examples" / example_name)
+    for example_name in REQUIRED_EXAMPLES:
+        text = normalized_text(CANONICAL_SKILL_ROOT / "examples" / example_name)
         for required_text in (
             "# ",
             "## When to use",
@@ -139,16 +151,68 @@ def validate_example_playbooks() -> None:
             assert required_text in text, f"Example playbook {example_name} is missing section: {required_text}"
 
 
+def gh_skill_available() -> bool:
+    if shutil.which("gh") is None:
+        return False
+    result = subprocess.run(
+        ["gh", "skill", "--help"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def validate_gh_skill_workflow() -> None:
+    if not gh_skill_available():
+        print("Skipping gh skill smoke test: gh skill is not installed.")
+        return
+
+    publish = subprocess.run(
+        ["gh", "skill", "publish", "--dry-run"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert publish.returncode == 0, publish.stdout + publish.stderr
+
+    with tempfile.TemporaryDirectory(prefix="gdstt-skill-install-") as temp_dir:
+        install_root = Path(temp_dir)
+        install = subprocess.run(
+            [
+                "gh",
+                "skill",
+                "install",
+                ".",
+                SKILL_ID,
+                "--from-local",
+                "--dir",
+                str(install_root),
+                "--force",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert install.returncode == 0, install.stdout + install.stderr
+        installed_skill_files = list(install_root.rglob("SKILL.md"))
+        assert len(installed_skill_files) == 1, "Local install must contain exactly one SKILL.md"
+        installed_root = installed_skill_files[0].parent
+        assert package_files(installed_root) == package_files(CANONICAL_SKILL_ROOT), (
+            "Local gh skill install must preserve every bundled resource"
+        )
+
+
 def main() -> int:
     validate_required_files()
     validate_registry_sync()
-    validate_reference_sync(PORTABLE_SKILL_ROOT)
-    for root in COMPATIBILITY_SKILL_ROOTS:
-        validate_reference_sync(root)
-    validate_compatibility_mirror_sync()
-    validate_portable_skill_text()
+    validate_package_shape()
+    validate_reference_sync()
+    validate_generated_mirrors()
+    validate_sync_script_check_mode()
     validate_example_playbooks()
-    print("gdstt Agent Skill bundle is valid; portable bundle, references, and compatibility mirror are synchronized.")
+    validate_gh_skill_workflow()
+    print("gdstt Agent Skill package is valid; resources, mirrors, and install workflow are synchronized.")
     return 0
 
 

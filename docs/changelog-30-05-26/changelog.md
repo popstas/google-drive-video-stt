@@ -7,6 +7,16 @@ Review and validation notes for PR #4.
 This section summarizes the diff that landed after the main PR4 review memo in
 `docs/2026-06-01-project-skill-review.md`.
 
+### Canonical Agent Skill package and optional installation
+
+- `skills/gdstt-cli/` is now the canonical publishable Agent Skill package.
+- The primary `SKILL.md` is a compact router; detailed commands, configuration,
+  setup, recovery, and OpenAI flow live in recursively installed resources.
+- `.agents/skills/gdstt-cli/` and `.claude/skills/gdstt-cli/` are generated
+  workspace mirrors refreshed by `scripts/sync-agent-skills.py`.
+- README installation now prefers optional `gh skill` installs and documents
+  local publish/install smoke checks.
+
 ### Runtime hardening and observability
 
 - Empty transcript output is now treated as failure instead of a silent success.
@@ -40,12 +50,12 @@ This section summarizes the diff that landed after the main PR4 review memo in
 
 ### Portable bundle packaging
 
-- The main operator skill now has a portable installable bundle at
-  `.agents/skills/gdstt-cli/`.
-- `.claude/skills/gdstt-cli/` is now a compatibility mirror instead of the
-  primary source of truth.
-- `scripts/check-agent-skill.py` validates bundle sync, bundled references, and
-  the compatibility mirror.
+- The main operator skill now has a portable installable package at
+  `skills/gdstt-cli/`.
+- `.agents/skills/gdstt-cli/` and `.claude/skills/gdstt-cli/` are generated
+  workspace mirrors instead of authored sources of truth.
+- `scripts/check-agent-skill.py` validates package sync, bundled resources,
+  generated mirrors, and local `gh skill` installation when available.
 - Bundled playbooks are intentionally limited to supporting setup, folder-wide
   safety, and recovery. Ordinary project usage stays in the main skill flow.
 
