@@ -21,7 +21,12 @@ def _require_non_empty_transcript(text: str, *, audio_name: str, provider_name: 
     )
 
 
-def transcribe_file(mp3_path: Path, config: Config) -> str:
+def transcribe_file(
+    mp3_path: Path,
+    config: Config,
+    *,
+    cost_usd: dict[str, float | None] | None = None,
+) -> str:
     """Transcribe the input audio path with the configured provider."""
     if not config.stt_provider:
         raise STTError("STT_PROVIDER is not configured")
@@ -35,7 +40,11 @@ def transcribe_file(mp3_path: Path, config: Config) -> str:
     full_text = provider.transcribe_full(mp3_path)
     if full_text is not None:
         logger.info("Transcribed full file: %s", mp3_path.name)
-        _log_deepgram_cost(provider, config, mp3_path.name)
+        if cost_usd is not None:
+            cost_usd.setdefault(config.stt_provider, None)
+        deepgram_cost = _log_deepgram_cost(provider, config, mp3_path.name)
+        if cost_usd is not None and config.stt_provider == "deepgram":
+            cost_usd["deepgram"] = deepgram_cost
         return _require_non_empty_transcript(
             full_text,
             audio_name=mp3_path.name,
@@ -52,6 +61,8 @@ def transcribe_file(mp3_path: Path, config: Config) -> str:
             parts.append(text)
 
     merged = "\n\n".join(p for p in parts if p)
+    if cost_usd is not None:
+        cost_usd.setdefault(config.stt_provider, None)
     return _require_non_empty_transcript(
         merged,
         audio_name=mp3_path.name,
@@ -59,14 +70,18 @@ def transcribe_file(mp3_path: Path, config: Config) -> str:
     )
 
 
-def _log_deepgram_cost(provider: object, config: Config, audio_name: str) -> None:
+def _log_deepgram_cost(
+    provider: object,
+    config: Config,
+    audio_name: str,
+) -> float | None:
     if config.stt_provider != "deepgram":
-        return
+        return None
 
     request_id = getattr(provider, "last_request_id", None)
     if not request_id:
         logger.info("Deepgram cost unavailable for %s: missing request_id", audio_name)
-        return
+        return None
 
     try:
         usd = fetch_request_cost_usd(
@@ -81,7 +96,7 @@ def _log_deepgram_cost(provider: object, config: Config, audio_name: str) -> Non
             request_id,
             exc,
         )
-        return
+        return None
 
     duration = getattr(provider, "last_duration_seconds", None)
     duration_part = ""
@@ -98,7 +113,7 @@ def _log_deepgram_cost(provider: object, config: Config, audio_name: str) -> Non
             request_id,
             duration_part,
         )
-        return
+        return None
 
     logger.info(
         "Deepgram cost for %s: $%.6f (request_id=%s%s)",
@@ -107,3 +122,4 @@ def _log_deepgram_cost(provider: object, config: Config, audio_name: str) -> Non
         request_id,
         duration_part,
     )
+    return usd

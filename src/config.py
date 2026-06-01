@@ -9,12 +9,13 @@ except ImportError:
     load_dotenv = None
 
 
-SUPPORTED_STT_PROVIDERS = ("", "openai", "google", "asr", "deepgram")
+SUPPORTED_STT_PROVIDERS = ("", "disabled", "openai", "google", "asr", "deepgram")
 DEEPGRAM_DIARIZE_MODELS = ("latest", "v1")
 DEEPGRAM_AUDIO_SOURCES = ("m4a_copy", "mp3_96k", "mp3_192k")
 DEEPGRAM_TXT_FORMATTERS = ("word_speaker", "utterance")
 DEEPGRAM_DEFAULT_KEYTERMS_FILE = Path("config/deepgram-keyterms.txt")
 DEEPGRAM_MAX_KEYTERMS = 100
+CHECKOUT_ROOT = Path(__file__).resolve().parent.parent
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,25 @@ class Config:
 
 def _parse_folder_ids(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _dotenv_path() -> Path:
+    cwd_path = Path(".env")
+    if cwd_path.exists():
+        return cwd_path
+    checkout_path = CHECKOUT_ROOT / ".env"
+    return checkout_path if checkout_path.exists() else cwd_path
+
+
+def _resolve_relative_to_dotenv(raw: str, dotenv_path: Path) -> Path:
+    path = Path(raw)
+    if path.is_absolute() or dotenv_path == Path(".env"):
+        return path
+    return dotenv_path.parent / path
+
+
+def resolve_config_path(raw: str) -> Path:
+    return _resolve_relative_to_dotenv(raw, _dotenv_path())
 
 
 def _load_deepgram_api_key(api_key: str, api_key_file: str) -> str:
@@ -119,8 +139,9 @@ def _load_deepgram_keyterms(enabled: bool, keyterms_file: Path) -> tuple[str, ..
 
 
 def load_config(*, validate_providers: bool = True) -> Config:
+    dotenv_path = _dotenv_path()
     if load_dotenv is not None:
-        load_dotenv(dotenv_path=".env", override=False, encoding="utf-8-sig")
+        load_dotenv(dotenv_path=dotenv_path, override=False, encoding="utf-8-sig")
     folder_ids_raw = os.environ.get("FOLDER_IDS", "")
     folder_ids = _parse_folder_ids(folder_ids_raw)
     if folder_ids_raw and not folder_ids:
@@ -139,10 +160,19 @@ def load_config(*, validate_providers: bool = True) -> Config:
     bitrate = os.environ.get("BITRATE", "96k").strip() or "96k"
     telegram_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    data_dir = Path(os.environ.get("DATA_DIR", "data").strip() or "data")
+    data_dir = _resolve_relative_to_dotenv(
+        os.environ.get("DATA_DIR", "data").strip() or "data",
+        dotenv_path,
+    )
     proxy_url = os.environ.get("PROXY_URL", "").strip()
 
-    stt_provider = os.environ.get("STT_PROVIDER", "").strip().lower()
+    stt_provider_raw = os.environ.get("STT_PROVIDER")
+    if stt_provider_raw is None:
+        stt_provider = "deepgram"
+    else:
+        stt_provider = stt_provider_raw.strip().lower()
+    if stt_provider == "disabled":
+        stt_provider = ""
     if stt_provider not in SUPPORTED_STT_PROVIDERS:
         raise ValueError(
             f"STT_PROVIDER must be one of {SUPPORTED_STT_PROVIDERS!r}, got: {stt_provider!r}"
@@ -162,9 +192,14 @@ def load_config(*, validate_providers: bool = True) -> Config:
     # blocked by unrelated Deepgram config. The parsed values are only consumed
     # when validation runs (transcription always uses validate_providers=True).
     if validate_providers and stt_provider == "deepgram":
+        deepgram_api_key_file = os.environ.get("DEEPGRAM_API_KEY_FILE", "").strip()
         deepgram_api_key = _load_deepgram_api_key(
             os.environ.get("DEEPGRAM_API_KEY", ""),
-            os.environ.get("DEEPGRAM_API_KEY_FILE", ""),
+            (
+                str(_resolve_relative_to_dotenv(deepgram_api_key_file, dotenv_path))
+                if deepgram_api_key_file
+                else ""
+            ),
         )
         deepgram_model = os.environ.get("DEEPGRAM_MODEL", "nova-3").strip() or "nova-3"
         deepgram_diarize_model = (
@@ -183,10 +218,11 @@ def load_config(*, validate_providers: bool = True) -> Config:
             os.environ.get("DEEPGRAM_KEYTERMS_ENABLED", ""),
             default=True,
         )
-        deepgram_keyterms_file = Path(
+        deepgram_keyterms_file = _resolve_relative_to_dotenv(
             os.environ.get("DEEPGRAM_KEYTERMS_FILE", str(DEEPGRAM_DEFAULT_KEYTERMS_FILE))
             .strip()
-            or str(DEEPGRAM_DEFAULT_KEYTERMS_FILE)
+            or str(DEEPGRAM_DEFAULT_KEYTERMS_FILE),
+            dotenv_path,
         )
     google_cloud_project = os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
     google_stt_gcs_bucket = os.environ.get("GOOGLE_STT_GCS_BUCKET", "").strip()
@@ -234,7 +270,10 @@ def load_config(*, validate_providers: bool = True) -> Config:
             raise ValueError("OPENAI_API_KEY is required when OPENAI_POSTPROCESS is enabled")
         if stt_provider == "deepgram":
             if not deepgram_api_key:
-                raise ValueError("DEEPGRAM_API_KEY is required when STT_PROVIDER=deepgram")
+                raise ValueError(
+                    "DEEPGRAM_API_KEY is required when STT_PROVIDER=deepgram. "
+                    "Add DEEPGRAM_API_KEY or run `gdstt setup`."
+                )
             if deepgram_diarize_model not in DEEPGRAM_DIARIZE_MODELS:
                 raise ValueError(
                     f"DEEPGRAM_DIARIZE_MODEL must be one of {DEEPGRAM_DIARIZE_MODELS!r}, "

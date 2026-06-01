@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 import json
 import tempfile
@@ -38,6 +38,7 @@ class _ProcessTelemetry:
     processing_mode: str
     retry_count: int
     duration_s: float
+    cost_usd: dict[str, float | None] = field(default_factory=dict)
 
 
 def _http_status_code(exc: Exception) -> int | None:
@@ -257,6 +258,7 @@ def process_item(
     )
 
     duration_s = 0.0
+    cost_usd: dict[str, float | None] = {}
 
     try:
         with tempfile.TemporaryDirectory(prefix="gd-stt-") as tmp:
@@ -325,9 +327,10 @@ def process_item(
                     stt_audio_path = mp3_path
                 else:
                     stt_audio_path = mp3_path
-                text = transcribe_file(stt_audio_path, config)
+                text = transcribe_file(stt_audio_path, config, cost_usd=cost_usd)
                 speaker_names = _speaker_names_from_file_info(file_info)
                 if config.openai_postprocess:
+                    cost_usd.setdefault("openai", None)
                     text = openai_pipeline.refine_transcript(
                         text,
                         file_name,
@@ -367,6 +370,7 @@ def process_item(
         processing_mode=processing_mode,
         retry_count=retry_state.retry_count,
         duration_s=duration_s,
+        cost_usd=cost_usd,
     )
 
 
@@ -448,7 +452,7 @@ def process_target(
     dry_run: bool = False,
     max_size_bytes: int | None = None,
     confirm_large: bool = False,
-) -> None:
+) -> list[_ProcessTelemetry]:
     """Process a single Drive file or every pending file in a folder, on demand."""
     meta = _call_with_transient_retries(
         lambda: drive.get_file_metadata(service, target_id),
@@ -458,6 +462,7 @@ def process_target(
     treat_as_folder = is_folder if is_folder is not None else mime == drive.FOLDER_MIME
 
     if treat_as_folder:
+        telemetry: list[_ProcessTelemetry] = []
         items = _call_with_transient_retries(
             lambda: drive.list_folder_state(service, target_id),
             description=f"list folder state for {target_id}",
@@ -472,10 +477,18 @@ def process_target(
         if dry_run:
             for item in pending:
                 _log_dry_run(target_id, item, config, reprocess_txt=reprocess_txt)
-            return
+            return telemetry
         for item in pending:
-            process_item(service, item, target_id, config, reprocess_txt=reprocess_txt)
-        return
+            result = process_item(
+                service,
+                item,
+                target_id,
+                config,
+                reprocess_txt=reprocess_txt,
+            )
+            if result is not None:
+                telemetry.append(result)
+        return telemetry
 
     parents = meta.get("parents") or []
     if not parents:
@@ -498,11 +511,12 @@ def process_target(
         confirm_large=confirm_large,
     )
     if not allowed:
-        return
+        return []
     if dry_run:
         _log_dry_run(folder_id, match, config, reprocess_txt=reprocess_txt)
-        return
-    process_item(service, match, folder_id, config, reprocess_txt=reprocess_txt)
+        return []
+    result = process_item(service, match, folder_id, config, reprocess_txt=reprocess_txt)
+    return [result] if result is not None else []
 
 
 def refresh_artifact_names(service: Any, file_id: str) -> None:

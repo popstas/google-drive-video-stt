@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import json
 import logging
+import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -35,6 +38,25 @@ def _token_path(data_dir: Path) -> Path:
 def _write_token(path: Path, payload: str) -> None:
     path.write_text(payload)
     path.chmod(0o600)
+
+
+def _fetch_manual_token(flow, response_url: str) -> None:
+    parsed = urlparse(response_url)
+    allow_loopback_http = (
+        parsed.scheme == "http"
+        and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    )
+    previous = os.environ.get("OAUTHLIB_INSECURE_TRANSPORT")
+    if allow_loopback_http:
+        os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+    try:
+        flow.fetch_token(authorization_response=response_url)
+    finally:
+        if allow_loopback_http:
+            if previous is None:
+                os.environ.pop("OAUTHLIB_INSECURE_TRANSPORT", None)
+            else:
+                os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = previous
 
 
 def _load_client_config(path: Path) -> dict:
@@ -131,14 +153,17 @@ def load_credentials(data_dir: Path) -> Credentials:
 
 def build_drive_service(data_dir: Path | None = None):
     if data_dir is None:
-        data_dir = load_config().data_dir
+        data_dir = load_config(validate_providers=False).data_dir
     creds = load_credentials(data_dir)
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def run_interactive_flow(data_dir: Path, response_url: str | None = None) -> Credentials:
-    import os
-
+def run_interactive_flow(
+    data_dir: Path,
+    *,
+    manual: bool = False,
+    response_url: str | None = None,
+) -> Credentials:
     data_dir.mkdir(parents=True, exist_ok=True)
     creds_file = _credentials_path(data_dir)
     if not creds_file.exists():
@@ -149,40 +174,42 @@ def run_interactive_flow(data_dir: Path, response_url: str | None = None) -> Cre
 
     flow = InstalledAppFlow.from_client_config(_load_client_config(creds_file), SCOPES)
 
-    if response_url is None:
-        response_url = os.environ.get("OAUTH_RESPONSE_URL")
-
-    if os.environ.get("OAUTH_MANUAL") or response_url:
+    if manual or response_url:
         flow.redirect_uri = "http://localhost"
         flow.autogenerate_code_verifier = False
         flow.code_verifier = None
         if response_url:
-            flow.fetch_token(authorization_response=response_url)
+            _fetch_manual_token(flow, response_url)
             creds = flow.credentials
         else:
             auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
             print(f"Open this URL in a browser:\n\n{auth_url}\n")
             print(
-                "Then re-run with OAUTH_RESPONSE_URL=<paste-redirect-url> "
-                "or pass it as the first CLI argument."
+                "Then re-run with `gdstt auth <paste-redirect-url>` or "
+                "`gdstt auth --manual <paste-redirect-url>`."
             )
             raise SystemExit(0)
     else:
-        creds = flow.run_local_server(port=0, open_browser=False)
+        creds = flow.run_local_server(port=0, open_browser=True)
 
     _write_token(_token_path(data_dir), creds.to_json())
     return creds
 
 
 def main() -> None:
-    import sys
-
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    data_dir = load_config().data_dir
+    data_dir = load_config(validate_providers=False).data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
-    response_url = sys.argv[1] if len(sys.argv) > 1 else None
+    parser = argparse.ArgumentParser(prog="python -m src.auth")
+    parser.add_argument("--manual", action="store_true", help="Print the auth URL instead of opening a browser")
+    parser.add_argument("response_url", nargs="?", default=None, help="Redirect URL pasted from the manual flow")
+    args = parser.parse_args()
     try:
-        run_interactive_flow(data_dir, response_url=response_url)
+        run_interactive_flow(
+            data_dir,
+            manual=args.manual,
+            response_url=args.response_url,
+        )
     except AuthError as exc:
         logger.error(str(exc))
         raise SystemExit(1) from exc

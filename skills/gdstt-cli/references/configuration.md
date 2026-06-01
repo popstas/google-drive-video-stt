@@ -10,15 +10,30 @@ Never print secret values.
 - `PROXY_URL` - optional proxy for outbound provider traffic.
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` - optional runtime error notifications.
 
+`gdstt setup` writes `FOLDER_IDS`, keeps `.env` comments and unknown keys, and
+prepares the local auth files in `DATA_DIR`.
+
 ## Common runtime behavior
 
 - `POLL_INTERVAL` - loop interval in seconds; must stay positive.
 - `BITRATE` - MP3 bitrate when MP3 output is needed.
-- `STT_PROVIDER` - `""`, `openai`, `google`, `asr`, or `deepgram`.
+- `STT_PROVIDER` - defaults to `deepgram` when absent. Set `disabled` to skip
+  transcription explicitly, or use `openai`, `google`, or `asr`.
 - `STT_LANGUAGE` - provider language hint. Required for Google STT.
 - `STT_CHUNK_SECONDS` - chunk size for chunking providers; ignored by Deepgram
   and Google full-file paths.
 - `STT_POSTPROCESS` - local transcript cleanup and speaker mapping.
+
+## Agent pipeline profile
+
+- `config/pipelines/default.json` - versioned defaults for agent-driven
+  `gdstt plan` and `gdstt execute`.
+- `config/pipelines/local.json` - optional gitignored machine-specific override.
+- The default profile uses Deepgram `m4a_copy`, enables OpenAI refinement,
+  uploads Drive TXT, skips the Drive MP3 artifact, and resolves speaker names
+  from the file name or Drive metadata.
+- `gdstt setup` prompts for every API key required by the active profile before
+  execution. `gdstt doctor` and JSON plans report only `configured` or `missing`.
 
 ## Deepgram
 
@@ -45,7 +60,7 @@ Never print secret values.
   `STT_PROVIDER=google`.
 - `STT_LANGUAGE` - required BCP-47 language.
 
-Keep Google STT setup separate from Drive-only auth setup.
+Keep Google STT setup separate from the default `gdstt setup` wizard.
 
 ## ASR
 

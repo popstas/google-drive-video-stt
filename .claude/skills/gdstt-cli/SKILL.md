@@ -2,8 +2,8 @@
 name: gdstt-cli
 description: Use when operating google-drive-video-stt through gdstt, setting up Google Drive OAuth access, inspecting Drive folder state, processing Drive MP4 files, setting speaker names, or transcribing local audio.
 license: MIT
-version: 1.4.0
-last_updated: 2026-06-01
+version: 1.6.0
+last_updated: 2026-06-02
 ---
 
 # gdstt CLI
@@ -16,10 +16,12 @@ changes Google Cloud, Drive, local auth files, or spends STT credits.
 
 Use the smallest path that fits the task:
 
-1. First-time Drive-only setup: `gdstt auth` -> `gdstt doctor` -> `gdstt list`
-2. Safe single-file processing: `gdstt process <file-id> --dry-run` -> `gdstt process <file-id>`
-3. Folder-wide work: preview first with `gdstt run-once --dry-run` or folder `process --dry-run`
-4. Provider or failure detail: read the matching resource from the routing table below
+1. First-time local setup: `gdstt setup` -> `gdstt list` -> `gdstt process <file-id> --dry-run`
+2. OAuth refresh or headless recovery: `gdstt auth` or `gdstt auth --manual`
+3. Agent JSON processing: `gdstt plan --json '<intent>'` -> `gdstt execute --json '<intent>'`
+4. Safe low-level single-file processing: `gdstt process <file-id> --dry-run` -> `gdstt process <file-id>`
+5. Folder-wide low-level work: preview first with `gdstt run-once --dry-run` or folder `process --dry-run`
+6. Provider or failure detail: read the matching resource from the routing table below
 
 Current operational default examples assume `STT_PROVIDER=deepgram`, but keep
 the same CLI flow if the provider changes later.
@@ -43,13 +45,15 @@ Cyrillic names from ad-hoc Python or PowerShell scripts.
 
 ## Command Boundaries
 
-Drive-only/read-only commands use `load_config(validate_providers=False)`:
+Bootstrap and Drive-only commands use `load_config(validate_providers=False)`:
 
+- `setup`
 - `auth`
 - `doctor`
 - `list` / `status`
 - `speakers set`
 - `refresh-names`
+- `plan`
 
 Processing commands validate provider config and can spend STT credits:
 
@@ -57,6 +61,7 @@ Processing commands validate provider config and can spend STT credits:
 - `run-once`
 - `process`
 - `transcribe`
+- `execute`
 
 Start with Drive-only commands when checking auth, folder ids, or artifact
 state. Read `references/commands.md` when you need detailed syntax, aliases,
@@ -64,10 +69,16 @@ examples, or flag interactions.
 
 ## Commands
 
-### `auth [response_url]`
+### `setup`
 
-Create or refresh local OAuth credentials. Confirm before opening browser flows
-or writing local auth files.
+Create or update `.env`, default the provider to Deepgram, discover gcloud and
+ADC metadata when available, run OAuth, and verify Drive access.
+
+### `auth [--manual] [response_url]`
+
+Create or refresh local OAuth credentials. Normal mode opens a localhost browser
+flow. `--manual` prints the authorization URL; passing `response_url` completes
+that manual exchange.
 
 ### `doctor [--drive]`
 
@@ -77,6 +88,17 @@ folder listing are intended.
 ### `list` / `status`
 
 Read sibling MP3/TXT state without processing files.
+
+### `plan --json '<intent>'`
+
+Expand a compact agent intent into a deterministic processing plan without
+mutating Drive. On PowerShell, prefer `--json-file <path>` to avoid native
+process quoting surprises.
+
+### `execute --json '<intent>' [--confirm]`
+
+Execute the same intent after policy checks. Add `--confirm` only when the plan
+reports a confirmation gate. `--json-file <path>` is also supported.
 
 ### `run`
 
@@ -109,8 +131,15 @@ Transcribe a local audio file without touching Drive.
 
 - Ask before commands that mutate Google Cloud, Drive, local auth files, or
   spend STT/OpenAI credits.
+- `setup` is the default first-run path, but it still mutates `.env`,
+  `data/credentials.json`, `data/token.json`, and gcloud configuration after
+  explicit confirmation.
 - Prefer one file before one folder; prefer one dry run before one real folder
   run.
+- Prefer `gdstt plan --json ...` before agent-driven execution. `gdstt execute`
+  enforces the same policy gates even when planning is skipped.
+- Secret readiness is reported only as `configured` or `missing`. Never place
+  API keys in JSON intents or command output.
 - `--max-size` is optional and disabled by default. Do not invent a global
   threshold.
 - Add `--confirm-large` only after explicit human approval.
@@ -127,6 +156,11 @@ Transcribe a local audio file without touching Drive.
   Deepgram and Google full-file paths.
 - Keep Drive setup separate from provider setup.
 - Change one provider-specific tuning value at a time and validate on one file.
+- Treat `config/pipelines/default.json` as the versioned agent pipeline profile.
+- Put machine-specific profile overrides in gitignored
+  `config/pipelines/local.json`.
+- Use compact JSON intents for agent decisions, then expand them through the
+  deterministic planner before execution.
 
 Read `references/provider-notes.md` when selecting, switching, or tuning
 Deepgram, Google STT, OpenAI STT, or ASR. Repo maintainers should keep its
@@ -144,7 +178,7 @@ Open only the resource needed for the task:
 | Provider selection, switching, tuning, or Deepgram artifact behavior | `references/provider-notes.md` |
 | Empty transcript, retries, size mismatch, invalid `FOLDER_IDS`, summaries, or recovery | `references/troubleshooting.md` |
 | Adding or replacing an STT provider as a maintainer | `references/provider-extension.md` |
-| First-time Drive-only OAuth setup | `examples/drive-only-setup.md` |
+| First-time local setup wizard and gcloud/ADC fallback | `examples/drive-only-setup.md` |
 | Folder-wide dry run or optional size guard | `examples/folder-dry-run-size-guard.md` |
 | Google STT timeout-retained GCS blob | `examples/google-timeout-recovery.md` |
 | Drive MP4 to final TXT with OpenAI post-processing | `examples/openai-full-pipeline.md` |

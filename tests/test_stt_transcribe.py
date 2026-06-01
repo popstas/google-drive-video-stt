@@ -181,8 +181,13 @@ def test_transcribe_file_logs_deepgram_cost(mocker, tmp_path, caplog):
         return_value=0.012345,
     )
 
+    cost_usd = {}
     with caplog.at_level("INFO"):
-        result = transcribe_mod.transcribe_file(mp3, _cfg(provider="deepgram"))
+        result = transcribe_mod.transcribe_file(
+            mp3,
+            _cfg(provider="deepgram"),
+            cost_usd=cost_usd,
+        )
 
     assert result == "[00:00:00] Speaker 1: text"
     fetch_mock.assert_called_once_with(
@@ -192,6 +197,7 @@ def test_transcribe_file_logs_deepgram_cost(mocker, tmp_path, caplog):
     )
     assert "Deepgram cost for a.mp3: $0.012345" in caplog.text
     assert "duration=12.50s" in caplog.text
+    assert cost_usd == {"deepgram": 0.012345}
 
 
 def test_transcribe_file_logs_deepgram_cost_unavailable(mocker, tmp_path, caplog):

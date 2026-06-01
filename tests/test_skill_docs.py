@@ -242,10 +242,11 @@ def test_skill_has_start_here_and_scenario_env_sections():
     config_text = _portable_reference_path("configuration.md").read_text(encoding="utf-8")
 
     assert "## Start Here" in text
-    assert "First-time Drive-only setup" in text
-    assert "Safe single-file processing" in text
+    assert "First-time local setup" in text
+    assert "Safe low-level single-file processing" in text
     assert "## Drive-only setup" in config_text
     assert "## Common runtime behavior" in config_text
+    assert "## Agent pipeline profile" in config_text
     assert "## Deepgram" in config_text
     assert "## OpenAI" in config_text
     assert "## Google STT" in config_text
@@ -257,9 +258,11 @@ def test_skill_start_here_routes_common_operator_intents():
     start_here = _markdown_section(text, "Start Here")
 
     assert "Use the smallest path that fits the task" in start_here
+    assert "gdstt setup" in start_here
     assert "gdstt auth" in start_here
-    assert "gdstt doctor" in start_here
     assert "gdstt list" in start_here
+    assert "gdstt plan --json" in start_here
+    assert "gdstt execute --json" in start_here
     assert "gdstt process <file-id> --dry-run" in start_here
     assert "gdstt process <file-id>" in start_here
     assert "routing table below" in start_here
@@ -272,9 +275,11 @@ def test_skill_start_here_stays_compact_and_ordered():
     numbered_routes = re.findall(r"^\d+\.\s+(.*)$", start_here, flags=re.MULTILINE)
 
     assert numbered_routes == [
-        "First-time Drive-only setup: `gdstt auth` -> `gdstt doctor` -> `gdstt list`",
-        "Safe single-file processing: `gdstt process <file-id> --dry-run` -> `gdstt process <file-id>`",
-        "Folder-wide work: preview first with `gdstt run-once --dry-run` or folder `process --dry-run`",
+        "First-time local setup: `gdstt setup` -> `gdstt list` -> `gdstt process <file-id> --dry-run`",
+        "OAuth refresh or headless recovery: `gdstt auth` or `gdstt auth --manual`",
+        "Agent JSON processing: `gdstt plan --json '<intent>'` -> `gdstt execute --json '<intent>'`",
+        "Safe low-level single-file processing: `gdstt process <file-id> --dry-run` -> `gdstt process <file-id>`",
+        "Folder-wide low-level work: preview first with `gdstt run-once --dry-run` or folder `process --dry-run`",
         "Provider or failure detail: read the matching resource from the routing table below",
     ]
 
@@ -308,7 +313,7 @@ def test_skill_keeps_env_vars_grouped_by_operator_scenario():
 
     assert "GOOGLE_CLOUD_PROJECT" in google
     assert "GOOGLE_STT_GCS_BUCKET" in google
-    assert "separate from Drive-only auth setup" in google
+    assert "separate from the default `gdstt setup` wizard" in google
 
     assert "ASR_URL" in asr
 
@@ -333,24 +338,36 @@ def test_skill_documents_runtime_and_deepgram_env_vars():
         assert var in text, f"skill should document {var}"
 
 
+def test_skill_documents_agent_json_pipeline():
+    skill_text = _skill_path().read_text(encoding="utf-8")
+    config_text = _portable_reference_path("configuration.md").read_text(encoding="utf-8")
+
+    assert "gdstt plan --json" in skill_text
+    assert "gdstt execute --json" in skill_text
+    assert "config/pipelines/default.json" in config_text
+    assert "config/pipelines/local.json" in config_text
+    assert "`configured` or `missing`" in config_text
+
+
 def test_skill_documents_command_boundaries_and_provider_switching():
     text = _skill_path().read_text(encoding="utf-8")
 
-    assert "Drive-only/read-only commands use `load_config(validate_providers=False)`" in text
+    assert "Bootstrap and Drive-only commands use `load_config(validate_providers=False)`" in text
     assert "Processing commands validate provider config and can spend STT credits" in text
     assert "Current operational default examples assume `STT_PROVIDER=deepgram`" in text
     assert "the same CLI flow if the provider changes later." in text
     assert "Deepgram and Google full-file paths" in _collapsed_text(_skill_path())
 
 
-def test_skill_documents_drive_setup_as_drive_only_wizard():
+def test_skill_documents_default_setup_wizard():
     text = _collapsed_text(_portable_example_path("drive-only-setup.md"))
 
-    assert "Human-Facing Drive Setup Wizard" in text
+    assert "Human-Facing Setup Wizard" in text
     assert "existing project id, or a new project name" in text
-    assert "Google Speech-to-Text is a separate setup step" in text
-    assert "Drive access is ready. Google STT is still not configured." in text
-    assert "Do not bundle Deepgram/OpenAI/Google STT setup into this wizard" in text
+    assert "Deepgram API key" in text
+    assert "Google Speech-to-Text remains a separate opt-in step" in text
+    assert "Drive and default Deepgram setup are ready. Google STT is still not configured." in text
+    assert "Do not enable `speech.googleapis.com` or `storage.googleapis.com` in the default wizard" in text
     assert "changes the active project in the user's gcloud configuration" in text
     assert "OAuth client id/secret" in text
     assert "refresh token is not copied" in text
@@ -418,7 +435,7 @@ def test_agents_doc_exists_with_portable_contract():
     assert "python scripts/check-agent-skill.py" in text
     assert "registry_version" in text
     assert "last_updated" in text
-    assert "Drive-only commands use `load_config(validate_providers=False)`" in text
+    assert "Bootstrap and Drive-only commands use `load_config(validate_providers=False)`" in text
     assert "Processing commands validate provider configuration and can spend credits" in text
     assert "Deepgram is the current operational default" in text
     assert "Keep one primary operator skill" in text
