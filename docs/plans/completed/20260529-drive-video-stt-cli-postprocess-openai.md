@@ -2,7 +2,7 @@
 
 ## Overview
 
-This plan adopts the queued work in `docs/TODO.md` for the Google Drive video STT service.
+This plan adopts the completed queue for the Google Drive video STT service.
 The service currently runs headless, polling Drive folders, extracting MP3 from new MP4s, and
 optionally transcribing to a sibling `.txt`. The queued work adds an operator-facing CLI over
 the existing operations, a project skill that documents it, a transcript post-processing stage
@@ -18,7 +18,7 @@ dropped characters in output filenames, and a new OpenAI-based transcription/key
 - Idempotency is sibling-file based (presence of `<basename>.mp3` / `.txt` by basename).
 - Tests mock all external services (Drive, OpenAI, Google STT, ffmpeg); no network in tests.
 - `from __future__ import annotations` + `X | None` hints throughout; ruff line-length 100, py311.
-- Adopted from `docs/TODO.md` (5 queued items). CLI scope confirmed as "wrap all existing
+- Adopted from the project queue (5 items). CLI scope confirmed as "wrap all existing
   operations" (auth, run loop, run-once, on-demand process, transcribe, list/status).
 
 ## Development Approach

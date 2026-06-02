@@ -73,7 +73,7 @@ retained for manual cleanup.
 If Deepgram produced TXT but no Drive MP3, check `DEEPGRAM_AUDIO_SOURCE` first.
 
 - `m4a_copy` can be correct behavior, not a failure.
-- Use `docs/skills/provider-notes.md` -> `Deepgram` as the source of truth for
+- Use `references/provider-notes.md` -> `Deepgram` as the source of truth for
   `DEEPGRAM_AUDIO_SOURCE` and `DRIVE_MP3_ARTIFACT` behavior.
 - Change one Deepgram setting at a time and re-run a single file before any
   folder-wide retry.

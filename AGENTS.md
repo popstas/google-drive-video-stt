@@ -7,11 +7,8 @@ Markdown and shared repo docs over editor-specific overlays.
 
 - `README.md` - human quickstart and deployment overview.
 - `AGENTS.md` - canonical shared repo contract, commands, architecture, and conventions.
-- `docs/skills/registry.json` - shared, versioned skill metadata map for cross-editor reuse.
 - `skills/gdstt-cli/` - canonical installable operator skill package (`SKILL.md` + bundled resources).
-- `.agents/skills/gdstt-cli/` - generated workspace mirror for shared Agent Skills loaders.
 - `CLAUDE.md` - thin compatibility shim that points back to `AGENTS.md`.
-- `.claude/skills/gdstt-cli/` - generated mirror for Claude-compatible workspace loaders.
 
 ## Project snapshot
 
@@ -31,8 +28,9 @@ uv sync --extra dev          # install deps incl. pytest/ruff (use .venv)
 uv run pytest                # run all tests
 uv run pytest tests/test_stt_google.py::test_name   # single test
 uv run ruff check            # lint (line-length 100, target py311)
-uv run python scripts/sync-agent-skills.py --check  # validate generated skill mirrors
-uv run python scripts/sync-agent-skills.py --write  # refresh generated skill mirrors
+uv run python scripts/check-agent-skill.py  # validate the canonical installable skill
+gh skill install . gdstt-cli --from-local --agent codex --scope user --force
+gh skill install . gdstt-cli --from-local --agent claude-code --scope user --force
 gdstt setup                  # first-time local setup wizard (env, auth, Drive check)
 gdstt auth [--manual]        # OAuth-only refresh or recovery flow
 uv run python -m src.auth    # module entry for the same OAuth flow
@@ -147,9 +145,9 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   through a scenario file.
 - Split out only reference-heavy, low-frequency material: provider tuning matrices,
   troubleshooting, recovery, extension workflow, or long error-code tables.
-- Current companion reference docs live in `docs/skills/provider-notes.md` and
-  `docs/skills/troubleshooting.md`.
-- Provider extension workflow lives in `docs/skills/provider-extension.md`.
+- Companion references live under `skills/gdstt-cli/references/`.
+- Provider extension workflow lives in
+  `skills/gdstt-cli/references/provider-extension.md`.
 - Prefer companion reference docs over separate active subskills. The main skill may
   point to them, but the base workflow must stay usable from one skill.
 - Use separate skills only if they have a genuinely different trigger, audience,
@@ -181,19 +179,18 @@ Today that means:
 ## Portability policy
 
 - Shared rules belong in `AGENTS.md`.
-- Shared skill metadata belongs in `docs/skills/registry.json`.
 - Canonical portable operator guidance belongs in `skills/gdstt-cli/SKILL.md`.
 - Portable interaction assets belong next to the skill under
   `skills/gdstt-cli/examples/` and `references/`, but they should stay
   limited to supporting setup, folder-wide safety, and recovery.
-- `.agents/skills/gdstt-cli/` and `.claude/skills/gdstt-cli/` are generated
-  workspace mirrors. Refresh them with `python scripts/sync-agent-skills.py --write`.
+- Install the canonical package into each host with `gh skill install`; do not
+  commit host-specific `.agents/skills/` or `.claude/skills/` copies.
 - Prefer universal docs over editor-specific overlays.
 - Keep bundled references under each installable skill so the bundle remains usable
   outside this repository.
-- Validate the package and its mirrors with `python scripts/check-agent-skill.py`.
-- When cross-editor metadata or promised companion sections change, update
-  `docs/skills/registry.json` and refresh its `registry_version`, skill `version`,
-  and `last_updated` fields.
+- Validate the package and temporary local install with
+  `python scripts/check-agent-skill.py`.
+- When operator behavior changes, update the bundled resources and refresh the
+  skill `version` and `last_updated` fields.
 - If a tool-specific file is required, keep it as a thin pointer back to `AGENTS.md`
   or the main skill rather than redefining runtime behavior.

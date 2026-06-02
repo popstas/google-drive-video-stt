@@ -412,8 +412,9 @@ and one cycle summary. The cycle summary includes pending, processed, failed,
 a GCS blob for manual inspection or cleanup.
 
 For recovery steps and provider-specific details, see
-[`docs/skills/troubleshooting.md`](docs/skills/troubleshooting.md) and
-[`docs/skills/provider-notes.md`](docs/skills/provider-notes.md).
+[`skills/gdstt-cli/references/troubleshooting.md`](skills/gdstt-cli/references/troubleshooting.md)
+and
+[`skills/gdstt-cli/references/provider-notes.md`](skills/gdstt-cli/references/provider-notes.md).
 
 ### Agent-facing documentation
 
@@ -427,6 +428,7 @@ Prefer the `gh skill` workflow for installation:
 ```bash
 gh skill preview wyrtensi/google-drive-video-stt gdstt-cli
 gh skill install wyrtensi/google-drive-video-stt gdstt-cli --agent codex --scope user
+gh skill install wyrtensi/google-drive-video-stt gdstt-cli --agent claude-code --scope user
 gh skill update --all
 ```
 
@@ -435,6 +437,7 @@ For local checkout testing before publishing:
 ```bash
 gh skill publish --dry-run
 gh skill install . gdstt-cli --from-local --agent codex --scope user
+gh skill install . gdstt-cli --from-local --agent claude-code --scope user
 ```
 
 Pin a known version when reproducibility matters:
@@ -446,9 +449,8 @@ gh skill install wyrtensi/google-drive-video-stt gdstt-cli@YOUR_TAG_OR_COMMIT --
 `gh skill install --help` lists supported hosts and their install locations.
 Current host choices include Codex, Claude Code, Cursor, Gemini CLI, GitHub
 Copilot, Windsurf, and many more. VS Code agent mode can discover Copilot Agent
-Skills from supported workspace layouts. Workspace loaders can also discover the generated
-[`.agents/skills/gdstt-cli/`](.agents/skills/gdstt-cli/) and
-[`.claude/skills/gdstt-cli/`](.claude/skills/gdstt-cli/) mirrors when supported.
+Skills from supported workspace layouts. Install the canonical package for each
+host that should use it; `gh skill` chooses the host-specific destination.
 
 For a host without `gh skill` integration, manually copy the canonical
 `skills/gdstt-cli` directory into that host's documented skills directory. Check
@@ -464,12 +466,9 @@ Official references:
 - [Claude Code skills](https://code.claude.com/docs/en/slash-commands)
 - [Gemini CLI Agent Skills](https://geminicli.com/docs/cli/skills/)
 
-After changing the canonical package or companion docs, refresh and validate the
-generated mirrors with:
+After changing the canonical package or its bundled resources, validate it with:
 
 ```bash
-uv run python scripts/sync-agent-skills.py --write
-uv run python scripts/sync-agent-skills.py --check
 uv run python scripts/check-agent-skill.py
 ```
 

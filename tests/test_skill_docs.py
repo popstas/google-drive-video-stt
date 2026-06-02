@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import json
 import re
 from pathlib import Path
 
@@ -12,12 +11,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILL_ID = "gdstt-cli"
 AGENTS_PATH = REPO_ROOT / "AGENTS.md"
 CLAUDE_PATH = REPO_ROOT / "CLAUDE.md"
-REGISTRY_PATH = REPO_ROOT / "docs" / "skills" / "registry.json"
 CANONICAL_SKILL_ROOT = REPO_ROOT / "skills" / SKILL_ID
-AGENTS_SKILL_ROOT = REPO_ROOT / ".agents" / "skills" / SKILL_ID
-CLAUDE_SKILL_PATH = REPO_ROOT / ".claude" / "skills" / SKILL_ID / "SKILL.md"
 AGENT_SKILL_CHECK_SCRIPT = REPO_ROOT / "scripts" / "check-agent-skill.py"
-AGENT_SKILL_SYNC_SCRIPT = REPO_ROOT / "scripts" / "sync-agent-skills.py"
 
 
 def _registered_commands() -> set[str]:
@@ -66,24 +61,8 @@ def _skill_frontmatter(text: str) -> dict[str, str]:
     return data
 
 
-def _skill_registry() -> dict:
-    return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
-
-
-def _skill_entry() -> dict:
-    return _skill_registry()["skills"][SKILL_ID]
-
-
-def _resolve_repo_path(relative_path: str) -> Path:
-    return REPO_ROOT / Path(relative_path)
-
-
 def _skill_path() -> Path:
-    return _resolve_repo_path(_skill_entry()["path"])
-
-
-def _generated_mirror_skill_paths() -> list[Path]:
-    return [_resolve_repo_path(path) for path in _skill_entry().get("generated_mirror_paths", [])]
+    return CANONICAL_SKILL_ROOT / "SKILL.md"
 
 
 def _portable_reference_path(relative_path: str) -> Path:
@@ -119,35 +98,17 @@ def _collapsed_text(path: Path) -> str:
     return " ".join(_normalized_text(path).split())
 
 
-def test_skill_file_exists_with_frontmatter_and_registry_parity():
-    assert REGISTRY_PATH.exists(), f"missing skill registry: {REGISTRY_PATH}"
-
-    entry = _skill_entry()
+def test_skill_file_exists_with_valid_frontmatter():
     skill_path = _skill_path()
-
     assert skill_path.exists(), f"missing skill file: {skill_path}"
 
     text = skill_path.read_text(encoding="utf-8")
     frontmatter = _skill_frontmatter(text)
-    registry = _skill_registry()
-
-    assert registry["format_version"] == 1
-    assert re.fullmatch(r"\d+\.\d+\.\d+", registry["registry_version"])
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", registry["last_updated"])
 
     assert frontmatter["name"] == SKILL_ID
-    assert frontmatter["description"] == entry["description"]
-    assert frontmatter["version"] == entry["version"]
-    assert frontmatter["last_updated"] == entry["last_updated"]
-    assert entry["name"] == SKILL_ID
-    assert entry["path"] == "skills/gdstt-cli/SKILL.md"
-    assert entry["shared_contract"] == "AGENTS.md"
-    assert entry["generated_mirror_paths"] == [
-        ".agents/skills/gdstt-cli/SKILL.md",
-        ".claude/skills/gdstt-cli/SKILL.md",
-    ]
-    assert re.fullmatch(r"\d+\.\d+\.\d+", entry["version"])
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", entry["last_updated"])
+    assert frontmatter["description"]
+    assert re.fullmatch(r"\d+\.\d+\.\d+", frontmatter["version"])
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", frontmatter["last_updated"])
 
 
 def test_canonical_skill_package_exists_and_primary_skill_is_compact():
@@ -155,6 +116,19 @@ def test_canonical_skill_package_exists_and_primary_skill_is_compact():
 
     assert skill_path.exists(), f"missing canonical skill: {skill_path}"
     assert len(skill_path.read_text(encoding="utf-8").splitlines()) <= 400
+
+
+def test_repository_tracks_one_installable_skill_bundle():
+    forbidden_paths = (
+        REPO_ROOT / ".agents" / "skills",
+        REPO_ROOT / ".claude" / "skills",
+        REPO_ROOT / "docs" / "skills",
+        REPO_ROOT / "scripts" / "sync-agent-skills.py",
+    )
+
+    assert (CANONICAL_SKILL_ROOT / "SKILL.md").exists()
+    for path in forbidden_paths:
+        assert not path.exists(), f"obsolete duplicate skill surface remains: {path}"
 
 
 def test_skill_package_contains_one_discoverable_skill_and_routes_every_resource():
@@ -171,34 +145,6 @@ def test_skill_package_contains_one_discoverable_skill_and_routes_every_resource
     for path in resources:
         relative_path = path.relative_to(CANONICAL_SKILL_ROOT).as_posix()
         assert relative_path in skill_text, f"primary skill must route to {relative_path}"
-
-
-def test_agent_skill_sync_script_exists():
-    assert AGENT_SKILL_SYNC_SCRIPT.exists(), (
-        f"missing agent skill sync script: {AGENT_SKILL_SYNC_SCRIPT}"
-    )
-
-
-def test_generated_skill_mirrors_match_canonical_bundle():
-    portable_root = _skill_path().parent
-    portable_files = {
-        path.relative_to(portable_root)
-        for path in portable_root.rglob("*")
-        if path.is_file()
-    }
-
-    for compatibility_path in _generated_mirror_skill_paths():
-        compatibility_root = compatibility_path.parent
-        compatibility_files = {
-            path.relative_to(compatibility_root)
-            for path in compatibility_root.rglob("*")
-            if path.is_file()
-        }
-        assert compatibility_files == portable_files
-        for relative_path in portable_files:
-            assert _normalized_text(compatibility_root / relative_path) == _normalized_text(portable_root / relative_path), (
-                f"compatibility skill mirror is out of sync: {relative_path}"
-            )
 
 
 def test_documented_commands_match_registered_subcommands():
@@ -430,11 +376,12 @@ def test_agents_doc_exists_with_portable_contract():
 
     assert text.startswith("# AGENTS.md")
     assert "Source of truth layering" in text
-    assert "docs/skills/registry.json" in text
-    assert ".agents/skills/gdstt-cli/" in text
     assert "python scripts/check-agent-skill.py" in text
-    assert "registry_version" in text
-    assert "last_updated" in text
+    assert "gh skill install" in text
+    assert "--agent codex" in text
+    assert "--agent claude-code" in text
+    assert ".agents/skills/gdstt-cli/" not in text
+    assert ".claude/skills/gdstt-cli/" not in text
     assert "Bootstrap and Drive-only commands use `load_config(validate_providers=False)`" in text
     assert "Processing commands validate provider configuration and can spend credits" in text
     assert "Deepgram is the current operational default" in text
@@ -469,25 +416,40 @@ def test_claude_doc_points_back_to_agents():
     assert "[AGENTS.md](AGENTS.md) is the source of truth." in text
 
 
-def test_companion_reference_docs_exist_and_match_promised_sections():
+def test_bundled_reference_docs_exist_with_required_sections():
     skill_text = _skill_path().read_text(encoding="utf-8")
-    agents_text = AGENTS_PATH.read_text(encoding="utf-8")
-    entry = _skill_entry()
+    references = {
+        "provider-notes.md": (
+            "Universal switching rules",
+            "Deepgram",
+            "Google STT",
+            "OpenAI STT",
+            "ASR",
+        ),
+        "troubleshooting.md": (
+            "Empty transcript failures",
+            "Transient Drive retries",
+            "Download size mismatch",
+            "Invalid `FOLDER_IDS`",
+            "Reading runtime summaries",
+            "Google STT timeout cleanup",
+            "Deepgram artifact surprises",
+            "First recovery commands",
+        ),
+        "provider-extension.md": (
+            "Invariants to preserve",
+            "Required code changes",
+            "Release checklist for a provider change",
+        ),
+    }
 
-    for companion in entry["companion_docs"]:
-        doc_path = _resolve_repo_path(companion["path"])
-        bundled_path = _portable_reference_path(companion["path"])
-        assert doc_path.exists(), f"missing companion doc: {doc_path}"
-        assert companion["path"] in skill_text
-        assert companion["path"] in agents_text
-        assert bundled_path.exists(), f"missing bundled reference copy: {bundled_path}"
-        assert _normalized_text(bundled_path) == _normalized_text(doc_path), (
-            f"bundled reference is out of sync: {bundled_path}"
-        )
+    for file_name, required_sections in references.items():
+        bundled_path = _portable_reference_path(file_name)
+        assert bundled_path.exists(), f"missing bundled reference: {bundled_path}"
         assert bundled_path.relative_to(_skill_path().parent).as_posix() in skill_text
 
-        headings = _markdown_headings(doc_path.read_text(encoding="utf-8"))
-        for section in companion["required_sections"]:
+        headings = _markdown_headings(bundled_path.read_text(encoding="utf-8"))
+        for section in required_sections:
             assert section in headings, (
-                f"{companion['path']} should include the promised section `{section}`"
+                f"{bundled_path} should include the promised section `{section}`"
             )

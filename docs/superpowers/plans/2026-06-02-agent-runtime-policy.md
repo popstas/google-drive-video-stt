@@ -1,5 +1,8 @@
 # Agent Runtime Policy Implementation Plan
 
+> Completed on 2026-06-02. Mirror-related steps below describe the historical
+> packaging workflow that was later replaced by the single-bundle contract.
+
 ## Objective
 
 Add a declarative JSON profile and deterministic intent planner so agents can
@@ -17,12 +20,12 @@ Files:
 
 Steps:
 
-- [ ] Write failing tests for default loading, recursive local merge, invalid
+- [x] Write failing tests for default loading, recursive local merge, invalid
   schema, required secret status, and profile application to a copied `Config`.
-- [ ] Add the default profile and local override ignore rule.
-- [ ] Implement strict profile parsing and recursive merge.
-- [ ] Implement secret preflight and `Config` application.
-- [ ] Run focused tests.
+- [x] Add the default profile and local override ignore rule.
+- [x] Implement strict profile parsing and recursive merge.
+- [x] Implement secret preflight and `Config` application.
+- [x] Run focused tests.
 
 ## Task 2: Intent Planner
 
@@ -33,11 +36,11 @@ Files:
 
 Steps:
 
-- [ ] Write failing tests for minimal intent parsing, unknown fields, default
+- [x] Write failing tests for minimal intent parsing, unknown fields, default
   steps, missing-key output, and confirmation policy.
-- [ ] Implement strict intent parsing.
-- [ ] Implement deterministic plan expansion and JSON serialization.
-- [ ] Run focused tests.
+- [x] Implement strict intent parsing.
+- [x] Implement deterministic plan expansion and JSON serialization.
+- [x] Run focused tests.
 
 ## Task 3: Executor and CLI JSON Surface
 
@@ -50,11 +53,11 @@ Files:
 
 Steps:
 
-- [ ] Write failing tests for execution preflight, confirmation blocking,
+- [x] Write failing tests for execution preflight, confirmation blocking,
   speaker metadata routing, process dispatch, and CLI JSON dispatch.
-- [ ] Implement executor reuse of `src.main.process_target()`.
-- [ ] Add `gdstt plan --json` and `gdstt execute --json [--confirm]`.
-- [ ] Run focused tests.
+- [x] Implement executor reuse of `src.main.process_target()`.
+- [x] Add `gdstt plan --json` and `gdstt execute --json [--confirm]`.
+- [x] Run focused tests.
 
 ## Task 4: Setup and Doctor Integration
 
@@ -67,11 +70,11 @@ Files:
 
 Steps:
 
-- [ ] Write failing tests for profile-aware OpenAI secret prompting and doctor
+- [x] Write failing tests for profile-aware OpenAI secret prompting and doctor
   boolean secret readiness.
-- [ ] Ask only for secrets required by the active profile, using hidden input.
-- [ ] Report secret readiness without values.
-- [ ] Run focused tests.
+- [x] Ask only for secrets required by the active profile, using hidden input.
+- [x] Report secret readiness without values.
+- [x] Run focused tests.
 
 ## Task 5: Agent Skill and Documentation
 
@@ -89,20 +92,20 @@ Files:
 
 Steps:
 
-- [ ] Write failing documentation parity assertions for JSON plan/execute and
+- [x] Write failing documentation parity assertions for JSON plan/execute and
   profile behavior.
-- [ ] Document the high-level agent flow and secret policy.
-- [ ] Refresh generated mirrors.
-- [ ] Run skill docs tests and package validator.
+- [x] Document the high-level agent flow and secret policy.
+- [x] Refresh generated mirrors.
+- [x] Run skill docs tests and package validator.
 
 ## Task 6: Verification
 
 Steps:
 
-- [ ] Run focused new tests.
-- [ ] Run `uv run pytest`.
-- [ ] Run `uv run ruff check`.
-- [ ] Run `uv run python scripts/sync-agent-skills.py --check`.
-- [ ] Run `uv run python scripts/check-agent-skill.py`.
-- [ ] Run `git diff --check`.
-- [ ] Review the final diff for secret leakage and unrelated churn.
+- [x] Run focused new tests.
+- [x] Run `uv run pytest`.
+- [x] Run `uv run ruff check`.
+- [x] Run `uv run python scripts/sync-agent-skills.py --check`.
+- [x] Run `uv run python scripts/check-agent-skill.py`.
+- [x] Run `git diff --check`.
+- [x] Review the final diff for secret leakage and unrelated churn.

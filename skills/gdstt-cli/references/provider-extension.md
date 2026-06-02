@@ -2,7 +2,7 @@
 
 Developer reference for adding or replacing an STT provider. Keep operator
 workflow guidance in the main skill and provider-tuning notes in
-`docs/skills/provider-notes.md`; use this file for implementation changes.
+`references/provider-notes.md`; use this file for implementation changes.
 
 ## Invariants to preserve
 
@@ -58,8 +58,8 @@ Update these docs when provider behavior changes:
 
 - `AGENTS.md` for shared invariants
 - `skills/gdstt-cli/SKILL.md` if the default operator flow changes
-- `docs/skills/provider-notes.md` for provider-specific env vars and tuning
-- `docs/skills/troubleshooting.md` for new failure or recovery paths
+- `skills/gdstt-cli/references/provider-notes.md` for provider-specific env vars and tuning
+- `skills/gdstt-cli/references/troubleshooting.md` for new failure or recovery paths
 
 ### 6. Test updates
 

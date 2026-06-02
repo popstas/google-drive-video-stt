@@ -1,36 +1,23 @@
 #!/usr/bin/env python3
-"""Validate the canonical gdstt Agent Skill package and generated mirrors."""
+"""Validate the canonical gdstt Agent Skill package and install workflow."""
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ID = "gdstt-cli"
-REGISTRY_PATH = REPO_ROOT / "docs" / "skills" / "registry.json"
-SYNC_SCRIPT = REPO_ROOT / "scripts" / "sync-agent-skills.py"
 CANONICAL_SKILL_ROOT = REPO_ROOT / "skills" / SKILL_ID
-GENERATED_MIRROR_ROOTS = (
-    REPO_ROOT / ".agents" / "skills" / SKILL_ID,
-    REPO_ROOT / ".claude" / "skills" / SKILL_ID,
-)
-CANONICAL_COMPANIONS = (
-    REPO_ROOT / "docs" / "skills" / "provider-notes.md",
-    REPO_ROOT / "docs" / "skills" / "troubleshooting.md",
-    REPO_ROOT / "docs" / "skills" / "provider-extension.md",
-)
 REQUIRED_REFERENCES = (
     "commands.md",
     "configuration.md",
+    "provider-extension.md",
     "provider-notes.md",
     "troubleshooting.md",
-    "provider-extension.md",
 )
 REQUIRED_EXAMPLES = (
     "drive-only-setup.md",
@@ -42,10 +29,6 @@ REQUIRED_EXAMPLES = (
 
 def normalized_text(path: Path) -> str:
     return path.read_text(encoding="utf-8").replace("\r\n", "\n").rstrip("\n")
-
-
-def load_registry() -> dict:
-    return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
 
 
 def skill_frontmatter(text: str) -> dict[str, str]:
@@ -71,37 +54,26 @@ def package_files(root: Path) -> set[Path]:
 
 
 def validate_required_files() -> None:
-    required = [CANONICAL_SKILL_ROOT / "SKILL.md", SYNC_SCRIPT]
+    required = [CANONICAL_SKILL_ROOT / "SKILL.md"]
     required.extend(CANONICAL_SKILL_ROOT / "references" / name for name in REQUIRED_REFERENCES)
     required.extend(CANONICAL_SKILL_ROOT / "examples" / name for name in REQUIRED_EXAMPLES)
     for path in required:
         assert path.is_file(), f"Missing Agent Skill file: {path}"
 
 
-def validate_registry_sync() -> None:
-    registry = load_registry()
-    entry = registry["skills"][SKILL_ID]
-    skill_path = CANONICAL_SKILL_ROOT / "SKILL.md"
-    frontmatter = skill_frontmatter(skill_path.read_text(encoding="utf-8"))
-
-    assert registry["format_version"] == 1
-    assert entry["path"] == "skills/gdstt-cli/SKILL.md"
-    assert entry["generated_mirror_paths"] == [
-        ".agents/skills/gdstt-cli/SKILL.md",
-        ".claude/skills/gdstt-cli/SKILL.md",
-    ]
-    assert frontmatter["name"] == entry["name"] == SKILL_ID
-    assert frontmatter["description"] == entry["description"]
-    assert frontmatter["version"] == entry["version"]
-    assert frontmatter["last_updated"] == entry["last_updated"]
-
-
 def validate_package_shape() -> None:
-    skill_text = (CANONICAL_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    skill_path = CANONICAL_SKILL_ROOT / "SKILL.md"
+    skill_text = skill_path.read_text(encoding="utf-8")
     skill_files = list(CANONICAL_SKILL_ROOT.rglob("SKILL.md"))
-    assert skill_files == [CANONICAL_SKILL_ROOT / "SKILL.md"], (
+    frontmatter = skill_frontmatter(skill_text)
+
+    assert skill_files == [skill_path], (
         "The installable package must contain exactly one discoverable SKILL.md"
     )
+    assert frontmatter["name"] == SKILL_ID
+    assert "description" in frontmatter
+    assert re.fullmatch(r"\d+\.\d+\.\d+", frontmatter["version"])
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", frontmatter["last_updated"])
     assert len(skill_text.splitlines()) <= 400, "Primary SKILL.md must stay at or below 400 lines"
 
     for relative_path in sorted(package_files(CANONICAL_SKILL_ROOT)):
@@ -109,34 +81,6 @@ def validate_package_shape() -> None:
             continue
         resource = relative_path.as_posix()
         assert resource in skill_text, f"Primary skill must route agents to {resource}"
-
-
-def validate_reference_sync() -> None:
-    for canonical_path in CANONICAL_COMPANIONS:
-        bundled_path = CANONICAL_SKILL_ROOT / "references" / canonical_path.name
-        assert normalized_text(bundled_path) == normalized_text(canonical_path), (
-            f"Out-of-sync bundled reference: {bundled_path}"
-        )
-
-
-def validate_generated_mirrors() -> None:
-    canonical_files = package_files(CANONICAL_SKILL_ROOT)
-    for root in GENERATED_MIRROR_ROOTS:
-        assert package_files(root) == canonical_files, f"Generated mirror file list is out of sync: {root}"
-        for relative_path in canonical_files:
-            assert normalized_text(root / relative_path) == normalized_text(CANONICAL_SKILL_ROOT / relative_path), (
-                f"Generated mirror is out of sync: {root / relative_path}"
-            )
-
-
-def validate_sync_script_check_mode() -> None:
-    result = subprocess.run(
-        [sys.executable, str(SYNC_SCRIPT), "--check"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def validate_example_playbooks() -> None:
@@ -205,14 +149,10 @@ def validate_gh_skill_workflow() -> None:
 
 def main() -> int:
     validate_required_files()
-    validate_registry_sync()
     validate_package_shape()
-    validate_reference_sync()
-    validate_generated_mirrors()
-    validate_sync_script_check_mode()
     validate_example_playbooks()
     validate_gh_skill_workflow()
-    print("gdstt Agent Skill package is valid; resources, mirrors, and install workflow are synchronized.")
+    print("gdstt Agent Skill package is valid; canonical resources and install workflow are synchronized.")
     return 0
 
 

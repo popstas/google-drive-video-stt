@@ -2,7 +2,7 @@
 name: gdstt-cli
 description: Use when operating google-drive-video-stt through gdstt, setting up Google Drive OAuth access, inspecting Drive folder state, processing Drive MP4 files, setting speaker names, or transcribing local audio.
 license: MIT
-version: 1.6.1
+version: 1.7.0
 last_updated: 2026-06-02
 ---
 
@@ -165,8 +165,7 @@ Transcribe a local audio file without touching Drive.
   deterministic planner before execution.
 
 Read `references/provider-notes.md` when selecting, switching, or tuning
-Deepgram, Google STT, OpenAI STT, or ASR. Repo maintainers should keep its
-canonical copy in `docs/skills/provider-notes.md`.
+Deepgram, Google STT, OpenAI STT, or ASR.
 
 ## Resource Routing
 
@@ -185,12 +184,6 @@ Open only the resource needed for the task:
 | Google STT timeout-retained GCS blob | `examples/google-timeout-recovery.md` |
 | Drive MP4 to final TXT with OpenAI post-processing | `examples/openai-full-pipeline.md` |
 
-Repo maintainers should keep companion docs synchronized with:
-
-- `docs/skills/provider-notes.md`
-- `docs/skills/troubleshooting.md`
-- `docs/skills/provider-extension.md`
-
 ## Core Notes
 
 - Empty transcripts fail intentionally; do not accept a blank TXT as success.
@@ -208,5 +201,4 @@ Repo maintainers should keep companion docs synchronized with:
 - `gcs_blob_orphans` is a subset of failed items, not an extra failure count.
 
 For deeper failure handling and recovery steps, read
-`references/troubleshooting.md`. Repo maintainers should keep its canonical copy
-in `docs/skills/troubleshooting.md`.
+`references/troubleshooting.md`.

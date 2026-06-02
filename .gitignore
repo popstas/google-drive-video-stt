@@ -221,3 +221,5 @@ __marimo__/
 data/
 .data/
 config/pipelines/local.json
+.agents/skills/
+.claude/skills/

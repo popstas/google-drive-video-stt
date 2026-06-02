@@ -9,4 +9,5 @@ remains universal instead of diverging into editor-specific copies.
 If [CLAUDE.md](CLAUDE.md) and [AGENTS.md](AGENTS.md) ever conflict,
 [AGENTS.md](AGENTS.md) is the source of truth.
 
-For operator workflows, use [.claude/skills/gdstt-cli/SKILL.md](.claude/skills/gdstt-cli/SKILL.md).
+For operator workflows, install and use the canonical
+[skills/gdstt-cli/SKILL.md](skills/gdstt-cli/SKILL.md) package.
