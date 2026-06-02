@@ -55,6 +55,12 @@ def _usage_report(telemetry: object) -> dict[str, dict[str, int]]:
     return report
 
 
+def _uploaded_report(telemetry: object, field: str) -> bool:
+    if not isinstance(telemetry, list):
+        return False
+    return any(getattr(item, field, False) is True for item in telemetry)
+
+
 def execute_process(
     payload: dict[str, Any] | ProcessIntent,
     config: Config,
@@ -64,7 +70,7 @@ def execute_process(
     env: Mapping[str, str] | None = None,
     service_builder: ServiceBuilder | None = None,
 ) -> dict[str, object]:
-    env = env or os.environ
+    env = os.environ if env is None else env
     intent = payload if isinstance(payload, ProcessIntent) else parse_intent(payload)
     plan = plan_process(intent, profile, env=env)
     if plan["status"] != "ready":
@@ -87,13 +93,17 @@ def execute_process(
     speakers = intent.overrides.get("speakers")
     reprocess_txt = intent.overrides.get("reprocess_txt") is True
     detected_target_types: dict[str, bool] = {}
+    target_metadata: dict[str, dict] = {}
     if intent.target_type == "auto":
         for target in intent.targets:
             metadata = drive.get_file_metadata(service, target)
+            target_metadata[target] = metadata
             detected_target_types[target] = metadata.get("mimeType") == drive.FOLDER_MIME
         detected_folders = [
             target for target, is_folder in detected_target_types.items() if is_folder
         ]
+        if detected_folders and speakers:
+            raise ValueError("overrides.speakers requires file targets")
         if detected_folders and not confirmed:
             return {
                 "status": "confirmation_required",
@@ -111,6 +121,9 @@ def execute_process(
     results: list[dict[str, object]] = []
     for target in intent.targets:
         if speakers:
+            metadata = target_metadata.get(target) or drive.get_file_metadata(service, target)
+            if metadata.get("mimeType") != drive.MP4_MIME:
+                raise ValueError("overrides.speakers requires Drive MP4 file targets")
             drive.set_file_app_properties(
                 service,
                 target,
@@ -126,8 +139,8 @@ def execute_process(
         results.append(
             {
                 "id": target,
-                "txt_uploaded": runtime_config.stt_provider != "",
-                "mp3_uploaded": runtime_config.drive_mp3_artifact,
+                "txt_uploaded": _uploaded_report(telemetry, "txt_uploaded"),
+                "mp3_uploaded": _uploaded_report(telemetry, "mp3_uploaded"),
                 "speakers": speakers or [],
                 "cost_usd": _cost_report(telemetry, runtime_config),
                 "usage": _usage_report(telemetry),

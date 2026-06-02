@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from src import drive
 from src import pipeline_executor
 from src.pipeline_profile import load_pipeline_profile
@@ -72,10 +74,16 @@ def test_execute_process_routes_speaker_metadata_and_existing_runtime(mocker):
     service = MagicMock()
     service_builder = MagicMock(return_value=service)
     speaker_mock = mocker.patch("src.pipeline_executor.drive.set_file_app_properties")
+    mocker.patch(
+        "src.pipeline_executor.drive.get_file_metadata",
+        return_value={"mimeType": drive.MP4_MIME},
+    )
     process_mock = mocker.patch(
         "src.pipeline_executor.main_module.process_target",
         return_value=[
             SimpleNamespace(
+                txt_uploaded=True,
+                mp3_uploaded=False,
                 cost_usd={"deepgram": 0.012345, "openai": None},
                 usage={
                     "openai": {
@@ -88,6 +96,8 @@ def test_execute_process_routes_speaker_metadata_and_existing_runtime(mocker):
                 },
             ),
             SimpleNamespace(
+                txt_uploaded=True,
+                mp3_uploaded=False,
                 cost_usd={"deepgram": 0.01, "openai": None},
                 usage={
                     "openai": {
@@ -143,3 +153,79 @@ def test_execute_process_routes_speaker_metadata_and_existing_runtime(mocker):
             }
         ],
     }
+
+
+def test_execute_process_reports_no_uploads_when_target_is_already_complete(mocker):
+    service = MagicMock()
+    service_builder = MagicMock(return_value=service)
+    mocker.patch("src.pipeline_executor.main_module.process_target", return_value=[])
+
+    result = pipeline_executor.execute_process(
+        {
+            "action": "process",
+            "targets": ["file-1"],
+            "target_type": "file",
+        },
+        make_config(),
+        load_pipeline_profile(),
+        env={"DEEPGRAM_API_KEY": "dg", "OPENAI_API_KEY": "sk"},
+        service_builder=service_builder,
+    )
+
+    assert result["files"][0]["txt_uploaded"] is False
+    assert result["files"][0]["mp3_uploaded"] is False
+
+
+def test_execute_process_rejects_speaker_override_when_auto_target_is_folder(mocker):
+    service = MagicMock()
+    service_builder = MagicMock(return_value=service)
+    mocker.patch(
+        "src.pipeline_executor.drive.get_file_metadata",
+        return_value={"mimeType": drive.FOLDER_MIME},
+    )
+    speaker_mock = mocker.patch("src.pipeline_executor.drive.set_file_app_properties")
+    process_mock = mocker.patch("src.pipeline_executor.main_module.process_target")
+
+    with pytest.raises(ValueError, match="overrides.speakers requires file targets"):
+        pipeline_executor.execute_process(
+            {
+                "action": "process",
+                "targets": ["folder-1"],
+                "overrides": {"speakers": ["Alice", "Bob"]},
+            },
+            make_config(),
+            load_pipeline_profile(),
+            env={"DEEPGRAM_API_KEY": "dg", "OPENAI_API_KEY": "sk"},
+            service_builder=service_builder,
+        )
+
+    speaker_mock.assert_not_called()
+    process_mock.assert_not_called()
+
+
+def test_execute_process_rejects_speaker_override_for_explicit_non_mp4(mocker):
+    service = MagicMock()
+    service_builder = MagicMock(return_value=service)
+    mocker.patch(
+        "src.pipeline_executor.drive.get_file_metadata",
+        return_value={"mimeType": "text/plain"},
+    )
+    speaker_mock = mocker.patch("src.pipeline_executor.drive.set_file_app_properties")
+    process_mock = mocker.patch("src.pipeline_executor.main_module.process_target")
+
+    with pytest.raises(ValueError, match="overrides.speakers requires Drive MP4"):
+        pipeline_executor.execute_process(
+            {
+                "action": "process",
+                "targets": ["not-an-mp4"],
+                "target_type": "file",
+                "overrides": {"speakers": ["Alice", "Bob"]},
+            },
+            make_config(),
+            load_pipeline_profile(),
+            env={"DEEPGRAM_API_KEY": "dg", "OPENAI_API_KEY": "sk"},
+            service_builder=service_builder,
+        )
+
+    speaker_mock.assert_not_called()
+    process_mock.assert_not_called()

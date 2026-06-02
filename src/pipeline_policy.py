@@ -6,8 +6,10 @@ from typing import Any
 from src.pipeline_profile import (
     PipelineProfile,
     missing_required_secrets,
+    missing_required_settings,
     resolve_profile,
     required_secret_status,
+    required_setting_status,
 )
 
 _INTENT_FIELDS = {"action", "targets", "target_type", "overrides"}
@@ -98,22 +100,34 @@ def plan_process(
     env=None,
 ) -> dict[str, object]:
     intent = payload if isinstance(payload, ProcessIntent) else parse_intent(payload)
+    if intent.target_type == "folder" and intent.overrides.get("speakers"):
+        raise ValueError("overrides.speakers requires file targets")
     resolved = resolve_profile(profile, overrides=intent.overrides)
     secrets = required_secret_status(resolved, env=env)
-    missing = missing_required_secrets(resolved, env=env)
+    settings = required_setting_status(resolved, env=env)
+    missing = [
+        *missing_required_secrets(resolved, env=env),
+        *missing_required_settings(resolved, env=env),
+    ]
     if missing:
-        return {
+        result = {
             "status": "configuration_required",
             "missing": missing,
-            "next_action": "Run `gdstt setup` or add the missing key to .env.",
+            "next_action": (
+                "Run `gdstt setup` for default API keys or add the missing "
+                "configuration to .env."
+            ),
             "secrets": secrets,
         }
+        if settings:
+            result["settings"] = settings
+        return result
     reasons: list[str] = []
     if intent.target_type == "folder":
         reasons.append("folder_wide")
     if intent.overrides.get("reprocess_txt") is True:
         reasons.append("reprocess_txt")
-    return {
+    result = {
         "status": "ready",
         "action": intent.action,
         "targets": list(intent.targets),
@@ -123,3 +137,6 @@ def plan_process(
         "confirmation_reasons": reasons,
         "secrets": secrets,
     }
+    if settings:
+        result["settings"] = settings
+    return result

@@ -32,8 +32,12 @@ prepares the local auth files in `DATA_DIR`.
 - The default profile uses Deepgram `m4a_copy`, enables OpenAI refinement,
   uploads Drive TXT, skips the Drive MP3 artifact, and resolves speaker names
   from the file name or Drive metadata.
+- Profile version 1 requires Drive TXT upload and the `filename_or_metadata`
+  speaker mode. Unsupported values fail before Drive mutation.
 - `gdstt setup` prompts for every API key required by the active profile before
   execution. `gdstt doctor` and JSON plans report only `configured` or `missing`.
+- JSON provider overrides preflight provider settings such as Google project,
+  bucket, and language or `ASR_URL` before Drive processing starts.
 
 ## Deepgram
 

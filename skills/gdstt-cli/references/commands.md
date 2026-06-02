@@ -65,6 +65,9 @@ Execute the same intent after policy checks. Folder-wide processing and
 `reprocess_txt` require `--confirm` unless the caller already supplied it after
 reviewing the plan. Completed JSON includes best-effort OpenAI refinement token
 counters under `usage.openai`; OpenAI dollar cost may remain `null`.
+`txt_uploaded` and `mp3_uploaded` describe uploads that happened during that
+execution. Inline JSON speaker overrides are accepted only for Drive MP4 file
+targets.
 
 ```bash
 gdstt execute --json '{"action":"process","targets":["<file-id>"]}'

@@ -223,10 +223,18 @@ The versioned profile lives in `config/pipelines/default.json`; optional
 machine-specific overrides belong in gitignored `config/pipelines/local.json`.
 The default profile uses Deepgram `m4a_copy`, OpenAI refinement, TXT upload, no
 Drive MP3 artifact, and speaker names from the file name or Drive metadata.
-Folder-wide processing and transcript regeneration require `--confirm`.
-Execution results include best-effort OpenAI refinement token counters under
-`usage.openai`. OpenAI dollar cost remains `null` because per-response billing
-is not exposed through the runtime API key.
+Profile version 1 intentionally requires TXT upload and the
+`filename_or_metadata` speaker mode; unsupported provider, audio-source, and
+profile values fail before Drive mutation. Folder-wide processing and
+transcript regeneration require `--confirm`. Inline speaker overrides apply
+only to Drive MP4 file targets.
+
+Execution validates provider-specific required settings before building the
+Drive service. Result fields `txt_uploaded` and `mp3_uploaded` report uploads
+that actually happened during that execution. Results also include best-effort
+OpenAI refinement token counters under `usage.openai`. OpenAI dollar cost
+remains `null` because per-response billing is not exposed through the runtime
+API key.
 
 ### Transcript post-processing
 

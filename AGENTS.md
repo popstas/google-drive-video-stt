@@ -66,7 +66,10 @@ without duplicating business logic.
 expands `config/pipelines/default.json` plus optional gitignored
 `config/pipelines/local.json` into a deterministic plan. `gdstt execute --json`
 enforces the same confirmation and secret-readiness gates, then delegates to
-`process_target` instead of duplicating processing logic.
+`process_target` instead of duplicating processing logic. Profile version 1
+requires final TXT upload and `filename_or_metadata` speaker routing. Inline
+speaker overrides are valid only for Drive MP4 file targets. Execution reports
+whether TXT and MP3 uploads actually happened during that call.
 
 **Post-processing** runs in `process_item` after `transcribe_file` and before upload, gated
 by config: `openai_postprocess` (LLM path, `src/openai_pipeline.py` — OpenAI Responses API,
@@ -97,8 +100,8 @@ first, else splits with `chunk_mp3` (`STT_CHUNK_SECONDS`) and calls `transcribe_
 - `openai` / `asr`: chunked path, `STT_LANGUAGE` optional (auto-detect).
 - `google`: `transcribe_full` path — uploads MP3 to GCS, runs Speech-to-Text v2
   `BatchRecognize` with diarization, deletes the blob. `STT_LANGUAGE` is required
-  (BCP-47, the `long` model has no auto-detect). Diarization works only for limited
-  languages (mostly `en-*`); on unsupported langs it retries once without diarization.
+  (BCP-47, the `long` model has no auto-detect). Diarization support depends on
+  the selected language.
 - `deepgram`: full-file path — can use `m4a_copy`, `mp3_96k`, or `mp3_192k`; tuning stays
   provider-specific, but the CLI workflow stays the same.
 

@@ -195,6 +195,13 @@ Cost reporting is best effort. Cost does not block execution and must not add a
 confirmation prompt. When a provider does not expose a cost immediately, the
 result may report `null` or omit that provider value.
 
+`txt_uploaded` and `mp3_uploaded` report uploads performed during this
+execution, not merely the active profile's desired artifacts. Profile version 1
+requires `artifacts.drive_txt=true` and
+`speakers.mode=filename_or_metadata`. Inline `speakers` overrides apply only to
+Drive MP4 file targets. Provider overrides validate their required environment
+settings before Drive mutation.
+
 ## Confirmation Policy
 
 No extra confirmation is required for:

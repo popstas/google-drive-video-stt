@@ -231,6 +231,22 @@ def test_doctor_reports_pipeline_secret_readiness_without_values(mocker, capsys,
     assert "sk-secret" not in out
 
 
+def test_doctor_reports_pipeline_setting_readiness(mocker, capsys, tmp_path):
+    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path, stt_provider="asr")
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    profile = MagicMock()
+    mocker.patch("src.cli.pipeline_profile.load_pipeline_profile", return_value=profile)
+    mocker.patch("src.cli.pipeline_profile.required_secret_status", return_value={})
+    mocker.patch(
+        "src.cli.pipeline_profile.required_setting_status",
+        return_value={"ASR_URL": {"configured": False}},
+    )
+
+    cli.main(["doctor"])
+
+    assert "ASR_URL: missing" in capsys.readouterr().out
+
+
 def test_run_dispatch_calls_main(mocker):
     main_mock = mocker.patch("src.cli.main_module.main")
 

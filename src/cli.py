@@ -167,7 +167,11 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print(f"FOLDER_IDS: {len(config.folder_ids)} configured")
     print(f"STT_PROVIDER: {config.stt_provider or 'not configured'}")
     profile = pipeline_profile.load_pipeline_profile()
-    for key, state in pipeline_profile.required_secret_status(profile).items():
+    readiness = {
+        **pipeline_profile.required_secret_status(profile),
+        **pipeline_profile.required_setting_status(profile),
+    }
+    for key, state in readiness.items():
         print(f"{key}: {'configured' if state['configured'] else 'missing'}")
 
     if not args.drive:

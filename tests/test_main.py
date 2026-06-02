@@ -244,6 +244,37 @@ def test_process_item_passes_expected_mp3_size_to_download(mocker, tmp_path):
     assert download_mock.call_args.kwargs == {"expected_size_bytes": 456}
 
 
+def test_process_item_extracts_temporary_mp3_when_artifact_upload_is_disabled(
+    mocker,
+    tmp_path,
+):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    download_mock = mocker.patch("src.main.drive.download", return_value=mp4_path)
+    extract_mock = mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    upload_mock = mocker.patch("src.main.drive.upload")
+    transcribe_mock = mocker.patch("src.main.transcribe_file", return_value="text")
+
+    cfg = make_config(
+        stt_provider="openai",
+        openai_api_key="sk-x",
+        drive_mp3_artifact=False,
+    )
+
+    telemetry = main.process_item(service, _item("fid", "video.mp4"), "folderX", cfg)
+
+    download_mock.assert_called_once()
+    assert download_mock.call_args.args[1] == "fid"
+    extract_mock.assert_called_once_with(mp4_path, bitrate="96k")
+    transcribe_mock.assert_called_once_with(mp3_path, cfg, cost_usd={})
+    upload_mock.assert_called_once()
+    assert upload_mock.call_args.kwargs["mime_type"] == "text/plain"
+    assert telemetry.mp3_uploaded is False
+    assert telemetry.txt_uploaded is True
+
+
 def test_process_item_deepgram_m4a_downloads_mp4_even_when_mp3_exists(
     mocker,
     tmp_path,

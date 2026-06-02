@@ -38,6 +38,8 @@ class _ProcessTelemetry:
     processing_mode: str
     retry_count: int
     duration_s: float
+    mp3_uploaded: bool = False
+    txt_uploaded: bool = False
     cost_usd: dict[str, float | None] = field(default_factory=dict)
     usage: dict[str, dict[str, int]] = field(default_factory=dict)
 
@@ -261,6 +263,8 @@ def process_item(
     duration_s = 0.0
     cost_usd: dict[str, float | None] = {}
     usage: dict[str, dict[str, int]] = {}
+    mp3_uploaded = False
+    txt_uploaded = False
 
     try:
         with tempfile.TemporaryDirectory(prefix="gd-stt-") as tmp:
@@ -293,6 +297,7 @@ def process_item(
                         drive.ARTIFACT_TYPE_PROPERTY: "mp3",
                     },
                 )
+                mp3_uploaded = True
                 logger.info("Uploaded %s to folder %s", mp3_drive_name, folder_id)
 
             if needs_txt:
@@ -311,21 +316,32 @@ def process_item(
                         )
                     stt_audio_path = _prepare_deepgram_audio(mp4_path, config)
                 elif mp3_path is None:
-                    if not mp3_id or not mp3_name:
-                        raise RuntimeError(
-                            f"mp3 marked present for {file_name} but id/name missing"
+                    if mp3_id and mp3_name:
+                        mp3_path = _call_with_transient_retries(
+                            lambda: _download_from_drive(
+                                service,
+                                mp3_id,
+                                tmp_dir,
+                                mp3_name,
+                                expected_size_bytes=mp3_size,
+                            ),
+                            description=f"download mp3 artifact {mp3_name} ({mp3_id})",
+                            retry_state=retry_state,
                         )
-                    mp3_path = _call_with_transient_retries(
-                        lambda: _download_from_drive(
-                            service,
-                            mp3_id,
-                            tmp_dir,
-                            mp3_name,
-                            expected_size_bytes=mp3_size,
-                        ),
-                        description=f"download mp3 artifact {mp3_name} ({mp3_id})",
-                        retry_state=retry_state,
-                    )
+                    else:
+                        if mp4_path is None:
+                            mp4_path = _call_with_transient_retries(
+                                lambda: _download_from_drive(
+                                    service,
+                                    file_id,
+                                    tmp_dir,
+                                    file_name,
+                                    expected_size_bytes=file_size,
+                                ),
+                                description=f"download source file {file_name} ({file_id})",
+                                retry_state=retry_state,
+                            )
+                        mp3_path = extract_mp3(mp4_path, bitrate=config.bitrate)
                     stt_audio_path = mp3_path
                 else:
                     stt_audio_path = mp3_path
@@ -353,6 +369,7 @@ def process_item(
                     service, file_id, file_name, text, folder_id, tmp_dir,
                     txt_id=item.get("txt_id"),
                 )
+                txt_uploaded = True
     except Exception as exc:
         error = exc
         setattr(exc, "gdstt_retry_count", retry_state.retry_count)
@@ -376,6 +393,8 @@ def process_item(
         processing_mode=processing_mode,
         retry_count=retry_state.retry_count,
         duration_s=duration_s,
+        mp3_uploaded=mp3_uploaded,
+        txt_uploaded=txt_uploaded,
         cost_usd=cost_usd,
         usage=usage,
     )
