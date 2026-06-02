@@ -1,16 +1,24 @@
 # google-drive-video-stt
 
-Monitors Google Drive folders for new MP4 files, extracts MP3 audio with ffmpeg, and uploads the MP3 alongside the original. Designed as a headless preprocessing step for speech-to-text pipelines (e.g. NotebookLM, which rejects files over 200 MB, and Cloud STT, which doesn't accept MP4 directly).
+Monitors Google Drive folders for new MP4 files, optionally extracts MP3 audio
+with ffmpeg, and uploads transcripts alongside the original. Designed as a
+headless preprocessing step for speech-to-text pipelines (e.g. NotebookLM, which
+rejects files over 200 MB, and Cloud STT, which doesn't accept MP4 directly).
 
 ## Features
 
 - Polls one or more Google Drive folders on a configurable interval
-- Idempotent: skips MP4s that already have a sibling `<basename>.mp3`
+- Idempotent: skips already-created Drive artifacts, linked by source file id
+  metadata when available and by sibling name as a legacy fallback
 - Audio extraction via ffmpeg (`libmp3lame`, configurable bitrate)
 - Optional Telegram error notifications (success is silent)
 - Operator CLI (`gdstt`) wrapping auth, the polling loop, on-demand processing, local-file transcription, and folder-state inspection
 - Optional transcript post-processing (local or OpenAI LLM) that maps diarized speakers to the interlocutor names in the file name
 - Sibling `.mp3`/`.txt` names preserve the full Drive file name, including `/` characters
+- Explicit speaker names can be stored on the Drive MP4 when the filename is not
+  enough for reliable speaker mapping
+- Agent JSON pipeline with deterministic planning, profile defaults, and
+  confirmation gates for broad or destructive processing
 - Docker-first deployment, all mutable state in `./data`
 
 ## Requirements
@@ -24,28 +32,34 @@ Monitors Google Drive folders for new MP4 files, extracts MP3 audio with ffmpeg,
 
 ## Setup
 
-1. Clone the repo and install dependencies (use `--extra dev` for tests/lint tools):
+For an operator-style local install, use the global CLI first:
 
-   ```bash
-   uv sync --extra dev
-   ```
+```bash
+uv tool install --editable .
+uv tool update-shell
+gdstt setup
+```
 
-2. Create or select a Google Cloud project, enable the required APIs, and prepare
-   `./data/credentials.json`. The CLI path is documented below.
+`gdstt setup` creates `.env` from `.env.example` when needed, writes
+`FOLDER_IDS`, defaults `STT_PROVIDER` to Deepgram, prompts for
+the API keys required by the active pipeline profile, prepares
+`data/credentials.json` from Application Default Credentials when available,
+runs OAuth, verifies Drive access, and finishes with the safe next steps
+`gdstt list` then `gdstt process <file-id> --dry-run`.
 
-3. Copy `.env.example` to `.env` and fill in `FOLDER_IDS` (comma-separated Drive folder IDs) plus optional Telegram credentials:
+For development in this checkout, install the editable environment too:
 
-   ```bash
-   cp .env.example .env
-   ```
+```bash
+uv sync --extra dev
+```
 
-4. Run the OAuth flow once to mint a refresh token. This opens a browser and writes `data/token.json`:
-
-   ```bash
-   uv run python -m src.auth
-   ```
+If the default wizard cannot finish a step, the manual Google Cloud fallback
+below remains the reference path.
 
 ## Google Cloud and Drive setup with gcloud
+
+Use this section when `gdstt setup` cannot finish automatically or when you need
+to inspect or change the Google Cloud pieces directly.
 
 Install and initialize the Google Cloud CLI first:
 
@@ -113,7 +127,16 @@ $client | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 data\credentials.
 
 The generated `data/credentials.json` contains only the OAuth client metadata.
 Do not copy the ADC `refresh_token` into it. The app creates its own
-`data/token.json` when you run `uv run python -m src.auth`.
+`data/token.json` when you run `gdstt auth`.
+
+The OAuth-only flow remains available for refresh, recovery, or headless/manual
+exchange:
+
+```bash
+gdstt auth
+gdstt auth --manual
+gdstt auth "http://localhost/?code=4/abc123&scope=..."
+```
 
 If the ADC flow is not available in your environment, use the Google Cloud
 Console fallback: APIs & Services -> Credentials -> Create Credentials ->
@@ -153,10 +176,11 @@ All configuration is environment-driven. See `.env.example`.
 | `FOLDER_IDS` | (required) | Comma-separated Google Drive folder IDs to monitor |
 | `POLL_INTERVAL` | `600` | Seconds between poll cycles |
 | `BITRATE` | `96k` | MP3 audio bitrate passed to ffmpeg |
+| `DRIVE_MP3_ARTIFACT` | auto | Upload an MP3 artifact to Drive. Defaults to `false` for `STT_PROVIDER=deepgram` + `DEEPGRAM_AUDIO_SOURCE=m4a_copy`; defaults to `true` otherwise |
 | `TELEGRAM_BOT_TOKEN` | (empty) | If set with chat ID, errors are posted to Telegram |
 | `TELEGRAM_CHAT_ID` | (empty) | Telegram chat to receive error notifications |
 | `DATA_DIR` | `data` | Directory holding `credentials.json` and `token.json` |
-| `STT_PROVIDER` | (empty) | `openai`, `google`, `asr`, `deepgram`, or empty to disable transcription |
+| `STT_PROVIDER` | `deepgram` | `deepgram` by default. Set `disabled` to skip transcription explicitly, or use `openai`, `google`, or `asr` |
 | `STT_LANGUAGE` | (empty) | Language hint. `openai`/`asr`: optional (`en`, `ru`); empty = auto-detect. `google`: required BCP-47 (`en-US`, `ru-RU`); `deepgram`: empty defaults to `ru` |
 | `STT_CHUNK_SECONDS` | `600` | Chunk length for `openai`/`asr`. Ignored when `STT_PROVIDER=google` or `deepgram` |
 | `STT_POSTPROCESS` | `true` | Clean the transcript and map diarized `Speaker N` labels to the interlocutor names parsed from the file name, merging spurious extra speakers |
@@ -178,8 +202,39 @@ All configuration is environment-driven. See `.env.example`.
 
 ## Speech-to-text
 
-Setting `STT_PROVIDER` to a non-empty value transcribes each MP3 and uploads a sibling
-`<basename>.txt` next to the MP4/MP3.
+Setting `STT_PROVIDER` to a non-empty value transcribes each pending recording
+through the selected provider and uploads a sibling `<basename>.txt` next to the
+MP4 and any optional generated audio artifact.
+
+### Agent JSON pipeline
+
+For agent-driven requests, prefer a compact intent and deterministic expansion:
+
+```bash
+gdstt plan --json '{"action":"process","targets":["<drive-mp4-file-id>"]}'
+gdstt execute --json '{"action":"process","targets":["<drive-mp4-file-id>"]}'
+```
+
+On PowerShell, prefer `gdstt plan --json-file .\intent.json` and
+`gdstt execute --json-file .\intent.json` to avoid native process quoting
+issues.
+
+The versioned profile lives in `config/pipelines/default.json`; optional
+machine-specific overrides belong in gitignored `config/pipelines/local.json`.
+The default profile uses Deepgram `m4a_copy`, OpenAI refinement, TXT upload, no
+Drive MP3 artifact, and speaker names from the file name or Drive metadata.
+Profile version 1 intentionally requires TXT upload and the
+`filename_or_metadata` speaker mode; unsupported provider, audio-source, and
+profile values fail before Drive mutation. Folder-wide processing and
+transcript regeneration require `--confirm`. Inline speaker overrides apply
+only to Drive MP4 file targets.
+
+Execution validates provider-specific required settings before building the
+Drive service. Result fields `txt_uploaded` and `mp3_uploaded` report uploads
+that actually happened during that execution. Results also include best-effort
+OpenAI refinement token counters under `usage.openai`. OpenAI dollar cost
+remains `null` because per-response billing is not exposed through the runtime
+API key.
 
 ### Transcript post-processing
 
@@ -199,7 +254,11 @@ uses `OPENAI_MODEL` (default `gpt-5.4-mini`), and can run through the OpenAI Bat
 (`OPENAI_BATCH=true`) for ~50% lower cost at the price of higher latency. When enabled it
 takes precedence over the local `STT_POSTPROCESS` path.
 
-When a sibling `.txt` already exists it is overwritten in place rather than duplicated.
+When a sibling `.txt` already exists, normal polling skips it to avoid spending
+STT credits repeatedly. Use `gdstt process <file-id> --reprocess-txt` when you
+intentionally want to run STT again and overwrite the existing `.txt` in place.
+New `.txt` and `.mp3` artifacts are tagged with the source MP4 id, so future
+source renames do not break artifact detection.
 
 ### Deepgram Nova-3 (diarization)
 
@@ -236,9 +295,10 @@ DEEPGRAM_KEYTERMS_FILE=config/deepgram-keyterms.txt
 
 `m4a_copy` extracts a temporary AAC/M4A audio copy from the source MP4 for
 Deepgram without re-encoding. Use `mp3_96k` or `mp3_192k` to send a temporary
-MP3 instead. The sibling MP3 uploaded to Drive is still produced as before. If an
-MP3 already exists but TXT is missing, Deepgram downloads the MP4 again so it can
-use the selected high-quality audio source.
+MP3 instead. With the Deepgram `m4a_copy` default, no extra Drive MP3 is uploaded
+unless `DRIVE_MP3_ARTIFACT=true` is set. If an MP3 already exists but TXT is
+missing, Deepgram downloads the MP4 again so it can use the selected high-quality
+audio source.
 
 `word_speaker` is a Deepgram-only TXT formatter. It uses `utterances` for readable
 timing, but splits a line when `words[].speaker` changes inside the utterance.
@@ -302,24 +362,130 @@ The process loops forever, sleeping `POLL_INTERVAL` seconds between cycles.
 `uv run python -m src.cli`). All commands read configuration from `.env` / the
 environment via `load_config()`.
 
+Safe operator flow: `gdstt doctor` -> `gdstt list` -> `gdstt process <file-id> --dry-run`
+-> `gdstt process <file-id>`. Move to `run-once` or continuous `run` only after
+that single-file path looks correct.
+
 ```bash
 gdstt auth [response_url]   # one-time interactive OAuth → data/token.json
-gdstt run                  # polling loop (same as python -m src.main)
-gdstt run-once             # a single poll cycle, then exit
-gdstt process <id> [--folder]   # process a Drive file or folder on demand
+gdstt doctor [--drive]      # check Drive/OAuth configuration without changing it
+gdstt plan --json '<intent>'   # expand an agent JSON request without mutating Drive
+gdstt execute --json '<intent>' [--confirm]   # execute after deterministic policy checks
+gdstt plan --json-file <path>   # PowerShell-friendly JSON input; execute supports it too
+gdstt run                   # continuous polling; can spend STT credits across all pending configured folders
+gdstt run-once [--dry-run] [--max-size SIZE] [--confirm-large]   # single cycle; use --dry-run first
+gdstt process <id> [--folder] [--reprocess-txt] [--dry-run] [--max-size SIZE] [--confirm-large]   # single target or folder; use --dry-run first
+gdstt speakers set <file-id> "Alice" "Bob"   # store explicit speaker names on an MP4
+gdstt refresh-names <file-id>   # rename linked MP3/TXT artifacts after an MP4 rename
 gdstt transcribe <audio> [-o out.txt]   # STT-only on a local file; prints to stdout by default
 gdstt list [--folder ID]   # show sibling mp3/txt state without doing work (alias: status)
 ```
 
 `process` auto-detects whether the ID is a file or a folder; pass `--folder` to force
 folder handling. `list`/`status` defaults to the configured `FOLDER_IDS` when `--folder`
-is omitted.
+is omitted. `--reprocess-txt` intentionally spends STT provider credits again and
+overwrites the linked `.txt` when one exists. `speakers set` affects future local
+post-processing; combine it with `process <file-id> --reprocess-txt` when an
+already-uploaded transcript needs to be regenerated with corrected names.
+
+Use `doctor` first when setting up a new agent or machine: it checks whether
+`credentials.json`, `token.json`, and `FOLDER_IDS` are present without validating STT
+provider secrets. Add `--drive` only when you want it to authenticate and list the
+configured folders. Use `--dry-run` on `run-once` or folder `process` to preview pending
+work without downloads, uploads, or STT calls. `--max-size` is off unless you pass it.
+Use it as an optional manual safety limit before processing folders, for example
+`--max-size 50MB`; files larger than the limit are skipped unless you also pass
+`--confirm-large` after confirming that large files should be processed.
+
+`run` has no preview mode and is intentionally the least safe operator entrypoint:
+it keeps polling and can continue spending STT credits until you stop it. Use it
+only after the single-file or `run-once --dry-run` path already matches expectations.
+
+### Runtime reliability and summaries
+
+The runtime treats incomplete output as failure instead of silently uploading it:
+
+- Empty provider transcripts raise an STT error; a blank `.txt` is not uploaded.
+- Transient Drive metadata lookups, folder-state listings, and downloads retry with
+  bounded backoff. Uploads are not retried automatically.
+- Downloads are checked against Drive metadata size; mismatched partial temp files
+  are removed before retry or recovery.
+- `FOLDER_IDS` containing only commas or whitespace fails configuration loading
+  instead of producing a misleading no-op run.
+
+`run-once` logs one process summary per worked file, one folder summary per folder,
+and one cycle summary. The cycle summary includes pending, processed, failed,
+`retry_total`, `gcs_blob_orphans`, skipped-by-size, folder-error, and duration fields.
+`gcs_blob_orphans` is a subset of failed items: it means a Google STT timeout retained
+a GCS blob for manual inspection or cleanup.
+
+For recovery steps and provider-specific details, see
+[`skills/gdstt-cli/references/troubleshooting.md`](skills/gdstt-cli/references/troubleshooting.md)
+and
+[`skills/gdstt-cli/references/provider-notes.md`](skills/gdstt-cli/references/provider-notes.md).
+
+### Agent-facing documentation
+
+Shared repository instructions live in [`AGENTS.md`](AGENTS.md). The canonical
+installable package lives in [`skills/gdstt-cli/`](skills/gdstt-cli/). It contains
+one discoverable `SKILL.md`; references and examples are installed recursively as
+resources that the main skill opens only when needed.
+
+Prefer the `gh skill` workflow for installation:
+
+```bash
+gh skill preview wyrtensi/google-drive-video-stt gdstt-cli
+gh skill install wyrtensi/google-drive-video-stt gdstt-cli --agent codex --scope user
+gh skill install wyrtensi/google-drive-video-stt gdstt-cli --agent claude-code --scope user
+gh skill update --all
+```
+
+For local checkout testing before publishing:
+
+```bash
+gh skill publish --dry-run
+gh skill install . gdstt-cli --from-local --agent codex --scope user
+gh skill install . gdstt-cli --from-local --agent claude-code --scope user
+```
+
+Pin a known version when reproducibility matters:
+
+```bash
+gh skill install wyrtensi/google-drive-video-stt gdstt-cli@YOUR_TAG_OR_COMMIT --agent codex --scope user
+```
+
+`gh skill install --help` lists supported hosts and their install locations.
+Current host choices include Codex, Claude Code, Cursor, Gemini CLI, GitHub
+Copilot, Windsurf, and many more. VS Code agent mode can discover Copilot Agent
+Skills from supported workspace layouts. Install the canonical package for each
+host that should use it; `gh skill` chooses the host-specific destination.
+
+For a host without `gh skill` integration, manually copy the canonical
+`skills/gdstt-cli` directory into that host's documented skills directory. Check
+the host documentation first instead of assuming an editor-specific path.
+
+Gemini CLI can refresh workspace discovery without restarting by running
+`/skills reload` in an interactive session.
+
+Official references:
+
+- [GitHub Copilot Agent Skills](https://docs.github.com/en/copilot/concepts/agents/about-agent-skills)
+- [VS Code Agent Skills](https://code.visualstudio.com/docs/copilot/customization/agent-skills)
+- [Claude Code skills](https://code.claude.com/docs/en/slash-commands)
+- [Gemini CLI Agent Skills](https://geminicli.com/docs/cli/skills/)
+
+After changing the canonical package or its bundled resources, validate it with:
+
+```bash
+uv run python scripts/check-agent-skill.py
+```
 
 ## Tests
 
 ```bash
 uv run pytest
 uv run ruff check
+uv run python scripts/check-agent-skill.py
 ```
 
 Deepgram has a gated live smoke test that can spend a small amount of credit. It is skipped

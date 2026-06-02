@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from dotenv import load_dotenv as real_load_dotenv
 
 from src.config import load_config
 
@@ -16,6 +17,7 @@ ENV_VARS = [
     "STT_LANGUAGE",
     "STT_CHUNK_SECONDS",
     "STT_POSTPROCESS",
+    "DRIVE_MP3_ARTIFACT",
     "OPENAI_API_KEY",
     "OPENAI_MODEL",
     "OPENAI_POSTPROCESS",
@@ -42,28 +44,74 @@ def clean_env(monkeypatch):
     yield
 
 
+def _load_drive_only_config():
+    return load_config(validate_providers=False)
+
+
 def test_defaults_when_no_env(monkeypatch):
-    cfg = load_config()
+    cfg = _load_drive_only_config()
     assert cfg.folder_ids == []
     assert cfg.poll_interval == 600
     assert cfg.bitrate == "96k"
     assert cfg.telegram_bot_token == ""
     assert cfg.telegram_chat_id == ""
     assert cfg.data_dir == Path("data")
-    assert cfg.stt_provider == ""
+    assert cfg.stt_provider == "deepgram"
     assert cfg.stt_chunk_seconds == 600
-    assert cfg.stt_language == ""
+    assert cfg.stt_language == "ru"
     assert cfg.stt_postprocess is True
+
+
+def test_default_deepgram_processing_requires_key_and_suggests_setup(monkeypatch):
+    with pytest.raises(ValueError, match="gdstt setup"):
+        load_config()
+
+
+def test_stt_provider_disabled_explicitly_turns_transcription_off(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+
+    cfg = load_config()
+
+    assert cfg.stt_provider == ""
+    assert cfg.stt_language == ""
 
 
 def test_stt_postprocess_can_be_disabled(monkeypatch):
     monkeypatch.setenv("STT_POSTPROCESS", "false")
-    cfg = load_config()
+    cfg = _load_drive_only_config()
     assert cfg.stt_postprocess is False
 
 
-def test_openai_pipeline_defaults(monkeypatch):
+def test_drive_mp3_artifact_defaults_to_true_when_transcription_disabled(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+
     cfg = load_config()
+
+    assert cfg.drive_mp3_artifact is True
+
+
+def test_drive_mp3_artifact_defaults_to_false_for_deepgram_m4a(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "deepgram")
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+
+    cfg = load_config()
+
+    assert cfg.deepgram_audio_source == "m4a_copy"
+    assert cfg.drive_mp3_artifact is False
+
+
+def test_drive_mp3_artifact_can_be_enabled_for_deepgram_m4a(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "deepgram")
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("DRIVE_MP3_ARTIFACT", "true")
+
+    cfg = load_config()
+
+    assert cfg.drive_mp3_artifact is True
+
+
+def test_openai_pipeline_defaults(monkeypatch):
+    cfg = _load_drive_only_config()
     assert cfg.openai_model == "gpt-5.4-mini"
     assert cfg.openai_postprocess is False
     assert cfg.openai_batch is False
@@ -96,6 +144,7 @@ def test_validate_providers_true_is_default(monkeypatch):
 
 
 def test_openai_postprocess_with_api_key(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
     monkeypatch.setenv("OPENAI_POSTPROCESS", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
@@ -109,6 +158,7 @@ def test_openai_postprocess_with_api_key(monkeypatch):
 
 def test_openai_postprocess_enabled_without_stt_provider(monkeypatch):
     # OPENAI_POSTPROCESS is independent of STT_PROVIDER selection.
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
     monkeypatch.setenv("OPENAI_POSTPROCESS", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     cfg = load_config()
@@ -118,37 +168,66 @@ def test_openai_postprocess_enabled_without_stt_provider(monkeypatch):
 
 def test_parses_single_folder_id(monkeypatch):
     monkeypatch.setenv("FOLDER_IDS", "abc123")
-    cfg = load_config()
+    cfg = _load_drive_only_config()
     assert cfg.folder_ids == ["abc123"]
+
+
+def test_load_config_accepts_dotenv_with_utf8_bom(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("src.config.load_dotenv", real_load_dotenv)
+    (tmp_path / ".env").write_text("FOLDER_IDS=abc123\n", encoding="utf-8-sig")
+
+    cfg = _load_drive_only_config()
+
+    assert cfg.folder_ids == ["abc123"]
+
+
+def test_load_config_falls_back_to_checkout_env_outside_repo(monkeypatch, tmp_path):
+    checkout = tmp_path / "checkout"
+    elsewhere = tmp_path / "elsewhere"
+    checkout.mkdir()
+    elsewhere.mkdir()
+    (checkout / ".env").write_text(
+        "FOLDER_IDS=folder-1\nDATA_DIR=data\nSTT_PROVIDER=disabled\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr("src.config.CHECKOUT_ROOT", checkout, raising=False)
+    monkeypatch.setattr("src.config.load_dotenv", real_load_dotenv)
+
+    cfg = load_config()
+
+    assert cfg.folder_ids == ["folder-1"]
+    assert cfg.data_dir == checkout / "data"
 
 
 def test_parses_multiple_folder_ids(monkeypatch):
     monkeypatch.setenv("FOLDER_IDS", "id1,id2,id3")
-    cfg = load_config()
+    cfg = _load_drive_only_config()
     assert cfg.folder_ids == ["id1", "id2", "id3"]
 
 
 def test_strips_whitespace_in_folder_ids(monkeypatch):
     monkeypatch.setenv("FOLDER_IDS", " id1 , id2 ,  ,id3 ")
-    cfg = load_config()
+    cfg = _load_drive_only_config()
     assert cfg.folder_ids == ["id1", "id2", "id3"]
 
 
 def test_empty_folder_ids_returns_empty_list(monkeypatch):
     monkeypatch.setenv("FOLDER_IDS", "")
-    cfg = load_config()
+    cfg = _load_drive_only_config()
     assert cfg.folder_ids == []
 
 
 def test_folder_ids_only_commas(monkeypatch):
     monkeypatch.setenv("FOLDER_IDS", " , , ")
-    cfg = load_config()
-    assert cfg.folder_ids == []
+    with pytest.raises(ValueError, match="FOLDER_IDS"):
+        load_config()
 
 
 def test_custom_poll_interval(monkeypatch):
     monkeypatch.setenv("POLL_INTERVAL", "120")
-    cfg = load_config()
+    cfg = _load_drive_only_config()
     assert cfg.poll_interval == 120
 
 
@@ -166,33 +245,33 @@ def test_non_positive_poll_interval_raises(monkeypatch):
 
 def test_custom_bitrate(monkeypatch):
     monkeypatch.setenv("BITRATE", "128k")
-    cfg = load_config()
+    cfg = _load_drive_only_config()
     assert cfg.bitrate == "128k"
 
 
 def test_blank_bitrate_uses_default(monkeypatch):
     monkeypatch.setenv("BITRATE", "")
-    cfg = load_config()
+    cfg = _load_drive_only_config()
     assert cfg.bitrate == "96k"
 
 
 def test_telegram_credentials(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token-xyz")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
-    cfg = load_config()
+    cfg = _load_drive_only_config()
     assert cfg.telegram_bot_token == "token-xyz"
     assert cfg.telegram_chat_id == "12345"
 
 
 def test_custom_data_dir(monkeypatch):
     monkeypatch.setenv("DATA_DIR", "/var/lib/stt")
-    cfg = load_config()
+    cfg = _load_drive_only_config()
     assert cfg.data_dir == Path("/var/lib/stt")
 
 
 def test_blank_data_dir_uses_default(monkeypatch):
     monkeypatch.setenv("DATA_DIR", "")
-    cfg = load_config()
+    cfg = _load_drive_only_config()
     assert cfg.data_dir == Path("data")
 
 
@@ -315,6 +394,17 @@ def test_stt_deepgram_can_disable_keyterms(monkeypatch):
     assert cfg.deepgram_keyterms == ()
 
 
+def test_stt_deepgram_rejects_missing_keyterms_file_when_enabled(monkeypatch, tmp_path):
+    missing_keyterms = tmp_path / "missing-keyterms.txt"
+    monkeypatch.setenv("STT_PROVIDER", "deepgram")
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("DEEPGRAM_KEYTERMS_ENABLED", "true")
+    monkeypatch.setenv("DEEPGRAM_KEYTERMS_FILE", str(missing_keyterms))
+
+    with pytest.raises(ValueError, match="could not be read"):
+        load_config()
+
+
 def test_stt_deepgram_rejects_too_many_keyterms(monkeypatch, tmp_path):
     keyterms = tmp_path / "keyterms.txt"
     keyterms.write_text("\n".join(f"term-{i}" for i in range(101)), encoding="utf-8")
@@ -351,6 +441,18 @@ def test_stt_deepgram_reads_raw_key_file(monkeypatch, tmp_path):
     assert cfg.deepgram_api_key == "raw-file-key"
 
 
+def test_stt_deepgram_reads_raw_key_file_with_utf8_bom(monkeypatch, tmp_path):
+    key_file = tmp_path / "deepgram_api_secret.json"
+    key_file.write_text("raw-file-key\n", encoding="utf-8-sig")
+    monkeypatch.setenv("STT_PROVIDER", "deepgram")
+    monkeypatch.setenv("STT_LANGUAGE", "ru")
+    monkeypatch.setenv("DEEPGRAM_API_KEY_FILE", str(key_file))
+
+    cfg = load_config()
+
+    assert cfg.deepgram_api_key == "raw-file-key"
+
+
 def test_stt_deepgram_reads_json_key_file(monkeypatch, tmp_path):
     key_file = tmp_path / "deepgram_api_secret.json"
     key_file.write_text('{"deepgram_api_key": "json-file-key"}', encoding="utf-8")
@@ -361,6 +463,30 @@ def test_stt_deepgram_reads_json_key_file(monkeypatch, tmp_path):
     cfg = load_config()
 
     assert cfg.deepgram_api_key == "json-file-key"
+
+
+def test_stt_deepgram_reads_json_key_file_with_utf8_bom(monkeypatch, tmp_path):
+    key_file = tmp_path / "deepgram_api_secret.json"
+    key_file.write_text('{"deepgram_api_key": "json-file-key"}', encoding="utf-8-sig")
+    monkeypatch.setenv("STT_PROVIDER", "deepgram")
+    monkeypatch.setenv("STT_LANGUAGE", "ru")
+    monkeypatch.setenv("DEEPGRAM_API_KEY_FILE", str(key_file))
+
+    cfg = load_config()
+
+    assert cfg.deepgram_api_key == "json-file-key"
+
+
+def test_stt_deepgram_reads_keyterms_file_with_utf8_bom(monkeypatch, tmp_path):
+    keyterms = tmp_path / "keyterms.txt"
+    keyterms.write_text("# header\nKubernetes\n", encoding="utf-8-sig")
+    monkeypatch.setenv("STT_PROVIDER", "deepgram")
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("DEEPGRAM_KEYTERMS_FILE", str(keyterms))
+
+    cfg = load_config()
+
+    assert cfg.deepgram_keyterms == ("Kubernetes",)
 
 
 def test_stt_deepgram_key_file_is_ignored_for_other_providers(monkeypatch, tmp_path):
@@ -441,7 +567,7 @@ def test_full_env_combination(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "cid")
     monkeypatch.setenv("DATA_DIR", "mydata")
-    cfg = load_config()
+    cfg = _load_drive_only_config()
     assert cfg.folder_ids == ["f1", "f2"]
     assert cfg.poll_interval == 300
     assert cfg.bitrate == "192k"

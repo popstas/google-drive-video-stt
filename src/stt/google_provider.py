@@ -10,6 +10,12 @@ from src.stt.base import STTError, STTProvider
 logger = logging.getLogger(__name__)
 
 
+class GoogleBlobRetainedTimeoutError(STTError):
+    def __init__(self, message: str, *, gcs_uri: str) -> None:
+        super().__init__(message)
+        self.gcs_uri = gcs_uri
+
+
 class GoogleProvider(STTProvider):
     def __init__(
         self,
@@ -157,10 +163,11 @@ class GoogleProvider(STTProvider):
                             gcs_uri,
                             exc_info=True,
                         )
-                raise STTError(
+                raise GoogleBlobRetainedTimeoutError(
                     f"Google Cloud STT batch_recognize did not complete within "
                     f"{self._operation_timeout}s; GCS blob {gcs_uri} retained "
-                    "for manual cleanup"
+                    "for manual cleanup",
+                    gcs_uri=gcs_uri,
                 ) from exc
             except Exception as exc:
                 raise STTError(f"Google Cloud STT batch_recognize failed: {exc}") from exc

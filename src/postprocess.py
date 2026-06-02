@@ -189,9 +189,13 @@ def map_speakers(text: str, names: list[str], *, expected: int | None = None) ->
 
     first_seen = {num: idx for idx, num in enumerate(distinct)}
     real_count = min(expected, len(distinct))
-    real = sorted(
-        distinct, key=lambda n: (-word_counts.get(n, 0), first_seen[n])
-    )[:real_count]
+    canonical = list(range(1, expected + 1))
+    if all(num in distinct for num in canonical):
+        real = canonical[:real_count]
+    else:
+        real = sorted(
+            distinct, key=lambda n: (-word_counts.get(n, 0), first_seen[n])
+        )[:real_count]
     extras = [num for num in distinct if num not in real]
 
     merge_targets = _merge_targets(entries, real, extras, word_counts)
@@ -216,9 +220,13 @@ def map_speakers(text: str, names: list[str], *, expected: int | None = None) ->
 
 
 def postprocess_transcript(
-    text: str, file_name: str, *, expected_speakers: int | None = None
+    text: str,
+    file_name: str,
+    *,
+    speaker_names: list[str] | None = None,
+    expected_speakers: int | None = None,
 ) -> str:
     """Clean a raw STT transcript and map diarized speakers to interlocutor names."""
     cleaned = clean_transcript(text)
-    names = extract_interlocutor_names(file_name)
+    names = speaker_names if speaker_names is not None else extract_interlocutor_names(file_name)
     return map_speakers(cleaned, names, expected=expected_speakers)

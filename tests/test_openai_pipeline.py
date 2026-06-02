@@ -48,6 +48,18 @@ def test_build_prompt_includes_names():
     assert "Speaker 1: hi" in prompt
 
 
+def test_build_prompt_prefers_explicit_speaker_names():
+    prompt = build_prompt(
+        "Speaker 1: hi",
+        "Wrong One and Wrong Two - 2026-05-30.mp4",
+        speaker_names=["Alice", "Bob"],
+    )
+
+    assert "Alice, Bob" in prompt
+    assert "Wrong One" not in prompt
+    assert "Wrong Two" not in prompt
+
+
 def test_build_prompt_without_names():
     # A date-only name yields no extractable interlocutor names.
     prompt = build_prompt("Speaker 1: hi", "2026-05-28.mp4")
@@ -87,6 +99,44 @@ def test_refine_sync_uses_output_text():
     assert out == "Alice: hi\nBob: hello"
     assert captured["model"] == "gpt-5.4-mini"
     assert "Speaker 1: hi" in captured["input"]
+
+
+def test_refine_sync_captures_usage():
+    response = SimpleNamespace(
+        output_text="Alice: hi",
+        usage=SimpleNamespace(
+            input_tokens=100,
+            input_tokens_details=SimpleNamespace(cached_tokens=40),
+            output_tokens=25,
+            output_tokens_details=SimpleNamespace(reasoning_tokens=5),
+            total_tokens=125,
+        ),
+    )
+    pipeline = OpenAIPipeline(api_key="sk-test")
+    pipeline._client = SimpleNamespace(
+        responses=SimpleNamespace(create=lambda **kw: response)
+    )
+
+    assert pipeline.refine("Speaker 1: hi", "f.mp4") == "Alice: hi"
+    assert pipeline.last_usage == {
+        "input_tokens": 100,
+        "cached_input_tokens": 40,
+        "output_tokens": 25,
+        "reasoning_tokens": 5,
+        "total_tokens": 125,
+    }
+
+
+def test_refine_sync_without_usage_keeps_usage_empty():
+    pipeline = OpenAIPipeline(api_key="sk-test")
+    pipeline._client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=lambda **kw: SimpleNamespace(output_text="Alice: hi")
+        )
+    )
+
+    assert pipeline.refine("Speaker 1: hi", "f.mp4") == "Alice: hi"
+    assert pipeline.last_usage == {}
 
 
 def test_refine_sync_walks_output_list():
@@ -169,6 +219,37 @@ def test_refine_batch_round_trip():
     assert out == "Alice: hi"
     assert calls["batch"]["endpoint"] == "/v1/responses"
     assert calls["content"] == "file-out"
+
+
+def test_refine_batch_captures_usage():
+    line = json.dumps(
+        {
+            "response": {
+                "status_code": 200,
+                "body": {
+                    "output_text": "Alice: hi",
+                    "usage": {
+                        "input_tokens": 200,
+                        "input_tokens_details": {"cached_tokens": 10},
+                        "output_tokens": 50,
+                        "output_tokens_details": {"reasoning_tokens": 7},
+                        "total_tokens": 250,
+                    },
+                },
+            },
+        }
+    )
+    pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
+    pipeline._client = _fake_batch_client(line + "\n")
+
+    assert pipeline.refine("Speaker 1: hi", "f.mp4") == "Alice: hi"
+    assert pipeline.last_usage == {
+        "input_tokens": 200,
+        "cached_input_tokens": 10,
+        "output_tokens": 50,
+        "reasoning_tokens": 7,
+        "total_tokens": 250,
+    }
 
 
 def test_refine_batch_parses_output_list_body():
@@ -317,3 +398,66 @@ def test_refine_transcript_uses_configured_pipeline(monkeypatch):
     monkeypatch.setattr(OpenAIPipeline, "_get_client", fake_get_client)
     out = refine_transcript("Speaker 1: hi", "Alice and Bob.mp4", _config())
     assert out == "Alice: hi"
+
+
+def test_refine_transcript_copies_usage_to_optional_collector(monkeypatch):
+    usage = {}
+
+    def fake_get_client(self):
+        return SimpleNamespace(
+            responses=SimpleNamespace(
+                create=lambda **kw: SimpleNamespace(
+                    output_text="Alice: hi",
+                    usage=SimpleNamespace(
+                        input_tokens=10,
+                        input_tokens_details=SimpleNamespace(cached_tokens=2),
+                        output_tokens=4,
+                        output_tokens_details=SimpleNamespace(reasoning_tokens=1),
+                        total_tokens=14,
+                    ),
+                )
+            )
+        )
+
+    monkeypatch.setattr(OpenAIPipeline, "_get_client", fake_get_client)
+
+    assert (
+        refine_transcript(
+            "Speaker 1: hi",
+            "Alice and Bob.mp4",
+            _config(),
+            usage=usage,
+        )
+        == "Alice: hi"
+    )
+    assert usage == {
+        "input_tokens": 10,
+        "cached_input_tokens": 2,
+        "output_tokens": 4,
+        "reasoning_tokens": 1,
+        "total_tokens": 14,
+    }
+
+
+def test_refine_transcript_clears_reused_collector_when_usage_is_absent(monkeypatch):
+    usage = {"input_tokens": 99}
+
+    def fake_get_client(self):
+        return SimpleNamespace(
+            responses=SimpleNamespace(
+                create=lambda **kw: SimpleNamespace(output_text="Alice: hi")
+            )
+        )
+
+    monkeypatch.setattr(OpenAIPipeline, "_get_client", fake_get_client)
+
+    assert (
+        refine_transcript(
+            "Speaker 1: hi",
+            "Alice and Bob.mp4",
+            _config(),
+            usage=usage,
+        )
+        == "Alice: hi"
+    )
+    assert usage == {}

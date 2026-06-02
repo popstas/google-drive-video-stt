@@ -114,6 +114,19 @@ def test_extra_speaker_merged_into_frequent_neighbor():
     assert "Bob: bbb bbb bbb x bbb bbb" in out
 
 
+def test_extra_speaker_does_not_replace_first_two_speakers_when_names_known():
+    text = (
+        "Speaker 1: hello\n"
+        "Speaker 2: hi\n"
+        "Speaker 3: this is a longer stray turn\n"
+        "Speaker 2: back"
+    )
+
+    out = postprocess.map_speakers(text, ["Alice", "Bob"])
+
+    assert out == "Alice: hello\nBob: hi this is a longer stray turn back"
+
+
 def test_extra_speaker_falls_back_to_dominant_when_no_real_neighbor():
     # Speaker 3 only ever neighbors itself -> merged into the most talkative real speaker.
     text = (

@@ -31,11 +31,23 @@ INSTRUCTIONS = (
 
 DEFAULT_MODEL = "gpt-5.4-mini"
 RESPONSES_ENDPOINT = "/v1/responses"
+_USAGE_FIELDS = {
+    "input_tokens": ("input_tokens",),
+    "cached_input_tokens": ("input_tokens_details", "cached_tokens"),
+    "output_tokens": ("output_tokens",),
+    "reasoning_tokens": ("output_tokens_details", "reasoning_tokens"),
+    "total_tokens": ("total_tokens",),
+}
 
 
-def build_prompt(transcript: str, file_name: str) -> str:
+def build_prompt(
+    transcript: str,
+    file_name: str,
+    *,
+    speaker_names: list[str] | None = None,
+) -> str:
     """Compose the user prompt: name hints from the file name + the raw transcript."""
-    names = extract_interlocutor_names(file_name)
+    names = speaker_names if speaker_names is not None else extract_interlocutor_names(file_name)
     if names:
         hint = (
             "Known interlocutor names (in no particular order): "
@@ -85,6 +97,25 @@ def _content_to_text(content: object) -> str:
     return str(content)
 
 
+def _nested_value(payload: object, path: tuple[str, ...]) -> object:
+    value = payload
+    for key in path:
+        if isinstance(value, dict):
+            value = value.get(key)
+        else:
+            value = getattr(value, key, None)
+    return value
+
+
+def _normalize_usage(payload: object) -> dict[str, int]:
+    usage: dict[str, int] = {}
+    for result_key, path in _USAGE_FIELDS.items():
+        value = _nested_value(payload, path)
+        if isinstance(value, int) and not isinstance(value, bool):
+            usage[result_key] = value
+    return usage
+
+
 def _output_text_from_body(body: dict) -> str:
     """Extract assistant text from a JSON Responses body (batch output line)."""
     if isinstance(body.get("output_text"), str):
@@ -97,7 +128,11 @@ def _output_text_from_body(body: dict) -> str:
     return "".join(parts).strip()
 
 
-def _extract_batch_text(content: object) -> str:
+def _extract_batch_text(
+    content: object,
+    *,
+    usage: dict[str, int] | None = None,
+) -> str:
     raw = _content_to_text(content)
     last = ""
     for line in raw.splitlines():
@@ -119,9 +154,13 @@ def _extract_batch_text(content: object) -> str:
             raise STTError(
                 f"OpenAI batch request returned HTTP {status_code}: {response.get('body')}"
             )
-        text = _output_text_from_body(response.get("body") or {})
+        body = response.get("body") or {}
+        text = _output_text_from_body(body)
         if text:
             last = text
+            if usage is not None:
+                usage.clear()
+                usage.update(_normalize_usage(body.get("usage")))
     if not last:
         raise STTError("OpenAI batch output contained no transcript text")
     return last
@@ -155,6 +194,7 @@ class OpenAIPipeline:
         self._poll_interval = poll_interval
         self._batch_timeout = batch_timeout
         self._client = None
+        self.last_usage: dict[str, int] = {}
 
     def _get_client(self):
         if self._client is not None:
@@ -178,11 +218,18 @@ class OpenAIPipeline:
         self._client = OpenAI(**kwargs)
         return self._client
 
-    def refine(self, transcript: str, file_name: str) -> str:
+    def refine(
+        self,
+        transcript: str,
+        file_name: str,
+        *,
+        speaker_names: list[str] | None = None,
+    ) -> str:
+        self.last_usage = {}
         transcript = transcript.strip()
         if not transcript:
             return transcript
-        prompt = build_prompt(transcript, file_name)
+        prompt = build_prompt(transcript, file_name, speaker_names=speaker_names)
         if self._use_batch:
             return self._refine_batch(prompt)
         return self._refine_sync(prompt)
@@ -197,6 +244,7 @@ class OpenAIPipeline:
             )
         except Exception as exc:
             raise STTError(f"OpenAI post-processing failed: {exc}") from exc
+        self.last_usage = _normalize_usage(getattr(response, "usage", None))
         return _extract_output_text(response)
 
     def _refine_batch(self, prompt: str) -> str:
@@ -231,7 +279,7 @@ class OpenAIPipeline:
             raise
         except Exception as exc:
             raise STTError(f"OpenAI batch post-processing failed: {exc}") from exc
-        return _extract_batch_text(content)
+        return _extract_batch_text(content, usage=self.last_usage)
 
     def _await_batch(self, client, batch_id: str):
         elapsed = 0.0
@@ -262,6 +310,18 @@ def get_pipeline(config: Config) -> OpenAIPipeline:
     )
 
 
-def refine_transcript(text: str, file_name: str, config: Config) -> str:
+def refine_transcript(
+    text: str,
+    file_name: str,
+    config: Config,
+    *,
+    speaker_names: list[str] | None = None,
+    usage: dict[str, int] | None = None,
+) -> str:
     """Run the configured OpenAI pipeline over a raw transcript."""
-    return get_pipeline(config).refine(text, file_name)
+    pipeline = get_pipeline(config)
+    result = pipeline.refine(text, file_name, speaker_names=speaker_names)
+    if usage is not None:
+        usage.clear()
+        usage.update(pipeline.last_usage)
+    return result

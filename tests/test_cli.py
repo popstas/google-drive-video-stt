@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -7,6 +8,10 @@ import pytest
 
 from src import cli
 from tests.test_main import make_config
+
+
+def _normalized_help(text: str) -> str:
+    return " ".join(text.split())
 
 
 def test_build_parser_requires_subcommand():
@@ -20,6 +25,33 @@ def test_unknown_command_exits():
         cli.main(["bogus"])
 
 
+def test_configure_console_encoding_uses_utf8_for_text_streams():
+    stdout = MagicMock()
+    stderr = MagicMock()
+
+    cli._configure_console_encoding(stdout=stdout, stderr=stderr)
+
+    stdout.reconfigure.assert_called_once_with(encoding="utf-8", errors="replace")
+    stderr.reconfigure.assert_called_once_with(encoding="utf-8", errors="replace")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("100", 100),
+        ("50MB", 50_000_000),
+        ("1.5GiB", 1_610_612_736),
+    ],
+)
+def test_parse_size(raw, expected):
+    assert cli._parse_size(raw) == expected
+
+
+def test_parse_size_rejects_unknown_unit():
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli._parse_size("50xb")
+
+
 def test_auth_dispatch(mocker, tmp_path):
     cfg = make_config(data_dir=tmp_path)
     mocker.patch("src.cli.load_config", return_value=cfg)
@@ -27,7 +59,7 @@ def test_auth_dispatch(mocker, tmp_path):
 
     cli.main(["auth"])
 
-    flow_mock.assert_called_once_with(tmp_path, response_url=None)
+    flow_mock.assert_called_once_with(tmp_path, manual=False, response_url=None)
 
 
 def test_auth_skips_provider_validation(mocker, tmp_path):
@@ -47,7 +79,172 @@ def test_auth_passes_response_url(mocker, tmp_path):
 
     cli.main(["auth", "http://localhost/?code=abc"])
 
-    flow_mock.assert_called_once_with(tmp_path, response_url="http://localhost/?code=abc")
+    flow_mock.assert_called_once_with(
+        tmp_path,
+        manual=False,
+        response_url="http://localhost/?code=abc",
+    )
+
+
+def test_auth_manual_dispatch(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    flow_mock = mocker.patch("src.cli.auth.run_interactive_flow")
+
+    cli.main(["auth", "--manual"])
+
+    flow_mock.assert_called_once_with(tmp_path, manual=True, response_url=None)
+
+
+def test_setup_dispatch(mocker):
+    setup_mock = mocker.patch("src.cli.setup.run_setup")
+
+    cli.main(["setup"])
+
+    setup_mock.assert_called_once_with()
+
+
+def test_plan_json_prints_structured_plan(mocker, capsys):
+    mocker.patch("src.cli.load_config", return_value=make_config())
+    profile = MagicMock()
+    mocker.patch("src.cli.pipeline_profile.load_pipeline_profile", return_value=profile)
+    plan_mock = mocker.patch(
+        "src.cli.pipeline_policy.plan_process",
+        return_value={"status": "ready", "steps": ["download_mp4"]},
+    )
+
+    cli.main(["plan", "--json", '{"action":"process","targets":["file-1"]}'])
+
+    plan_mock.assert_called_once_with(
+        {"action": "process", "targets": ["file-1"]},
+        profile,
+    )
+    assert '"status": "ready"' in capsys.readouterr().out
+
+
+def test_plan_json_file_avoids_shell_quoting(mocker, capsys, tmp_path):
+    intent_path = tmp_path / "intent.json"
+    intent_path.write_text(
+        '{"action":"process","targets":["file-1"]}',
+        encoding="utf-8",
+    )
+    mocker.patch("src.cli.load_config", return_value=make_config())
+    profile = MagicMock()
+    mocker.patch("src.cli.pipeline_profile.load_pipeline_profile", return_value=profile)
+    plan_mock = mocker.patch(
+        "src.cli.pipeline_policy.plan_process",
+        return_value={"status": "ready"},
+    )
+
+    cli.main(["plan", "--json-file", str(intent_path)])
+
+    plan_mock.assert_called_once_with(
+        {"action": "process", "targets": ["file-1"]},
+        profile,
+    )
+    assert '"status": "ready"' in capsys.readouterr().out
+
+
+def test_execute_json_dispatches_to_pipeline_executor(mocker, capsys):
+    cfg = make_config()
+    profile = MagicMock()
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.pipeline_profile.load_pipeline_profile", return_value=profile)
+    execute_mock = mocker.patch(
+        "src.cli.pipeline_executor.execute_process",
+        return_value={"status": "completed", "files": []},
+    )
+
+    cli.main(
+        [
+            "execute",
+            "--json",
+            '{"action":"process","targets":["file-1"]}',
+            "--confirm",
+        ]
+    )
+
+    execute_mock.assert_called_once()
+    assert execute_mock.call_args.args[:3] == (
+        {"action": "process", "targets": ["file-1"]},
+        cfg,
+        profile,
+    )
+    assert execute_mock.call_args.kwargs["confirmed"] is True
+    assert '"status": "completed"' in capsys.readouterr().out
+
+
+def test_doctor_uses_drive_only_config_and_skips_auth_by_default(
+    mocker,
+    capsys,
+    tmp_path,
+):
+    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path, stt_provider="deepgram")
+    (tmp_path / "credentials.json").write_text("{}", encoding="utf-8")
+    load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
+    build_mock = mocker.patch("src.cli.auth.build_drive_service")
+
+    cli.main(["doctor"])
+
+    load_mock.assert_called_once_with(validate_providers=False)
+    build_mock.assert_not_called()
+    out = capsys.readouterr().out
+    assert "credentials.json: OK" in out
+    assert "token.json: missing" in out
+    assert "FOLDER_IDS: 1 configured" in out
+
+
+def test_doctor_drive_check_lists_configured_folders(mocker, capsys, tmp_path):
+    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    service = MagicMock()
+    mocker.patch("src.cli.auth.build_drive_service", return_value=service)
+    list_mock = mocker.patch("src.cli.drive.list_folder_state", return_value=[])
+
+    cli.main(["doctor", "--drive"])
+
+    list_mock.assert_called_once_with(service, "f1")
+    out = capsys.readouterr().out
+    assert "Drive auth: OK" in out
+    assert "Folder f1: OK, 0 mp4 file(s)" in out
+
+
+def test_doctor_reports_pipeline_secret_readiness_without_values(mocker, capsys, tmp_path):
+    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path, stt_provider="deepgram")
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    profile = MagicMock()
+    mocker.patch("src.cli.pipeline_profile.load_pipeline_profile", return_value=profile)
+    mocker.patch(
+        "src.cli.pipeline_profile.required_secret_status",
+        return_value={
+            "DEEPGRAM_API_KEY": {"configured": True},
+            "OPENAI_API_KEY": {"configured": False},
+        },
+    )
+
+    cli.main(["doctor"])
+
+    out = capsys.readouterr().out
+    assert "DEEPGRAM_API_KEY: configured" in out
+    assert "OPENAI_API_KEY: missing" in out
+    assert "dg-secret" not in out
+    assert "sk-secret" not in out
+
+
+def test_doctor_reports_pipeline_setting_readiness(mocker, capsys, tmp_path):
+    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path, stt_provider="asr")
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    profile = MagicMock()
+    mocker.patch("src.cli.pipeline_profile.load_pipeline_profile", return_value=profile)
+    mocker.patch("src.cli.pipeline_profile.required_secret_status", return_value={})
+    mocker.patch(
+        "src.cli.pipeline_profile.required_setting_status",
+        return_value={"ASR_URL": {"configured": False}},
+    )
+
+    cli.main(["doctor"])
+
+    assert "ASR_URL: missing" in capsys.readouterr().out
 
 
 def test_run_dispatch_calls_main(mocker):
@@ -58,29 +255,105 @@ def test_run_dispatch_calls_main(mocker):
     main_mock.assert_called_once_with()
 
 
+def test_top_level_help_recommends_safe_operator_flow(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+
+    out = _normalized_help(capsys.readouterr().out)
+    assert "Prefer setup" in out
+    assert "local setup, then doctor -> list -> process <file-id> --dry-run" in out
+    assert "doctor -> list -> process <file-id> --dry-run -> process <file-id>" in out
+    assert "run and folder-wide processing can spend STT credits across pending files" in out
+
+
+def test_run_help_warns_about_continuous_processing(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--help"])
+
+    out = _normalized_help(capsys.readouterr().out)
+    assert "Run the polling loop continuously." in out
+    assert "can process every pending configured folder and spend STT credits repeatedly" in out
+
+
+def test_run_once_help_warns_and_points_to_dry_run(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["run-once", "--help"])
+
+    out = _normalized_help(capsys.readouterr().out)
+    assert "Run a single polling cycle across the configured folders." in out
+    assert "can spend STT credits across multiple pending files" in out
+    assert "Use --dry-run first" in out
+
+
+def test_process_help_warns_about_folder_scope_and_reprocess(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["process", "--help"])
+
+    out = _normalized_help(capsys.readouterr().out)
+    assert "Process one Drive file or folder on demand." in out
+    assert "use --dry-run first" in out
+    assert "can process many files and spend STT credits" in out
+    assert "--reprocess-txt intentionally reruns STT and overwrites the linked .txt" in out
+
+
 def test_run_once_dispatch(mocker, tmp_path):
     cfg = make_config(data_dir=tmp_path)
-    mocker.patch("src.cli.load_config", return_value=cfg)
+    load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
     service = MagicMock()
     build_mock = mocker.patch("src.cli.auth.build_drive_service", return_value=service)
     run_once_mock = mocker.patch("src.cli.main_module.run_once")
 
     cli.main(["run-once"])
 
+    load_mock.assert_called_once_with()
     build_mock.assert_called_once_with(data_dir=tmp_path)
-    run_once_mock.assert_called_once_with(service, cfg)
+    run_once_mock.assert_called_once_with(
+        service,
+        cfg,
+        dry_run=False,
+        max_size_bytes=None,
+        confirm_large=False,
+    )
+
+
+def test_run_once_dispatches_safety_flags(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    service = MagicMock()
+    mocker.patch("src.cli.auth.build_drive_service", return_value=service)
+    run_once_mock = mocker.patch("src.cli.main_module.run_once")
+
+    cli.main(["run-once", "--dry-run", "--max-size", "50MB", "--confirm-large"])
+
+    run_once_mock.assert_called_once_with(
+        service,
+        cfg,
+        dry_run=True,
+        max_size_bytes=50_000_000,
+        confirm_large=True,
+    )
 
 
 def test_process_dispatch_autodetect(mocker, tmp_path):
     cfg = make_config(data_dir=tmp_path)
-    mocker.patch("src.cli.load_config", return_value=cfg)
+    load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
     service = MagicMock()
     mocker.patch("src.cli.auth.build_drive_service", return_value=service)
     target_mock = mocker.patch("src.cli.main_module.process_target")
 
     cli.main(["process", "file123"])
 
-    target_mock.assert_called_once_with(service, "file123", cfg, is_folder=None)
+    load_mock.assert_called_once_with()
+    target_mock.assert_called_once_with(
+        service,
+        "file123",
+        cfg,
+        is_folder=None,
+        reprocess_txt=False,
+        dry_run=False,
+        max_size_bytes=None,
+        confirm_large=False,
+    )
 
 
 def test_process_dispatch_folder_flag(mocker, tmp_path):
@@ -92,18 +365,100 @@ def test_process_dispatch_folder_flag(mocker, tmp_path):
 
     cli.main(["process", "folder123", "--folder"])
 
-    target_mock.assert_called_once_with(service, "folder123", cfg, is_folder=True)
+    target_mock.assert_called_once_with(
+        service,
+        "folder123",
+        cfg,
+        is_folder=True,
+        reprocess_txt=False,
+        dry_run=False,
+        max_size_bytes=None,
+        confirm_large=False,
+    )
+
+
+def test_process_dispatch_reprocess_txt_flag(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    service = MagicMock()
+    mocker.patch("src.cli.auth.build_drive_service", return_value=service)
+    target_mock = mocker.patch("src.cli.main_module.process_target")
+
+    cli.main(["process", "file123", "--reprocess-txt"])
+
+    target_mock.assert_called_once_with(
+        service,
+        "file123",
+        cfg,
+        is_folder=None,
+        reprocess_txt=True,
+        dry_run=False,
+        max_size_bytes=None,
+        confirm_large=False,
+    )
+
+
+def test_process_dispatches_safety_flags(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    service = MagicMock()
+    mocker.patch("src.cli.auth.build_drive_service", return_value=service)
+    target_mock = mocker.patch("src.cli.main_module.process_target")
+
+    cli.main(["process", "folder123", "--folder", "--dry-run", "--max-size", "1.5GiB"])
+
+    target_mock.assert_called_once_with(
+        service,
+        "folder123",
+        cfg,
+        is_folder=True,
+        reprocess_txt=False,
+        dry_run=True,
+        max_size_bytes=1_610_612_736,
+        confirm_large=False,
+    )
+
+
+def test_speakers_set_writes_drive_app_property(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
+    service = MagicMock()
+    mocker.patch("src.cli.auth.build_drive_service", return_value=service)
+    set_mock = mocker.patch("src.cli.drive.set_file_app_properties")
+
+    cli.main(["speakers", "set", "file123", "Alice", "Bob"])
+
+    load_mock.assert_called_once_with(validate_providers=False)
+    set_mock.assert_called_once_with(
+        service,
+        "file123",
+        {"speaker_names": "[\"Alice\", \"Bob\"]"},
+    )
+
+
+def test_refresh_names_dispatches_to_main(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
+    service = MagicMock()
+    mocker.patch("src.cli.auth.build_drive_service", return_value=service)
+    refresh_mock = mocker.patch("src.cli.main_module.refresh_artifact_names")
+
+    cli.main(["refresh-names", "file123"])
+
+    load_mock.assert_called_once_with(validate_providers=False)
+    refresh_mock.assert_called_once_with(service, "file123")
 
 
 def test_transcribe_prints_to_stdout(mocker, capsys, tmp_path):
     cfg = make_config(data_dir=tmp_path)
-    mocker.patch("src.cli.load_config", return_value=cfg)
+    load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
     transcribe_mock = mocker.patch(
         "src.cli.transcribe_file", return_value="hello world"
     )
 
     cli.main(["transcribe", "audio.mp3"])
 
+    load_mock.assert_called_once_with()
     transcribe_mock.assert_called_once()
     args, _ = transcribe_mock.call_args
     assert args[0] == Path("audio.mp3")
