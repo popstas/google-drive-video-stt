@@ -9,9 +9,10 @@ wizard. Keep popstas' polling daemon (Docker + Telegram). Per recording, produce
 a speaker-named transcript plus a Keypoints document, written either to Google
 Drive or to a local folder.
 
-Full design: `docs/superpowers/specs/2026-06-03-deepgram-only-simplification-design.md`.
-Reference skill files: `docs/reference/relabel_transcript.py`,
-`docs/reference/keypoints-transcription-SKILL.md`.
+Full design: `docs/plans/completed/2026-06-03-deepgram-only-simplification-design.md`
+(moved here on close-out). Reference skill files (`docs/reference/relabel_transcript.py`,
+`docs/reference/keypoints-transcription-SKILL.md`) were scratch copies, now removed
+since `src/relabel_transcript.py` and `skills/gdstt-cli/SKILL.md` are in place.
 
 ## Context
 
@@ -234,10 +235,11 @@ Reference skill files: `docs/reference/relabel_transcript.py`,
 
 ### Task 11: Update documentation and close out
 
-- [ ] Move `docs/superpowers/specs/2026-06-03-deepgram-only-simplification-design.md`
+- [x] Move `docs/superpowers/specs/2026-06-03-deepgram-only-simplification-design.md`
       reference note and this plan into `docs/plans/completed/`.
-- [ ] Update `docs/TODO.md` to drop items now implemented.
-- [ ] Remove `docs/reference/` scratch copies once `src/relabel_transcript.py`
+- [x] Update `docs/TODO.md` to drop items now implemented (skipped - no `docs/TODO.md`
+      exists in the repo; the queued TODOs lived in the now-archived design spec).
+- [x] Remove `docs/reference/` scratch copies once `src/relabel_transcript.py`
       and the rewritten `SKILL.md` are in place.
 
 ## Post-Completion
