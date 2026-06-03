@@ -1300,7 +1300,9 @@ def test_save_and_upload_txt_creates_when_no_txt_id(mocker, tmp_path):
     upload_mock = mocker.patch("src.main.drive.upload")
     update_mock = mocker.patch("src.main.drive.update_file")
 
-    main._save_and_upload_txt(service, "fid", "video.mp4", "hello", "folderA", tmp_path)
+    main._save_and_upload_txt(
+        service, "fid", "video.mp4", "hello", "folderA", tmp_path, make_config(),
+    )
 
     update_mock.assert_not_called()
     upload_mock.assert_called_once()
@@ -1313,7 +1315,8 @@ def test_save_and_upload_txt_overwrites_existing(mocker, tmp_path):
     update_mock = mocker.patch("src.main.drive.update_file")
 
     main._save_and_upload_txt(
-        service, "fid", "video.mp4", "final text", "folderA", tmp_path, txt_id="t1",
+        service, "fid", "video.mp4", "final text", "folderA", tmp_path, make_config(),
+        txt_id="t1",
     )
 
     upload_mock.assert_not_called()
@@ -1321,6 +1324,34 @@ def test_save_and_upload_txt_overwrites_existing(mocker, tmp_path):
     args = update_mock.call_args.args
     assert args[1] == "t1"
     assert args[2].read_text(encoding="utf-8") == "final text"
+
+
+def test_process_item_writes_txt_to_local_folder_when_output_target_folder(
+    mocker,
+    tmp_path,
+):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+    out_dir = tmp_path / "transcripts"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    upload_mock = mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+
+    cfg = make_config(
+        stt_provider="openai",
+        openai_api_key="sk-x",
+        drive_mp3_artifact=False,
+        output_target="folder",
+        output_dir=out_dir,
+    )
+    main.process_item(service, _item("fid", "video.mp4"), "folderX", cfg)
+
+    # No txt upload to Drive; the transcript landed in the local folder instead.
+    upload_mock.assert_not_called()
+    assert (out_dir / "video.txt").read_text(encoding="utf-8") == "Speaker 1: hi"
 
 
 def test_process_item_postprocesses_transcript_before_upload(mocker, tmp_path):

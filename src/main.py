@@ -13,7 +13,7 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 import requests
 
-from src import drive, notify, postprocess
+from src import drive, notify, output, postprocess
 from src.auth import AuthError, build_drive_service
 from src.config import Config, load_config
 from src.extractor import extract_m4a_copy, extract_mp3
@@ -90,39 +90,27 @@ def _save_and_upload_txt(
     text: str,
     folder_id: str,
     tmp_dir: Path,
+    config: Config,
     *,
     txt_id: str | None = None,
 ) -> None:
-    # Drive names may contain "/"; keep the original stem for the uploaded name but
-    # sanitize the local temp filename so it stays filesystem-safe.
     stem = drive.drive_stem(mp4_name)
-    drive_txt_name = stem + ".txt"
-    txt_path = tmp_dir / (drive.safe_local_name(stem) + ".txt")
     app_properties = {
         drive.SOURCE_VIDEO_ID_PROPERTY: source_file_id,
         drive.ARTIFACT_TYPE_PROPERTY: "txt",
     }
-    txt_path.write_text(text, encoding="utf-8")
-    if txt_id:
-        # Overwrite the existing sibling .txt in place rather than creating a duplicate.
-        drive.update_file(
-            service,
-            txt_id,
-            txt_path,
-            mime_type=drive.TXT_MIME,
-            app_properties=app_properties,
-        )
-        logger.info("Overwrote %s (id=%s) in folder %s", drive_txt_name, txt_id, folder_id)
-    else:
-        drive.upload(
-            service,
-            txt_path,
-            folder_id,
-            mime_type=drive.TXT_MIME,
-            name=drive_txt_name,
-            app_properties=app_properties,
-        )
-        logger.info("Uploaded %s to folder %s", drive_txt_name, folder_id)
+    output.write_artifact(
+        service,
+        base_name=stem,
+        suffix=".txt",
+        text=text,
+        folder_id=folder_id,
+        config=config,
+        tmp_dir=tmp_dir,
+        existing_id=txt_id,
+        app_properties=app_properties,
+        mime_type=drive.TXT_MIME,
+    )
 
 
 def _prepare_deepgram_audio(mp4_path: Path, config: Config) -> Path:
@@ -351,7 +339,7 @@ def process_item(
                         speaker_names=speaker_names,
                     )
                 _save_and_upload_txt(
-                    service, file_id, file_name, text, folder_id, tmp_dir,
+                    service, file_id, file_name, text, folder_id, tmp_dir, config,
                     txt_id=item.get("txt_id"),
                 )
                 txt_uploaded = True

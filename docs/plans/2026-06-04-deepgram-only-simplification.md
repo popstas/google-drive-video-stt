@@ -113,18 +113,18 @@ Reference skill files: `docs/reference/relabel_transcript.py`,
 - Create test: `tests/test_output.py`
 - Modify: `src/main.py`
 
-- [ ] Implement `src/output.py` with `write_artifact(service, *, base_name,
+- [x] Implement `src/output.py` with `write_artifact(service, *, base_name,
       suffix, text, folder_id, config, tmp_dir, existing_id=None)` that, for
       `OUTPUT_TARGET=drive`, writes a temp file and uploads/updates the sibling
       via existing `drive.upload` / `drive.update_file`; for `folder`, writes
       `<output_dir>/<base_name><suffix>` and creates `output_dir` if missing.
-- [ ] Refactor `src/main.py:_save_and_upload_txt` to call
+- [x] Refactor `src/main.py:_save_and_upload_txt` to call
       `output.write_artifact(..., suffix=".txt")`; keep the Drive path behavior
       identical when `OUTPUT_TARGET=drive`.
-- [ ] Write `tests/test_output.py` covering both targets (mock `drive`; assert
+- [x] Write `tests/test_output.py` covering both targets (mock `drive`; assert
       folder file path/content and Drive upload call).
-- [ ] Update `tests/test_main.py` for the new save path.
-- [ ] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
+- [x] Update `tests/test_main.py` for the new save path.
+- [x] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
 
 ### Task 5: Adopt relabel_transcript.py and the `relabel` command
 
