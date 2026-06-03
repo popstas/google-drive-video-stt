@@ -1379,6 +1379,130 @@ def test_process_item_postprocesses_transcript_before_upload(mocker, tmp_path):
     assert captured["txt"] == "Alice: hi there\nBob: hello back"
 
 
+def test_process_item_generates_keypoints_when_enabled(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    captured: dict = {}
+
+    def fake_upload(svc, local_path, folder, mime_type, name=None, app_properties=None):
+        captured.setdefault("uploads", []).append(
+            (name, local_path.read_text(encoding="utf-8"), mime_type, app_properties)
+        )
+
+    mocker.patch("src.main.drive.upload", side_effect=fake_upload)
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    kp_mock = mocker.patch(
+        "src.main.openai_pipeline.generate_keypoints",
+        return_value="## Задачи\n\n## Тезисы\n- point\n\n## Открытые вопросы",
+    )
+
+    cfg = make_config(
+        stt_provider="openai",
+        openai_api_key="sk-x",
+        openai_keypoints=True,
+        drive_mp3_artifact=False,
+    )
+    main.process_item(service, _item("fid", "video.mp4"), "folderX", cfg)
+
+    kp_mock.assert_called_once()
+    # The keypoints call runs on the produced transcript.
+    assert kp_mock.call_args.args[0] == "Speaker 1: hi"
+    uploads = {
+        name: (text, mime, props) for name, text, mime, props in captured["uploads"]
+    }
+    assert "video.keypoints.md" in uploads
+    text, mime, props = uploads["video.keypoints.md"]
+    assert "## Задачи" in text
+    assert mime == "text/markdown"
+    assert props == {"source_video_id": "fid", "artifact_type": "keypoints"}
+
+
+def test_process_item_skips_keypoints_when_disabled(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    kp_mock = mocker.patch("src.main.openai_pipeline.generate_keypoints")
+
+    cfg = make_config(
+        stt_provider="openai",
+        openai_api_key="sk-x",
+        openai_keypoints=False,
+        drive_mp3_artifact=False,
+    )
+    main.process_item(service, _item("fid", "video.mp4"), "folderX", cfg)
+
+    kp_mock.assert_not_called()
+
+
+def test_process_item_writes_keypoints_to_local_folder(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+    out_dir = tmp_path / "transcripts"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    upload_mock = mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mocker.patch(
+        "src.main.openai_pipeline.generate_keypoints",
+        return_value="## Задачи\n- [ ] do it",
+    )
+
+    cfg = make_config(
+        stt_provider="openai",
+        openai_api_key="sk-x",
+        openai_keypoints=True,
+        drive_mp3_artifact=False,
+        output_target="folder",
+        output_dir=out_dir,
+    )
+    main.process_item(service, _item("fid", "video.mp4"), "folderX", cfg)
+
+    upload_mock.assert_not_called()
+    assert (out_dir / "video.txt").read_text(encoding="utf-8") == "Speaker 1: hi"
+    assert (out_dir / "video.keypoints.md").read_text(encoding="utf-8") == (
+        "## Задачи\n- [ ] do it"
+    )
+
+
+def test_process_item_does_not_write_empty_keypoints(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    captured: dict = {}
+
+    def fake_upload(svc, local_path, folder, mime_type, name=None, app_properties=None):
+        captured.setdefault("names", []).append(name)
+
+    mocker.patch("src.main.drive.upload", side_effect=fake_upload)
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mocker.patch("src.main.openai_pipeline.generate_keypoints", return_value="   \n  ")
+
+    cfg = make_config(
+        stt_provider="openai",
+        openai_api_key="sk-x",
+        openai_keypoints=True,
+        drive_mp3_artifact=False,
+    )
+    main.process_item(service, _item("fid", "video.mp4"), "folderX", cfg)
+
+    # Only the .txt is written; a blank keypoints doc is not uploaded.
+    assert captured["names"] == ["video.txt"]
+
+
 def test_process_item_uses_speaker_names_from_drive_properties(mocker, tmp_path):
     service = MagicMock()
     mp4_path = tmp_path / "video.mp4"

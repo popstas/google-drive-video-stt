@@ -168,20 +168,20 @@ Reference skill files: `docs/reference/relabel_transcript.py`,
 - Modify: `src/openai_pipeline.py`, `src/main.py`
 - Modify tests: `tests/test_openai_pipeline.py`, `tests/test_main.py`
 
-- [ ] In `src/openai_pipeline.py`, replace the verbatim-refiner `INSTRUCTIONS`
+- [x] In `src/openai_pipeline.py`, replace the verbatim-refiner `INSTRUCTIONS`
       and `refine_transcript` with `generate_keypoints(transcript, file_name, config,
       *, speaker_names=None, usage=None) -> str` that calls the Responses API
       (sync, and batch when `OPENAI_BATCH`) with a Keypoints prompt producing
       `## Задачи` / `## Тезисы` / `## Открытые вопросы` (plain text, no wikilinks).
       Keep the client/proxy/batch plumbing and usage normalization.
-- [ ] In `src/main.py:process_item`, after the deterministic `postprocess`
+- [x] In `src/main.py:process_item`, after the deterministic `postprocess`
       transcript is produced and saved, when `config.openai_keypoints` is set,
       call `generate_keypoints` and write `<base>.keypoints.md` via
       `output.write_artifact(suffix=".keypoints.md")`. Remove the old
       `openai_postprocess` branch.
-- [ ] Update `tests/test_openai_pipeline.py` to mock the keypoints call (sync +
+- [x] Update `tests/test_openai_pipeline.py` to mock the keypoints call (sync +
       batch); update `tests/test_main.py` for the keypoints artifact path.
-- [ ] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
+- [x] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
 
 ### Task 8: Collapse the skill to a single SKILL.md
 

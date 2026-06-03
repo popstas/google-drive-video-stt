@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 MP4_MIME = "video/mp4"
 MP3_MIME = "audio/mpeg"
 TXT_MIME = "text/plain"
+MD_MIME = "text/markdown"
 FOLDER_MIME = "application/vnd.google-apps.folder"
 PAGE_SIZE = 1000
 SOURCE_VIDEO_ID_PROPERTY = "source_video_id"

@@ -11,8 +11,8 @@ from src.openai_pipeline import (
     OpenAIPipeline,
     _content_to_text,
     build_prompt,
+    generate_keypoints,
     get_pipeline,
-    refine_transcript,
 )
 from src.stt.base import STTError
 
@@ -57,9 +57,11 @@ def test_build_prompt_prefers_explicit_speaker_names():
 
 
 def test_build_prompt_without_names():
-    # A date-only name yields no extractable interlocutor names.
+    # A date-only name yields no extractable interlocutor names, so the prompt
+    # falls back to the transcript's own labels.
     prompt = build_prompt("Speaker 1: hi", "2026-05-28.mp4")
-    assert "unknown" in prompt.lower()
+    assert "as they appear in the transcript" in prompt
+    assert "Speaker 1: hi" in prompt
 
 
 # --- construction ----------------------------------------------------------
@@ -76,7 +78,7 @@ def test_empty_transcript_skips_api_call():
         raise AssertionError("client should not be built for empty transcript")
 
     pipeline._get_client = _boom  # type: ignore[assignment]
-    assert pipeline.refine("   \n  ", "file.mp4") == ""
+    assert pipeline.generate_keypoints("   \n  ", "file.mp4") == ""
 
 
 # --- sync path -------------------------------------------------------------
@@ -91,10 +93,14 @@ def test_refine_sync_uses_output_text():
     pipeline = OpenAIPipeline(api_key="sk-test", model="gpt-5.4-mini")
     pipeline._client = SimpleNamespace(responses=SimpleNamespace(create=create))
 
-    out = pipeline.refine("Speaker 1: hi\nSpeaker 2: hello", "Alice and Bob.mp4")
+    out = pipeline.generate_keypoints("Speaker 1: hi\nSpeaker 2: hello", "Alice and Bob.mp4")
     assert out == "Alice: hi\nBob: hello"
     assert captured["model"] == "gpt-5.4-mini"
     assert "Speaker 1: hi" in captured["input"]
+    # The Responses call is driven by the Keypoints instructions, not a refiner.
+    assert "## Задачи" in captured["instructions"]
+    assert "## Тезисы" in captured["instructions"]
+    assert "## Открытые вопросы" in captured["instructions"]
 
 
 def test_refine_sync_captures_usage():
@@ -113,7 +119,7 @@ def test_refine_sync_captures_usage():
         responses=SimpleNamespace(create=lambda **kw: response)
     )
 
-    assert pipeline.refine("Speaker 1: hi", "f.mp4") == "Alice: hi"
+    assert pipeline.generate_keypoints("Speaker 1: hi", "f.mp4") == "Alice: hi"
     assert pipeline.last_usage == {
         "input_tokens": 100,
         "cached_input_tokens": 40,
@@ -131,7 +137,7 @@ def test_refine_sync_without_usage_keeps_usage_empty():
         )
     )
 
-    assert pipeline.refine("Speaker 1: hi", "f.mp4") == "Alice: hi"
+    assert pipeline.generate_keypoints("Speaker 1: hi", "f.mp4") == "Alice: hi"
     assert pipeline.last_usage == {}
 
 
@@ -151,7 +157,7 @@ def test_refine_sync_walks_output_list():
     pipeline._client = SimpleNamespace(
         responses=SimpleNamespace(create=lambda **kw: response)
     )
-    assert pipeline.refine("Speaker 1: hi there", "f.mp4") == "Alice: hi there"
+    assert pipeline.generate_keypoints("Speaker 1: hi there", "f.mp4") == "Alice: hi there"
 
 
 def test_refine_sync_error_is_wrapped():
@@ -160,8 +166,8 @@ def test_refine_sync_error_is_wrapped():
 
     pipeline = OpenAIPipeline(api_key="sk-test")
     pipeline._client = SimpleNamespace(responses=SimpleNamespace(create=boom))
-    with pytest.raises(STTError, match="OpenAI post-processing failed"):
-        pipeline.refine("Speaker 1: hi", "f.mp4")
+    with pytest.raises(STTError, match="OpenAI keypoints generation failed"):
+        pipeline.generate_keypoints("Speaker 1: hi", "f.mp4")
 
 
 def test_refine_sync_unexpected_response_raises():
@@ -170,7 +176,7 @@ def test_refine_sync_unexpected_response_raises():
         responses=SimpleNamespace(create=lambda **kw: SimpleNamespace())
     )
     with pytest.raises(STTError, match="unexpected response"):
-        pipeline.refine("Speaker 1: hi", "f.mp4")
+        pipeline.generate_keypoints("Speaker 1: hi", "f.mp4")
 
 
 # --- batch path ------------------------------------------------------------
@@ -211,7 +217,7 @@ def test_refine_batch_round_trip():
     pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
     pipeline._client = _fake_batch_client(line + "\n", calls=calls)
 
-    out = pipeline.refine("Speaker 1: hi", "Alice and Bob.mp4")
+    out = pipeline.generate_keypoints("Speaker 1: hi", "Alice and Bob.mp4")
     assert out == "Alice: hi"
     assert calls["batch"]["endpoint"] == "/v1/responses"
     assert calls["content"] == "file-out"
@@ -238,7 +244,7 @@ def test_refine_batch_captures_usage():
     pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
     pipeline._client = _fake_batch_client(line + "\n")
 
-    assert pipeline.refine("Speaker 1: hi", "f.mp4") == "Alice: hi"
+    assert pipeline.generate_keypoints("Speaker 1: hi", "f.mp4") == "Alice: hi"
     assert pipeline.last_usage == {
         "input_tokens": 200,
         "cached_input_tokens": 10,
@@ -264,21 +270,21 @@ def test_refine_batch_parses_output_list_body():
     )
     pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
     pipeline._client = _fake_batch_client(line + "\n")
-    assert pipeline.refine("Speaker 2: yo", "f.mp4") == "Bob: yo"
+    assert pipeline.generate_keypoints("Speaker 2: yo", "f.mp4") == "Bob: yo"
 
 
 def test_refine_batch_failed_status_raises():
     pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
     pipeline._client = _fake_batch_client("", status="failed")
     with pytest.raises(STTError, match="status 'failed'"):
-        pipeline.refine("Speaker 1: hi", "f.mp4")
+        pipeline.generate_keypoints("Speaker 1: hi", "f.mp4")
 
 
 def test_refine_batch_empty_output_raises():
     pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
     pipeline._client = _fake_batch_client("\n")
-    with pytest.raises(STTError, match="no transcript text"):
-        pipeline.refine("Speaker 1: hi", "f.mp4")
+    with pytest.raises(STTError, match="no keypoints text"):
+        pipeline.generate_keypoints("Speaker 1: hi", "f.mp4")
 
 
 def test_refine_batch_non_200_status_raises():
@@ -291,7 +297,7 @@ def test_refine_batch_non_200_status_raises():
     pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
     pipeline._client = _fake_batch_client(line + "\n")
     with pytest.raises(STTError, match="HTTP 500"):
-        pipeline.refine("Speaker 1: hi", "f.mp4")
+        pipeline.generate_keypoints("Speaker 1: hi", "f.mp4")
 
 
 def test_refine_batch_line_error_raises():
@@ -299,14 +305,14 @@ def test_refine_batch_line_error_raises():
     pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
     pipeline._client = _fake_batch_client(line + "\n")
     with pytest.raises(STTError, match="batch request failed"):
-        pipeline.refine("Speaker 1: hi", "f.mp4")
+        pipeline.generate_keypoints("Speaker 1: hi", "f.mp4")
 
 
 def test_refine_batch_malformed_json_raises():
     pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
     pipeline._client = _fake_batch_client("not json\n")
     with pytest.raises(STTError, match="not valid JSON"):
-        pipeline.refine("Speaker 1: hi", "f.mp4")
+        pipeline.generate_keypoints("Speaker 1: hi", "f.mp4")
 
 
 def _fake_batch_client_statuses(statuses, output_jsonl, *, calls=None):
@@ -345,7 +351,7 @@ def test_refine_batch_polls_until_completed(monkeypatch):
         ["in_progress", "in_progress", "completed"], line + "\n", calls=calls
     )
 
-    assert pipeline.refine("Speaker 1: hi", "f.mp4") == "Alice: hi"
+    assert pipeline.generate_keypoints("Speaker 1: hi", "f.mp4") == "Alice: hi"
     assert len(calls["retrieve"]) == 3
 
 
@@ -356,7 +362,7 @@ def test_refine_batch_times_out(monkeypatch):
     )
     pipeline._client = _fake_batch_client_statuses(["in_progress"], "")
     with pytest.raises(STTError, match="timed out"):
-        pipeline.refine("Speaker 1: hi", "f.mp4")
+        pipeline.generate_keypoints("Speaker 1: hi", "f.mp4")
 
 
 # --- files.content shape normalization -------------------------------------
@@ -392,7 +398,7 @@ def test_refine_transcript_uses_configured_pipeline(monkeypatch):
         )
 
     monkeypatch.setattr(OpenAIPipeline, "_get_client", fake_get_client)
-    out = refine_transcript("Speaker 1: hi", "Alice and Bob.mp4", _config())
+    out = generate_keypoints("Speaker 1: hi", "Alice and Bob.mp4", _config())
     assert out == "Alice: hi"
 
 
@@ -418,7 +424,7 @@ def test_refine_transcript_copies_usage_to_optional_collector(monkeypatch):
     monkeypatch.setattr(OpenAIPipeline, "_get_client", fake_get_client)
 
     assert (
-        refine_transcript(
+        generate_keypoints(
             "Speaker 1: hi",
             "Alice and Bob.mp4",
             _config(),
@@ -448,7 +454,7 @@ def test_refine_transcript_clears_reused_collector_when_usage_is_absent(monkeypa
     monkeypatch.setattr(OpenAIPipeline, "_get_client", fake_get_client)
 
     assert (
-        refine_transcript(
+        generate_keypoints(
             "Speaker 1: hi",
             "Alice and Bob.mp4",
             _config(),

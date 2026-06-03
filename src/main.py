@@ -13,7 +13,7 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 import requests
 
-from src import drive, notify, output, postprocess
+from src import drive, notify, openai_pipeline, output, postprocess
 from src.auth import AuthError, build_drive_service
 from src.config import Config, load_config
 from src.extractor import extract_m4a_copy, extract_mp3
@@ -110,6 +110,36 @@ def _save_and_upload_txt(
         existing_id=txt_id,
         app_properties=app_properties,
         mime_type=drive.TXT_MIME,
+    )
+
+
+def _save_and_upload_keypoints(
+    service: Any,
+    source_file_id: str,
+    mp4_name: str,
+    text: str,
+    folder_id: str,
+    tmp_dir: Path,
+    config: Config,
+    *,
+    keypoints_id: str | None = None,
+) -> None:
+    stem = drive.drive_stem(mp4_name)
+    app_properties = {
+        drive.SOURCE_VIDEO_ID_PROPERTY: source_file_id,
+        drive.ARTIFACT_TYPE_PROPERTY: "keypoints",
+    }
+    output.write_artifact(
+        service,
+        base_name=stem,
+        suffix=".keypoints.md",
+        text=text,
+        folder_id=folder_id,
+        config=config,
+        tmp_dir=tmp_dir,
+        existing_id=keypoints_id,
+        app_properties=app_properties,
+        mime_type=drive.MD_MIME,
     )
 
 
@@ -343,6 +373,23 @@ def process_item(
                     txt_id=item.get("txt_id"),
                 )
                 txt_uploaded = True
+
+                if config.openai_keypoints:
+                    keypoints_usage: dict[str, int] = {}
+                    keypoints = openai_pipeline.generate_keypoints(
+                        text,
+                        file_name,
+                        config,
+                        speaker_names=speaker_names,
+                        usage=keypoints_usage,
+                    )
+                    if keypoints.strip():
+                        if keypoints_usage:
+                            usage["openai_keypoints"] = keypoints_usage
+                        _save_and_upload_keypoints(
+                            service, file_id, file_name, keypoints, folder_id,
+                            tmp_dir, config, keypoints_id=item.get("keypoints_id"),
+                        )
     except Exception as exc:
         error = exc
         setattr(exc, "gdstt_retry_count", retry_state.retry_count)

@@ -11,22 +11,30 @@ from src.stt.base import STTError
 
 logger = logging.getLogger(__name__)
 
-# LLM post-processing pipeline modeled on the `keypoints-transcription` skill: take a
-# raw (usually diarized) STT transcript and return a corrected transcript with
-# `Speaker N` labels mapped to the real interlocutor names and spurious extra speakers
-# merged into the real ones, keeping every utterance verbatim.
+# LLM keypoints pipeline modeled on the `keypoints-transcription` skill: take a
+# speaker-named transcript of a recorded conversation and produce a concise
+# Keypoints summary (Задачи / Тезисы / Открытые вопросы) grounded strictly in the
+# transcript, in plain Markdown without vault-style wikilinks.
 INSTRUCTIONS = (
-    "You are a transcript editor. You receive a raw speech-to-text transcript of a "
-    "recorded conversation, usually diarized with `Speaker N:` labels.\n"
-    "Your job:\n"
-    "1. Map each `Speaker N` label to the real interlocutor name when the name is "
-    "known (provided below) or unambiguous from context.\n"
-    "2. Diarization often emits more labels than there are people. Merge a spurious "
-    "extra speaker into the real speaker whose turns it continues.\n"
-    "3. Keep the wording of every utterance verbatim - do not paraphrase, summarize, "
-    "translate, or drop content. Only relabel speakers and tidy whitespace.\n"
-    "4. Preserve any `[HH:MM:SS]` timestamps that prefix the lines.\n"
-    "Return only the corrected transcript, with no preamble or explanation."
+    "You are a meeting analyst. You receive a speaker-named transcript of a "
+    "recorded conversation and produce a concise Keypoints summary in Markdown, "
+    "written in the transcript's own language.\n"
+    "Return ONLY the Keypoints document with exactly these three sections, in this "
+    "order and with these exact headings:\n"
+    "## Задачи\n"
+    "Group action items under a `### <Ответственный>` subheading per assignee, "
+    "using the speaker's real name from the transcript; use `### Без "
+    "ответственного` when the owner is unclear. List each task as `- [ ] <task>` "
+    "and do not repeat the assignee name inside the task line.\n"
+    "## Тезисы\n"
+    "Key points and decisions, each as a `- ` bullet.\n"
+    "## Открытые вопросы\n"
+    "Unresolved questions, each as a `- ` bullet.\n"
+    "Rules: base every item strictly on the transcript - never invent facts, "
+    "tasks, or decisions. Omit a section's bullets only when the transcript truly "
+    "has none, but always keep the three headings. Plain text only: no wikilinks "
+    "(`[[...]]`), no em dashes (use `-`), no guillemets (use straight quotes). No "
+    "preamble, no explanation, no marketing."
 )
 
 DEFAULT_MODEL = "gpt-5.4-mini"
@@ -46,20 +54,17 @@ def build_prompt(
     *,
     speaker_names: list[str] | None = None,
 ) -> str:
-    """Compose the user prompt: name hints from the file name + the raw transcript."""
+    """Compose the user prompt: participant hints + the speaker-named transcript."""
     names = speaker_names if speaker_names is not None else extract_interlocutor_names(file_name)
     if names:
         hint = (
-            "Known interlocutor names (in no particular order): "
+            "Known participants (in no particular order): "
             + ", ".join(names)
             + "."
         )
     else:
-        hint = (
-            "The interlocutor names are unknown; keep the `Speaker N` labels if you "
-            "cannot confidently infer them."
-        )
-    return f"{hint}\n\nRaw transcript:\n{transcript}"
+        hint = "Use the participant names exactly as they appear in the transcript."
+    return f"{hint}\n\nTranscript:\n{transcript}"
 
 
 def _extract_output_text(response: object) -> str:
@@ -143,9 +148,9 @@ def _extract_batch_text(
             record = json.loads(line)
         except json.JSONDecodeError as exc:
             raise STTError(f"OpenAI batch output was not valid JSON: {exc}") from exc
-        # Surface a failed request rather than silently uploading an empty/wrong
-        # transcript over the sibling .txt: a per-line error or non-2xx status means
-        # this request did not produce a usable result.
+        # Surface a failed request rather than silently writing an empty/wrong
+        # keypoints document: a per-line error or non-2xx status means this request
+        # did not produce a usable result.
         if record.get("error"):
             raise STTError(f"OpenAI batch request failed: {record['error']}")
         response = record.get("response") or {}
@@ -162,12 +167,12 @@ def _extract_batch_text(
                 usage.clear()
                 usage.update(_normalize_usage(body.get("usage")))
     if not last:
-        raise STTError("OpenAI batch output contained no transcript text")
+        raise STTError("OpenAI batch output contained no keypoints text")
     return last
 
 
 class OpenAIPipeline:
-    """LLM post-processing over a transcript via the OpenAI Responses API.
+    """Keypoints generation over a transcript via the OpenAI Responses API.
 
     Supports a synchronous path (`responses.create`) and an optional batch path
     (`files.create` + `batches.create`) that trades latency for ~50% lower cost.
@@ -218,7 +223,7 @@ class OpenAIPipeline:
         self._client = OpenAI(**kwargs)
         return self._client
 
-    def refine(
+    def generate_keypoints(
         self,
         transcript: str,
         file_name: str,
@@ -231,10 +236,10 @@ class OpenAIPipeline:
             return transcript
         prompt = build_prompt(transcript, file_name, speaker_names=speaker_names)
         if self._use_batch:
-            return self._refine_batch(prompt)
-        return self._refine_sync(prompt)
+            return self._generate_batch(prompt)
+        return self._generate_sync(prompt)
 
-    def _refine_sync(self, prompt: str) -> str:
+    def _generate_sync(self, prompt: str) -> str:
         client = self._get_client()
         try:
             response = client.responses.create(
@@ -243,14 +248,14 @@ class OpenAIPipeline:
                 input=prompt,
             )
         except Exception as exc:
-            raise STTError(f"OpenAI post-processing failed: {exc}") from exc
+            raise STTError(f"OpenAI keypoints generation failed: {exc}") from exc
         self.last_usage = _normalize_usage(getattr(response, "usage", None))
         return _extract_output_text(response)
 
-    def _refine_batch(self, prompt: str) -> str:
+    def _generate_batch(self, prompt: str) -> str:
         client = self._get_client()
         request = {
-            "custom_id": "transcript-0",
+            "custom_id": "keypoints-0",
             "method": "POST",
             "url": RESPONSES_ENDPOINT,
             "body": {
@@ -278,7 +283,7 @@ class OpenAIPipeline:
         except STTError:
             raise
         except Exception as exc:
-            raise STTError(f"OpenAI batch post-processing failed: {exc}") from exc
+            raise STTError(f"OpenAI batch keypoints generation failed: {exc}") from exc
         return _extract_batch_text(content, usage=self.last_usage)
 
     def _await_batch(self, client, batch_id: str):
@@ -310,7 +315,7 @@ def get_pipeline(config: Config) -> OpenAIPipeline:
     )
 
 
-def refine_transcript(
+def generate_keypoints(
     text: str,
     file_name: str,
     config: Config,
@@ -318,9 +323,9 @@ def refine_transcript(
     speaker_names: list[str] | None = None,
     usage: dict[str, int] | None = None,
 ) -> str:
-    """Run the configured OpenAI pipeline over a raw transcript."""
+    """Generate a Keypoints summary from a transcript via the configured pipeline."""
     pipeline = get_pipeline(config)
-    result = pipeline.refine(text, file_name, speaker_names=speaker_names)
+    result = pipeline.generate_keypoints(text, file_name, speaker_names=speaker_names)
     if usage is not None:
         usage.clear()
         usage.update(pipeline.last_usage)
