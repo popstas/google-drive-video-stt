@@ -126,21 +126,29 @@ def list_unprocessed_mp4(service: Any, folder_id: str) -> list[dict]:
 
 
 def list_folder_state(service: Any, folder_id: str) -> list[dict]:
-    """Return mp4 files with sibling flags: {file, has_mp3, has_txt, mp3_id}."""
+    """Return mp4 files with sibling flags: {file, has_mp3, has_txt, mp3_id, txt_id, keypoints_id}."""
     mp4_files = _list_files_by_mime(service, folder_id, MP4_MIME)
     mp3_files = _list_files_by_mime(service, folder_id, MP3_MIME)
     txt_files = _list_files_by_mime(service, folder_id, TXT_MIME)
+    md_files = _list_files_by_mime(service, folder_id, MD_MIME)
 
     mp3_by_stem = {drive_stem(f["name"]): f for f in mp3_files}
     txt_by_stem = {drive_stem(f["name"]): f for f in txt_files}
+    # Keypoints are uploaded as ``<video-stem>.keypoints.md``; strip the
+    # ``.keypoints`` suffix so they match back to the source video stem.
+    keypoints_by_stem = {
+        _strip_keypoints_suffix(drive_stem(f["name"])): f for f in md_files
+    }
     mp3_by_source_id = _files_by_source_video_id(mp3_files)
     txt_by_source_id = _files_by_source_video_id(txt_files)
+    keypoints_by_source_id = _files_by_source_video_id(md_files)
 
     items: list[dict] = []
     for mp4 in mp4_files:
         stem = drive_stem(mp4["name"])
         mp3 = mp3_by_source_id.get(mp4["id"]) or mp3_by_stem.get(stem)
         txt = txt_by_source_id.get(mp4["id"]) or txt_by_stem.get(stem)
+        keypoints = keypoints_by_source_id.get(mp4["id"]) or keypoints_by_stem.get(stem)
         items.append({
             "file": mp4,
             "has_mp3": mp3 is not None,
@@ -149,8 +157,13 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
             "mp3_name": mp3["name"] if mp3 else None,
             "mp3_size": mp3.get("size") if mp3 else None,
             "txt_id": txt["id"] if txt else None,
+            "keypoints_id": keypoints["id"] if keypoints else None,
         })
     return items
+
+
+def _strip_keypoints_suffix(stem: str) -> str:
+    return stem[: -len(".keypoints")] if stem.endswith(".keypoints") else stem
 
 
 def _files_by_source_video_id(files: list[dict]) -> dict[str, dict]:

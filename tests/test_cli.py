@@ -333,6 +333,8 @@ def test_latest_dispatch_uses_first_folder(mocker, tmp_path):
         cfg,
         is_folder=False,
         dry_run=False,
+        max_size_bytes=None,
+        confirm_large=False,
     )
 
 
@@ -354,6 +356,30 @@ def test_latest_dispatch_honors_folder_and_dry_run(mocker, tmp_path):
         cfg,
         is_folder=False,
         dry_run=True,
+        max_size_bytes=None,
+        confirm_large=False,
+    )
+
+
+def test_latest_dispatch_forwards_size_guards(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path, folder_ids=["folderA"])
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    service = MagicMock()
+    mocker.patch("src.cli.auth.build_drive_service", return_value=service)
+    newest = {"id": "v1", "name": "x.mp4"}
+    mocker.patch("src.cli.drive.find_newest_mp4", return_value=newest)
+    target_mock = mocker.patch("src.cli.main_module.process_target")
+
+    cli.main(["latest", "--max-size", "1GB", "--confirm-large"])
+
+    target_mock.assert_called_once_with(
+        service,
+        "v1",
+        cfg,
+        is_folder=False,
+        dry_run=False,
+        max_size_bytes=1_000_000_000,
+        confirm_large=True,
     )
 
 

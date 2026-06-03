@@ -51,7 +51,7 @@ def make_config(
 
 def _item(
     file_id="fid", name="video.mp4", *, has_mp3=False, has_txt=False,
-    mp3_id=None, mp3_name=None, txt_id=None, size=None,
+    mp3_id=None, mp3_name=None, txt_id=None, keypoints_id=None, size=None,
 ):
     file_info = {"id": file_id, "name": name}
     if size is not None:
@@ -63,6 +63,7 @@ def _item(
         "mp3_id": mp3_id,
         "mp3_name": mp3_name,
         "txt_id": txt_id,
+        "keypoints_id": keypoints_id,
     }
 
 
@@ -1087,7 +1088,7 @@ def test_run_once_logs_folder_and_cycle_summary(mocker, caplog):
     assert "Folder f1 summary [total=2, pending=1, skipped_size=0, dry_run=False]" in caplog.text
     assert (
         "Cycle summary [provider=openai, outcome=success, folders=1, pending=1, "
-        "processed=1, failed=0, retry_total=0, gcs_blob_orphans=0, skipped_size=0, "
+        "processed=1, failed=0, retry_total=0, skipped_size=0, "
         "folder_errors=0, dry_run=False, duration_s=1.250]"
     ) in caplog.text
 
@@ -1419,6 +1420,40 @@ def test_process_item_generates_keypoints_when_enabled(mocker, tmp_path):
     assert "## Задачи" in text
     assert mime == "text/markdown"
     assert props == {"source_video_id": "fid", "artifact_type": "keypoints"}
+
+
+def test_process_item_overwrites_existing_keypoints_on_reprocess(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    upload_mock = mocker.patch("src.main.drive.upload")
+    update_mock = mocker.patch("src.main.drive.update_file")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mocker.patch(
+        "src.main.openai_pipeline.generate_keypoints",
+        return_value="## Задачи\n- [ ] do it",
+    )
+
+    cfg = make_config(
+        stt_provider="openai",
+        openai_api_key="sk-x",
+        openai_keypoints=True,
+        drive_mp3_artifact=False,
+    )
+    item = _item(
+        "fid", "video.mp4", has_txt=True, txt_id="t1", keypoints_id="k1"
+    )
+    main.process_item(service, item, "folderX", cfg, reprocess_txt=True)
+
+    # Both the .txt and the .keypoints.md siblings are overwritten in place,
+    # not re-uploaded as duplicates.
+    update_ids = [call.args[1] for call in update_mock.call_args_list]
+    assert "t1" in update_ids
+    assert "k1" in update_ids
+    upload_mock.assert_not_called()
 
 
 def test_process_item_skips_keypoints_when_disabled(mocker, tmp_path):

@@ -126,6 +126,8 @@ def cmd_latest(args: argparse.Namespace) -> None:
         config,
         is_folder=False,
         dry_run=args.dry_run,
+        max_size_bytes=args.max_size,
+        confirm_large=args.confirm_large,
     )
 
 
@@ -338,6 +340,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Show which file would be processed without downloading or transcribing",
+    )
+    p_latest.add_argument(
+        "--max-size",
+        type=_parse_size,
+        default=None,
+        metavar="SIZE",
+        help="Skip the newest mp4 if it is larger than SIZE unless --confirm-large is passed",
+    )
+    p_latest.add_argument(
+        "--confirm-large",
+        action="store_true",
+        help="Allow processing the newest mp4 even if it exceeds --max-size",
     )
     p_latest.set_defaults(func=cmd_latest)
 

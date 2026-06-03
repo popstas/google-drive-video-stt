@@ -603,7 +603,6 @@ def run_once(
     cycle_processed = 0
     cycle_failed = 0
     cycle_retry_total = 0
-    cycle_gcs_blob_orphans = 0
     cycle_skipped_size = 0
     cycle_folder_errors = 0
 
@@ -672,7 +671,7 @@ def run_once(
 
     logger.info(
         "Cycle summary [provider=%s, outcome=%s, folders=%d, pending=%d, processed=%d, failed=%d, "
-        "retry_total=%d, gcs_blob_orphans=%d, skipped_size=%d, folder_errors=%d, dry_run=%s, duration_s=%.3f]",
+        "retry_total=%d, skipped_size=%d, folder_errors=%d, dry_run=%s, duration_s=%.3f]",
         config.stt_provider or "artifact-only",
         _cycle_outcome(
             dry_run=dry_run,
@@ -684,7 +683,6 @@ def run_once(
         cycle_processed,
         cycle_failed,
         cycle_retry_total,
-        cycle_gcs_blob_orphans,
         cycle_skipped_size,
         cycle_folder_errors,
         dry_run,

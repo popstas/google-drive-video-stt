@@ -22,6 +22,8 @@ def _make_list_service(pages_by_query: dict[str, list[dict]]) -> MagicMock:
             request.execute.return_value = {"files": pages_by_query.get("mp3", [])}
         elif "text/plain" in q:
             request.execute.return_value = {"files": pages_by_query.get("txt", [])}
+        elif "text/markdown" in q:
+            request.execute.return_value = {"files": pages_by_query.get("md", [])}
         else:
             request.execute.return_value = {"files": []}
         return request
@@ -352,6 +354,36 @@ def test_list_folder_state_includes_txt_id():
     by_id = {it["file"]["id"]: it for it in items}
     assert by_id["v1"]["txt_id"] == "t1"
     assert by_id["v2"]["txt_id"] is None
+
+
+def test_list_folder_state_includes_keypoints_id_by_stem():
+    mp4 = [
+        {"id": "v1", "name": "a.mp4", "mimeType": "video/mp4"},
+        {"id": "v2", "name": "b.mp4", "mimeType": "video/mp4"},
+    ]
+    md = [{"id": "k1", "name": "a.keypoints.md", "mimeType": "text/markdown"}]
+    service = _make_list_service({"mp4": mp4, "mp3": [], "txt": [], "md": md})
+
+    items = drive.list_folder_state(service, "folder1")
+
+    by_id = {it["file"]["id"]: it for it in items}
+    assert by_id["v1"]["keypoints_id"] == "k1"
+    assert by_id["v2"]["keypoints_id"] is None
+
+
+def test_list_folder_state_matches_keypoints_by_source_video_id_after_rename():
+    mp4 = [{"id": "v1", "name": "new name.mp4", "mimeType": "video/mp4"}]
+    md = [{
+        "id": "k1",
+        "name": "old name.keypoints.md",
+        "mimeType": "text/markdown",
+        "appProperties": {"source_video_id": "v1", "artifact_type": "keypoints"},
+    }]
+    service = _make_list_service({"mp4": mp4, "mp3": [], "txt": [], "md": md})
+
+    items = drive.list_folder_state(service, "folder1")
+
+    assert items[0]["keypoints_id"] == "k1"
 
 
 def test_get_file_metadata_requests_expected_fields():

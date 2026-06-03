@@ -152,3 +152,76 @@ def test_extract_mp3_output_missing_after_success(tmp_path, mocker):
 
     with pytest.raises(extractor.FFmpegError, match="output not found"):
         extractor.extract_mp3(mp4)
+
+
+def test_extract_m4a_copy_missing_input(tmp_path):
+    missing = tmp_path / "nope.mp4"
+
+    with pytest.raises(FileNotFoundError):
+        extractor.extract_m4a_copy(missing)
+
+
+def test_extract_m4a_copy_missing_ffmpeg_binary(tmp_path, mocker):
+    mp4 = tmp_path / "v.mp4"
+    mp4.write_bytes(b"x")
+
+    mocker.patch("src.extractor.shutil.which", return_value=None)
+
+    with pytest.raises(extractor.FFmpegError, match="ffmpeg"):
+        extractor.extract_m4a_copy(mp4)
+
+
+def test_extract_m4a_copy_ffmpeg_nonzero_exit(tmp_path, mocker):
+    mp4 = tmp_path / "v.mp4"
+    mp4.write_bytes(b"x")
+
+    mocker.patch("src.extractor.shutil.which", return_value="/usr/bin/ffmpeg")
+    mocker.patch(
+        "src.extractor.subprocess.run",
+        return_value=subprocess.CompletedProcess(["ffmpeg"], 1, "", "Invalid data"),
+    )
+
+    with pytest.raises(extractor.FFmpegError, match="exit code 1"):
+        extractor.extract_m4a_copy(mp4)
+
+
+def test_extract_m4a_copy_subprocess_filenotfound_raises_ffmpeg_error(tmp_path, mocker):
+    mp4 = tmp_path / "v.mp4"
+    mp4.write_bytes(b"x")
+
+    mocker.patch("src.extractor.shutil.which", return_value="/usr/bin/ffmpeg")
+    mocker.patch(
+        "src.extractor.subprocess.run",
+        side_effect=FileNotFoundError("no ffmpeg"),
+    )
+
+    with pytest.raises(extractor.FFmpegError, match="ffmpeg binary not found"):
+        extractor.extract_m4a_copy(mp4)
+
+
+def test_extract_m4a_copy_subprocess_timeout_raises_ffmpeg_error(tmp_path, mocker):
+    mp4 = tmp_path / "v.mp4"
+    mp4.write_bytes(b"x")
+
+    mocker.patch("src.extractor.shutil.which", return_value="/usr/bin/ffmpeg")
+    mocker.patch(
+        "src.extractor.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd=["ffmpeg"], timeout=1),
+    )
+
+    with pytest.raises(extractor.FFmpegError, match="timed out"):
+        extractor.extract_m4a_copy(mp4)
+
+
+def test_extract_m4a_copy_output_missing_after_success(tmp_path, mocker):
+    mp4 = tmp_path / "v.mp4"
+    mp4.write_bytes(b"x")
+
+    mocker.patch("src.extractor.shutil.which", return_value="/usr/bin/ffmpeg")
+    mocker.patch(
+        "src.extractor.subprocess.run",
+        return_value=subprocess.CompletedProcess(["ffmpeg"], 0, "", ""),
+    )
+
+    with pytest.raises(extractor.FFmpegError, match="output not found"):
+        extractor.extract_m4a_copy(mp4)

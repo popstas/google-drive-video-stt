@@ -329,7 +329,7 @@ that single-file path looks correct.
 ```bash
 gdstt auth [response_url]   # one-time interactive OAuth → data/token.json
 gdstt doctor [--drive]      # check Drive/OAuth configuration without changing it
-gdstt latest [--folder ID] [--dry-run]   # process the newest mp4 in a folder
+gdstt latest [--folder ID] [--dry-run] [--max-size SIZE] [--confirm-large]   # process the newest mp4 in a folder
 gdstt run                   # continuous polling; can spend STT credits across all pending configured folders
 gdstt run-once [--dry-run] [--max-size SIZE] [--confirm-large]   # single cycle; use --dry-run first
 gdstt process <id> [--folder] [--reprocess-txt] [--dry-run] [--max-size SIZE] [--confirm-large]   # single target or folder; use --dry-run first
@@ -481,8 +481,9 @@ src/
   openai_pipeline.py OpenAI Responses keypoints generation (sync + batch)
   relabel_transcript.py Deterministic speaker relabeling from a MAP.json
   stt/
+    __init__.py        get_provider() dispatch (Deepgram-only)
     base.py            STTProvider ABC (transcribe_full hook)
-    transcribe.py      Deepgram full-file transcription dispatch
+    transcribe.py      Full-file transcription call + cost logging
     deepgram_provider.py Deepgram Nova-3 + diarization
     deepgram_usage.py  Best-effort Deepgram usage/cost lookup
 tests/           Unit tests (mock external services)
