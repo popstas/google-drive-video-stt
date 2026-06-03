@@ -359,6 +359,53 @@ def test_transcribe_writes_to_output_file(mocker, tmp_path):
     assert out_path.read_text(encoding="utf-8") == "the transcript"
 
 
+def test_relabel_dispatch_reads_map_and_writes_output(mocker, tmp_path):
+    src_path = tmp_path / "src.md"
+    src_path.write_text("[00:00:01] Speaker 1: hi\n", encoding="utf-8")
+    map_path = tmp_path / "map.json"
+    map_path.write_text('{"default": {"Speaker 1": "Alice"}}', encoding="utf-8")
+    out_path = tmp_path / "out.md"
+    relabel_mock = mocker.patch(
+        "src.cli.relabel_transcript.relabel", return_value="rendered"
+    )
+
+    cli.main(["relabel", "--in", str(src_path), "--out", str(out_path), "--map", str(map_path)])
+
+    relabel_mock.assert_called_once_with(
+        "[00:00:01] Speaker 1: hi\n",
+        {"default": {"Speaker 1": "Alice"}},
+        include_header=True,
+    )
+    assert out_path.read_text(encoding="utf-8") == "rendered"
+
+
+def test_relabel_dispatch_no_header_flag(mocker, tmp_path):
+    src_path = tmp_path / "src.md"
+    src_path.write_text("[00:00:01] Speaker 1: hi\n", encoding="utf-8")
+    map_path = tmp_path / "map.json"
+    map_path.write_text('{"default": {"Speaker 1": "Alice"}}', encoding="utf-8")
+    out_path = tmp_path / "out.md"
+    relabel_mock = mocker.patch(
+        "src.cli.relabel_transcript.relabel", return_value="rendered"
+    )
+
+    cli.main(
+        [
+            "relabel",
+            "--in",
+            str(src_path),
+            "--out",
+            str(out_path),
+            "--map",
+            str(map_path),
+            "--no-header",
+        ]
+    )
+
+    _, kwargs = relabel_mock.call_args
+    assert kwargs["include_header"] is False
+
+
 def test_list_dispatch_uses_configured_folders(mocker, capsys, tmp_path):
     cfg = make_config(folder_ids=["f1"], data_dir=tmp_path)
     mocker.patch("src.cli.load_config", return_value=cfg)

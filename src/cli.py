@@ -10,6 +10,7 @@ from typing import TextIO
 
 from src import auth, drive
 from src import main as main_module
+from src import relabel_transcript
 from src.config import load_config
 from src.stt.transcribe import transcribe_file
 
@@ -150,6 +151,16 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
         logger.info("Transcript written to %s", out_path)
     else:
         print(text)
+
+
+def cmd_relabel(args: argparse.Namespace) -> None:
+    map_cfg = json.loads(Path(args.mapfile).read_text(encoding="utf-8"))
+    src_text = Path(args.src).read_text(encoding="utf-8")
+    result = relabel_transcript.relabel(
+        src_text, map_cfg, include_header=not args.no_header
+    )
+    Path(args.out).write_text(result, encoding="utf-8")
+    logger.info("Relabeled transcript written to %s", args.out)
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -320,6 +331,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write the transcript to this path instead of stdout",
     )
     p_transcribe.set_defaults(func=cmd_transcribe)
+
+    p_relabel = sub.add_parser(
+        "relabel",
+        help="Rename transcript speakers deterministically using a MAP.json",
+    )
+    p_relabel.add_argument(
+        "--in", dest="src", required=True, help="Path to the source transcript"
+    )
+    p_relabel.add_argument(
+        "--out", dest="out", required=True, help="Path to write the relabeled transcript"
+    )
+    p_relabel.add_argument(
+        "--map", dest="mapfile", required=True, help="Path to the MAP.json mapping file"
+    )
+    p_relabel.add_argument(
+        "--no-header",
+        action="store_true",
+        help="Skip the MAP.json header even when one is present",
+    )
+    p_relabel.set_defaults(func=cmd_relabel)
 
     p_list = sub.add_parser(
         "list",

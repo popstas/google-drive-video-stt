@@ -127,6 +127,12 @@ Rename linked generated artifacts after an MP4 rename without running STT.
 
 Transcribe a local audio file without touching Drive.
 
+### `relabel --in SRC --out OUT --map MAP.json [--no-header]`
+
+Deterministically rename transcript speakers from a MAP.json (default label ->
+name, with verbatim-text exceptions) and merge consecutive same-speaker turns.
+Utterance text is preserved byte-for-byte.
+
 ## Safety Rules
 
 - Ask before commands that mutate Google Cloud, Drive, local auth files, or

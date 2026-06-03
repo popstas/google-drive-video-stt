@@ -133,17 +133,17 @@ Reference skill files: `docs/reference/relabel_transcript.py`,
 - Create test: `tests/test_relabel_transcript.py`
 - Modify: `src/cli.py`
 
-- [ ] Copy the reference script into `src/relabel_transcript.py`; expose a
+- [x] Copy the reference script into `src/relabel_transcript.py`; expose a
       `relabel(src_text, map_cfg) -> str` function (parse + resolve + block-merge)
       callable in-process, keeping the existing CLI `main()` for standalone use.
-- [ ] Add a `relabel` CLI subcommand (`--in`, `--out`, `--map`, `--no-header`)
+- [x] Add a `relabel` CLI subcommand (`--in`, `--out`, `--map`, `--no-header`)
       in `src/cli.py` that calls into the module.
-- [ ] Write `tests/test_relabel_transcript.py`: `default` map applied, `exceptions`
+- [x] Write `tests/test_relabel_transcript.py`: `default` map applied, `exceptions`
       override by verbatim text, consecutive same-name blocks merged, unmapped
       labels reported, and `[HH:MM:SS] Speaker N:` parsing - assert utterance text
       is byte-for-byte preserved.
-- [ ] Update `test_cli.py` to cover `relabel` dispatch.
-- [ ] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
+- [x] Update `test_cli.py` to cover `relabel` dispatch.
+- [x] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
 
 ### Task 6: Add the `latest` command
 
