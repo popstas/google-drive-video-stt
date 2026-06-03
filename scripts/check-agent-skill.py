@@ -12,23 +12,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ID = "gdstt-cli"
 CANONICAL_SKILL_ROOT = REPO_ROOT / "skills" / SKILL_ID
-REQUIRED_REFERENCES = (
-    "commands.md",
-    "configuration.md",
-    "provider-extension.md",
-    "provider-notes.md",
-    "troubleshooting.md",
-)
-REQUIRED_EXAMPLES = (
-    "drive-only-setup.md",
-    "folder-dry-run-size-guard.md",
-    "google-timeout-recovery.md",
-    "openai-full-pipeline.md",
-)
-
-
-def normalized_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8").replace("\r\n", "\n").rstrip("\n")
 
 
 def skill_frontmatter(text: str) -> dict[str, str]:
@@ -54,11 +37,8 @@ def package_files(root: Path) -> set[Path]:
 
 
 def validate_required_files() -> None:
-    required = [CANONICAL_SKILL_ROOT / "SKILL.md"]
-    required.extend(CANONICAL_SKILL_ROOT / "references" / name for name in REQUIRED_REFERENCES)
-    required.extend(CANONICAL_SKILL_ROOT / "examples" / name for name in REQUIRED_EXAMPLES)
-    for path in required:
-        assert path.is_file(), f"Missing Agent Skill file: {path}"
+    skill_path = CANONICAL_SKILL_ROOT / "SKILL.md"
+    assert skill_path.is_file(), f"Missing Agent Skill file: {skill_path}"
 
 
 def validate_package_shape() -> None:
@@ -81,18 +61,6 @@ def validate_package_shape() -> None:
             continue
         resource = relative_path.as_posix()
         assert resource in skill_text, f"Primary skill must route agents to {resource}"
-
-
-def validate_example_playbooks() -> None:
-    for example_name in REQUIRED_EXAMPLES:
-        text = normalized_text(CANONICAL_SKILL_ROOT / "examples" / example_name)
-        for required_text in (
-            "# ",
-            "## When to use",
-            "## Ask or confirm first",
-            "## Preferred sequence",
-        ):
-            assert required_text in text, f"Example playbook {example_name} is missing section: {required_text}"
 
 
 def gh_skill_available() -> bool:
@@ -150,7 +118,6 @@ def validate_gh_skill_workflow() -> None:
 def main() -> int:
     validate_required_files()
     validate_package_shape()
-    validate_example_playbooks()
     validate_gh_skill_workflow()
     print("gdstt Agent Skill package is valid; canonical resources and install workflow are synchronized.")
     return 0

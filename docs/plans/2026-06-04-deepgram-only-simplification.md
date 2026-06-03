@@ -190,7 +190,7 @@ Reference skill files: `docs/reference/relabel_transcript.py`,
 - Delete: `skills/gdstt-cli/references/`, `skills/gdstt-cli/examples/`
 - Modify tests: `tests/test_skill_docs.py`
 
-- [ ] Rewrite `SKILL.md` as one file: updated frontmatter `description`; the
+- [x] Rewrite `SKILL.md` as one file: updated frontmatter `description`; the
       command table (`auth`, `latest`, `process`, `transcribe`, `relabel`,
       `list`, `run`, `run-once`, `speakers set`, `doctor`); the agent keypoints
       workflow (get raw transcript -> reason speakers -> confirm mapping with the
@@ -198,10 +198,10 @@ Reference skill files: `docs/reference/relabel_transcript.py`,
       place in destination); the Keypoints template (Задачи `### Ответственный`,
       Тезисы, Открытые вопросы) minus wikilinks/vault style; safety rules; and a
       one-line pointer to README for Google Drive setup.
-- [ ] Delete the `references/` and `examples/` directories.
-- [ ] Reduce `tests/test_skill_docs.py` to assert documented commands match the
+- [x] Delete the `references/` and `examples/` directories.
+- [x] Reduce `tests/test_skill_docs.py` to assert documented commands match the
       registered CLI subcommands (drop assertions about removed resources).
-- [ ] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
+- [x] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
 
 ### Task 9: Update README, .env.example, and CLAUDE.md
 
