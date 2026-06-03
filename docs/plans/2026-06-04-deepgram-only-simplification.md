@@ -223,12 +223,12 @@ Reference skill files: `docs/reference/relabel_transcript.py`,
 
 ### Task 10: Verify acceptance criteria
 
-- [ ] Run full test suite: `uv run pytest` - all pass.
-- [ ] Run linter: `uv run ruff check` - clean.
-- [ ] Grep confirms removal: no references to `google_provider`, `asr_provider`,
+- [x] Run full test suite: `uv run pytest` - all pass.
+- [x] Run linter: `uv run ruff check` - clean.
+- [x] Grep confirms removal: no references to `google_provider`, `asr_provider`,
       `openai_provider`, `chunker`, `pipeline_profile`, `pipeline_policy`,
       `pipeline_executor`, or `setup` remain in `src/`.
-- [ ] Spot-check: `uv run python -m src.cli --help` lists exactly `auth`,
+- [x] Spot-check: `uv run python -m src.cli --help` lists exactly `auth`,
       `latest`, `process`, `transcribe`, `relabel`, `list`/`status`, `run`,
       `run-once`, `speakers`, `doctor`.
 

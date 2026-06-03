@@ -62,8 +62,8 @@ def test_defaults_when_no_env(monkeypatch):
     assert cfg.openai_keypoints is False
 
 
-def test_default_deepgram_processing_requires_key_and_suggests_setup(monkeypatch):
-    with pytest.raises(ValueError, match="gdstt setup"):
+def test_default_deepgram_processing_requires_key(monkeypatch):
+    with pytest.raises(ValueError, match="DEEPGRAM_API_KEY is required"):
         load_config()
 
 

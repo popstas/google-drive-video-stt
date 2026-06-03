@@ -270,7 +270,7 @@ def load_config(*, validate_providers: bool = True) -> Config:
             if not deepgram_api_key:
                 raise ValueError(
                     "DEEPGRAM_API_KEY is required when STT_PROVIDER=deepgram. "
-                    "Add DEEPGRAM_API_KEY or run `gdstt setup`."
+                    "Add DEEPGRAM_API_KEY to your .env."
                 )
             if deepgram_diarize_model not in DEEPGRAM_DIARIZE_MODELS:
                 raise ValueError(
