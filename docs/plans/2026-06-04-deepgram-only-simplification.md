@@ -208,16 +208,18 @@ Reference skill files: `docs/reference/relabel_transcript.py`,
 **Files:**
 - Modify: `README.md`, `.env.example`, `CLAUDE.md`
 
-- [ ] README: collapse the provider matrix to Deepgram; add a "Google Drive
+- [x] README: collapse the provider matrix to Deepgram; add a "Google Drive
       setup" section (gcloud / ADC / Console OAuth, scopes `drive`, folder-id
       discovery) migrated from the removed `setup.py`; document `OUTPUT_TARGET` /
       `OUTPUT_DIR`, `OPENAI_KEYPOINTS`, and the `latest` / `relabel` commands;
       remove google/asr/openai-STT and `STT_CHUNK_SECONDS` docs.
-- [ ] `.env.example`: keep core + Deepgram + output + openai-keypoints keys only;
+- [x] `.env.example`: keep core + Deepgram + output + openai-keypoints keys only;
       delete google/asr/openai-STT and chunk keys.
-- [ ] `CLAUDE.md`: update the architecture/STT-layer description to Deepgram-only
+- [x] `CLAUDE.md`: update the architecture/STT-layer description to Deepgram-only
       and the new keypoints/output flow; refresh the project layout listing.
-- [ ] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
+      (CLAUDE.md is a thin pointer to AGENTS.md, which is the source of truth for
+      architecture/STT/layout; the real content was updated in AGENTS.md.)
+- [x] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
 
 ### Task 10: Verify acceptance criteria
 

@@ -7,14 +7,15 @@ Markdown and shared repo docs over editor-specific overlays.
 
 - `README.md` - human quickstart and deployment overview.
 - `AGENTS.md` - canonical shared repo contract, commands, architecture, and conventions.
-- `skills/gdstt-cli/` - canonical installable operator skill package (`SKILL.md` + bundled resources).
+- `skills/gdstt-cli/SKILL.md` - canonical installable operator skill (single file).
 - `CLAUDE.md` - thin compatibility shim that points back to `AGENTS.md`.
 
 ## Project snapshot
 
 This repository polls Google Drive folders for MP4 files, extracts audio when
-needed, transcribes with the configured STT provider, optionally post-processes
-the transcript, and uploads sibling artifacts back to Drive.
+needed, transcribes with Deepgram, optionally post-processes the transcript and
+generates a Keypoints document, and writes sibling artifacts back to Drive or to a
+local folder.
 
 The code is env-driven through `src/config.py`, the main runtime lives in
 `src/main.py`, and STT provider dispatch lives in `src/stt/__init__.py`.
@@ -26,16 +27,15 @@ uv tool install --editable .   # install the global gdstt command from this chec
 uv tool update-shell           # refresh PATH helpers for uv-installed tools
 uv sync --extra dev          # install deps incl. pytest/ruff (use .venv)
 uv run pytest                # run all tests
-uv run pytest tests/test_stt_google.py::test_name   # single test
+uv run pytest tests/test_config.py::test_name   # single test
 uv run ruff check            # lint (line-length 100, target py311)
 uv run python scripts/check-agent-skill.py  # validate the canonical installable skill
 gh skill install . gdstt-cli --from-local --agent codex --scope user --force
 gh skill install . gdstt-cli --from-local --agent claude-code --scope user --force
-gdstt setup                  # first-time local setup wizard (env, auth, Drive check)
-gdstt auth [--manual]        # OAuth-only refresh or recovery flow
+gdstt auth [--manual]        # OAuth refresh or recovery flow
 uv run python -m src.auth    # module entry for the same OAuth flow
 uv run python -m src.main    # run the polling loop locally
-gdstt <setup|auth|plan|execute|run|run-once|process|transcribe|list>  # operator CLI (src/cli.py)
+gdstt <auth|doctor|latest|run|run-once|process|transcribe|relabel|speakers|list>  # operator CLI (src/cli.py)
 docker compose up -d --build # containerized deployment (mounts ./data)
 ```
 
@@ -43,10 +43,11 @@ docker compose up -d --build # containerized deployment (mounts ./data)
 
 ## Architecture
 
-Headless service: polls Google Drive folders, extracts MP3 from new MP4s via ffmpeg,
-optionally transcribes to a sibling `.txt`. All flow is env-driven through `Config`
-(`src/config.py`, frozen dataclass built by `load_config()` which validates
-provider-specific required vars and raises on misconfiguration).
+Headless service: polls Google Drive folders, extracts audio from new MP4s via
+ffmpeg, transcribes to a `.txt`, and optionally generates a `.keypoints.md`
+document. All flow is env-driven through `Config` (`src/config.py`, frozen
+dataclass built by `load_config()` which validates provider-specific required vars
+and raises on misconfiguration).
 
 **Polling loop** (`src/main.py`): `main()` builds the Drive service once, then loops
 `run_once()` every `POLL_INTERVAL` seconds. Per file, `process_item` computes two
@@ -61,22 +62,28 @@ it auto-detects file vs folder by `mimeType` (override with `is_folder`), then r
 (`src/cli.py`) wraps the same `load_config()`/Drive/STT layers behind argparse subcommands
 without duplicating business logic.
 
-**Agent runtime policy** (`src/pipeline_profile.py`, `src/pipeline_policy.py`,
-`src/pipeline_executor.py`): `gdstt plan --json` parses a compact intent and
-expands `config/pipelines/default.json` plus optional gitignored
-`config/pipelines/local.json` into a deterministic plan. `gdstt execute --json`
-enforces the same confirmation and secret-readiness gates, then delegates to
-`process_target` instead of duplicating processing logic. Profile version 1
-requires final TXT upload and `filename_or_metadata` speaker routing. Inline
-speaker overrides are valid only for Drive MP4 file targets. Execution reports
-whether TXT and MP3 uploads actually happened during that call.
+**`latest` command** (`src/cli.py` + `drive.find_newest_mp4`): resolves a folder
+(arg or first of `FOLDER_IDS`), finds the newest mp4 by `createdTime desc`, and
+dispatches it through `process_target` (honoring `--dry-run`).
 
-**Post-processing** runs in `process_item` after `transcribe_file` and before upload, gated
-by config: `openai_postprocess` (LLM path, `src/openai_pipeline.py` — OpenAI Responses API,
-optional Batch path) takes precedence over `stt_postprocess` (local path, `src/postprocess.py`).
-Both clean whitespace, parse interlocutor names from the file name, map them onto diarized
-`Speaker N` labels, and merge spurious extra speakers. An existing sibling `.txt` is
-overwritten in place via `drive.update_file` (its `txt_id` flows through `list_folder_state`).
+**Post-processing** runs in `process_item` after `transcribe_file` and before the
+artifact is written, gated by `stt_postprocess` (local path, `src/postprocess.py`):
+it cleans whitespace, parses interlocutor names from the file name, maps them onto
+diarized `Speaker N` labels, and merges spurious extra speakers.
+
+**Keypoints** (`src/openai_pipeline.py`, gated by `openai_keypoints`): after the
+transcript is written, `generate_keypoints` calls the OpenAI Responses API (sync, or
+the Batch API when `OPENAI_BATCH`) to produce a `<base>.keypoints.md` document
+(`## Задачи` / `## Тезисы` / `## Открытые вопросы`, plain text).
+
+**Output layer** (`src/output.py`): `write_artifact` writes each artifact either as
+a Drive sibling (`OUTPUT_TARGET=drive` — upload, or update an existing sibling in
+place via `drive.update_file`, its id flowing through `list_folder_state`) or into a
+local `OUTPUT_DIR` (`OUTPUT_TARGET=folder`).
+
+For deterministic, agent-driven speaker correction, `src/relabel_transcript.py`
+(and the `gdstt relabel` command) rewrite `Speaker N` labels from a `MAP.json`
+while preserving utterance text byte-for-byte.
 
 **Error handling is tiered**: `RefreshError`/`AuthError` propagate up to `main()` and
 cause `SystemExit(1)` so the container restarts (after re-running `src.auth`); all other
@@ -86,93 +93,71 @@ exceptions are logged + sent to Telegram via `notify.notify_error` and the loop 
 `processing_mode`, outcome, retry count, and duration. `run-once()` emits one folder summary per
 folder and one cycle summary with provider, overall outcome, folder count,
 pending count, processed count, failed count, `retry_total`,
-`gcs_blob_orphans`, skipped-by-size count, folder-error count, dry-run flag,
-and duration.
+skipped-by-size count, folder-error count, dry-run flag, and duration.
 
-`gcs_blob_orphans` is a subset of failed items, not an additional parallel
-failure count.
+**STT layer** (`src/stt/`): `get_provider(config)` dispatches on `STT_PROVIDER`,
+which is Deepgram-only (`""`/`disabled` skips transcription). The base
+`STTProvider` exposes `transcribe_full()`; Deepgram does whole-file transcription
+and overrides it. `transcribe_file()` (`transcribe.py`) calls `transcribe_full` and
+logs the best-effort Deepgram cost. Deepgram sends a full-file audio copy
+(`m4a_copy`, `mp3_96k`, or `mp3_192k`); tuning stays provider-specific, but the CLI
+workflow stays stable.
 
-**STT layer** (`src/stt/`): `get_provider(config)` dispatches on `STT_PROVIDER` to one of
-four `STTProvider` implementations. The base class has two paths — `transcribe_full()`
-returns `None` by default (fall back to chunking); providers that do whole-file
-transcription override it. `transcribe_file()` (`transcribe.py`) tries `transcribe_full`
-first, else splits with `chunk_mp3` (`STT_CHUNK_SECONDS`) and calls `transcribe_chunk` per part.
-- `openai` / `asr`: chunked path, `STT_LANGUAGE` optional (auto-detect).
-- `google`: `transcribe_full` path — uploads MP3 to GCS, runs Speech-to-Text v2
-  `BatchRecognize` with diarization, deletes the blob. `STT_LANGUAGE` is required
-  (BCP-47, the `long` model has no auto-detect). Diarization support depends on
-  the selected language.
-- `deepgram`: full-file path — can use `m4a_copy`, `mp3_96k`, or `mp3_192k`; tuning stays
-  provider-specific, but the CLI workflow stays the same.
-
-**Auth/setup** (`src/auth.py`, `src/setup.py`): single OAuth user credential covers both
-Drive and Cloud STT (scopes `drive` + `cloud-platform`) — no service account. `gdstt setup`
-is the first-run local wizard: it updates `.env`, defaults `STT_PROVIDER` to `deepgram`,
-prompts for API keys required by the active pipeline profile, prepares
-`data/credentials.json` from ADC client metadata, runs OAuth, and verifies Drive access.
-`gdstt auth` remains the smaller OAuth-only path for
-refresh, recovery, or headless/manual exchange. `load_credentials` inspects the saved token's
+**Auth** (`src/auth.py`): single OAuth user credential covers Drive (scopes `drive`
++ `cloud-platform`) — no service account. `gdstt auth` runs the OAuth flow for
+initial setup, refresh, recovery, or headless/manual exchange.
+`load_credentials` inspects the saved token's
 `scopes` directly (because `from_authorized_user_file` echoes the requested scopes, not the
 granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding a scope to
 `SCOPES` requires deleting `data/token.json` and re-running auth.
 
 ## Core invariants
 
-- `STT_PROVIDER` selects the speech-to-text backend. When it is absent,
-  `load_config()` treats it as `deepgram`; set `STT_PROVIDER=disabled` to skip
-  transcription explicitly. The CLI flow should stay stable even if the provider changes.
+- `STT_PROVIDER` is Deepgram-only. When it is absent, `load_config()` treats it as
+  `deepgram`; set `STT_PROVIDER=disabled` (or empty) to skip transcription and only
+  manage MP3 artifacts.
 - Bootstrap and Drive-only commands use `load_config(validate_providers=False)`:
-  `setup`, `auth`, `doctor`, `list` / `status`, `speakers set`, `refresh-names`,
-  and `plan`.
+  `auth`, `doctor`, `list` / `status`, and `speakers set`.
 - Processing commands validate provider configuration and can spend credits:
-  `run`, `run-once`, `process`, `transcribe`, and `execute`.
-- Agent JSON intents never contain API keys. Readiness output reports only
-  `configured` or `missing`.
-- `OPENAI_POSTPROCESS=true` is independent of `STT_PROVIDER` and can refine the
-  transcript after any provider.
-- `STT_CHUNK_SECONDS` only matters for chunking providers. Deepgram and Google
-  use full-file paths.
+  `run`, `run-once`, `process`, `latest`, and `transcribe`.
+- `relabel` is a local file transform that touches no Drive and spends nothing.
+- `OPENAI_KEYPOINTS=true` runs after the transcript is produced and requires
+  `OPENAI_API_KEY`; it writes a `<base>.keypoints.md` document.
+- `OUTPUT_TARGET` selects where artifacts land: `drive` (siblings) or `folder`
+  (`OUTPUT_DIR`, required when `folder`).
 - Idempotency relies on `appProperties.source_video_id` and sibling stem
   matching as a fallback.
 - New or changed operator behavior should be reflected in
-  `tests/test_skill_docs.py`.
+  `tests/test_skill_docs.py` and `skills/gdstt-cli/SKILL.md`.
 
 ## Skill layering policy
 
-- Keep one primary operator skill in `skills/gdstt-cli/SKILL.md`.
-- The main skill must stay sufficient for the default workflow: auth, inspect,
-  single-file processing, reprocess, folder safety, and provider switching basics.
-- Use bundled scenario playbooks under `skills/gdstt-cli/examples/`
-  only for external setup, folder-wide safety, or recovery tasks. Ordinary
-  project use should stay in the main skill flow instead of being routed
-  through a scenario file.
-- Split out only reference-heavy, low-frequency material: provider tuning matrices,
-  troubleshooting, recovery, extension workflow, or long error-code tables.
-- Companion references live under `skills/gdstt-cli/references/`.
-- Provider extension workflow lives in
-  `skills/gdstt-cli/references/provider-extension.md`.
-- Prefer companion reference docs over separate active subskills. The main skill may
-  point to them, but the base workflow must stay usable from one skill.
-- Use separate skills only if they have a genuinely different trigger, audience,
-  and decision tree. If that day comes, add them as sibling folders under
-  `skills/`, not as nested subskills inside the main `gdstt-cli` package.
+- The canonical operator skill is a single file: `skills/gdstt-cli/SKILL.md`.
+- It must stay sufficient for the default workflow: auth, inspect, single-file
+  processing, `latest`, reprocess, folder safety, relabeling, and the agent
+  keypoints workflow.
+- Keep Google Drive setup (OAuth, scopes, folder-id discovery) in `README.md`, not
+  the skill — the skill points to it with one line.
+- Use a separate skill only if it has a genuinely different trigger, audience, and
+  decision tree. If that day comes, add it as a sibling folder under `skills/`, not
+  as a nested subskill inside the `gdstt-cli` package.
 
 ## Current provider posture
 
-Deepgram is the current operational default, but instructions must remain
-provider-agnostic. Keep the common CLI workflow stable and move provider tuning
-into provider-specific notes.
+Deepgram is the only STT provider. Keep the common CLI workflow stable and move
+provider tuning into the Deepgram notes in `README.md` / `SKILL.md`.
 
 Today that means:
 
-- Deepgram examples may be the default examples.
-- Google STT setup stays opt-in and separate from Drive-only setup.
-- OpenAI post-processing stays documented as a layer on top of any STT provider.
+- Deepgram is the default and only transcription path; `STT_PROVIDER=""` keeps
+  MP3-only mode.
+- Keypoints generation (`OPENAI_KEYPOINTS`) is documented as an optional layer on
+  top of the transcript, independent of the STT path.
 
 ## Conventions
 
-- Tests mock all external services (Drive, OpenAI, Google STT, ffmpeg); one test file per
-  `src` module. No network in tests.
+- Tests mock all external services (Drive, OpenAI, Deepgram, ffmpeg); one test file
+  per `src` module. No network in tests.
 - `from __future__ import annotations` + `X | None` style type hints throughout.
 - Compute Drive-name stems with `drive.drive_stem` (`os.path.splitext`, string-based), never
   `Path(...).stem`/`.name` — Drive names may contain `/`, which `Path` would treat as a path
@@ -182,18 +167,14 @@ Today that means:
 ## Portability policy
 
 - Shared rules belong in `AGENTS.md`.
-- Canonical portable operator guidance belongs in `skills/gdstt-cli/SKILL.md`.
-- Portable interaction assets belong next to the skill under
-  `skills/gdstt-cli/examples/` and `references/`, but they should stay
-  limited to supporting setup, folder-wide safety, and recovery.
+- Canonical portable operator guidance belongs in the single
+  `skills/gdstt-cli/SKILL.md`.
 - Install the canonical package into each host with `gh skill install`; do not
   commit host-specific `.agents/skills/` or `.claude/skills/` copies.
 - Prefer universal docs over editor-specific overlays.
-- Keep bundled references under each installable skill so the bundle remains usable
-  outside this repository.
 - Validate the package and temporary local install with
   `python scripts/check-agent-skill.py`.
-- When operator behavior changes, update the bundled resources and refresh the
-  skill `version` and `last_updated` fields.
+- When operator behavior changes, update `SKILL.md` and refresh its `version` and
+  `last_updated` fields.
 - If a tool-specific file is required, keep it as a thin pointer back to `AGENTS.md`
   or the main skill rather than redefining runtime behavior.
