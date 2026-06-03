@@ -157,6 +157,27 @@ def _should_make_mp3_artifact(config: Config) -> bool:
     return config.drive_mp3_artifact
 
 
+def _apply_local_output_state(items: list[dict], config: Config) -> list[dict]:
+    """Reflect local artifacts in sibling flags when OUTPUT_TARGET=folder.
+
+    In folder mode the .txt is written to OUTPUT_DIR instead of as a Drive
+    sibling, so the Drive-derived ``has_txt`` flag never flips to True. Without
+    this, the daemon would re-select the same source on every poll and re-run
+    Deepgram (and OpenAI keypoints) indefinitely. Mark ``has_txt`` from the
+    local output file so processing stays idempotent.
+    """
+    if config.output_target != "folder" or config.output_dir is None:
+        return items
+    for item in items:
+        if item.get("has_txt"):
+            continue
+        stem = drive.drive_stem(item["file"]["name"])
+        local_txt = config.output_dir / (drive.safe_local_name(stem) + ".txt")
+        if local_txt.exists():
+            item["has_txt"] = True
+    return items
+
+
 def _speaker_names_from_file_info(file_info: dict) -> list[str] | None:
     raw = file_info.get("appProperties", {}).get(drive.SPEAKER_NAMES_PROPERTY)
     if not raw:
@@ -513,6 +534,7 @@ def process_target(
             lambda: drive.list_folder_state(service, target_id),
             description=f"list folder state for {target_id}",
         )
+        _apply_local_output_state(items, config)
         pending = items if reprocess_txt else _pending_items(items, config)
         pending = _items_allowed_by_size(
             pending,
@@ -544,6 +566,7 @@ def process_target(
         lambda: drive.list_folder_state(service, folder_id),
         description=f"list folder state for {folder_id}",
     )
+    _apply_local_output_state(items, config)
     match = next(
         (it for it in items if it["file"]["id"] == target_id), None
     )
@@ -627,6 +650,7 @@ def run_once(
         finally:
             cycle_retry_total += listing_retry_state.retry_count
 
+        _apply_local_output_state(items, config)
         pending = _pending_items(items, config)
         pending_before_size = len(pending)
         pending = _items_allowed_by_size(

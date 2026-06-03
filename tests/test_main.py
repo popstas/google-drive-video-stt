@@ -1510,6 +1510,60 @@ def test_process_item_writes_keypoints_to_local_folder(mocker, tmp_path):
     )
 
 
+def test_apply_local_output_state_marks_has_txt_from_local_file(tmp_path):
+    out_dir = tmp_path / "transcripts"
+    out_dir.mkdir()
+    (out_dir / "video.txt").write_text("done", encoding="utf-8")
+    cfg = make_config(output_target="folder", output_dir=out_dir)
+
+    items = [_item("fid", "video.mp4"), _item("gid", "other.mp4")]
+    main._apply_local_output_state(items, cfg)
+
+    assert items[0]["has_txt"] is True
+    assert items[1]["has_txt"] is False
+
+
+def test_apply_local_output_state_noop_for_drive_target(tmp_path):
+    out_dir = tmp_path / "transcripts"
+    out_dir.mkdir()
+    (out_dir / "video.txt").write_text("done", encoding="utf-8")
+    cfg = make_config(output_target="drive", output_dir=out_dir)
+
+    items = [_item("fid", "video.mp4")]
+    main._apply_local_output_state(items, cfg)
+
+    assert items[0]["has_txt"] is False
+
+
+def test_run_once_skips_already_transcribed_local_file_in_folder_mode(
+    mocker, tmp_path
+):
+    out_dir = tmp_path / "transcripts"
+    out_dir.mkdir()
+    # A prior run already wrote the transcript locally.
+    (out_dir / "video.txt").write_text("Speaker 1: hi", encoding="utf-8")
+
+    service = MagicMock()
+    # Drive has no .txt sibling because folder mode wrote it locally.
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_item("fid", "video.mp4")],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    cfg = make_config(
+        stt_provider="deepgram",
+        deepgram_api_key="dg",
+        deepgram_audio_source="m4a_copy",
+        drive_mp3_artifact=False,
+        output_target="folder",
+        output_dir=out_dir,
+    )
+    main.run_once(service, cfg)
+
+    process_mock.assert_not_called()
+
+
 def test_process_item_does_not_write_empty_keypoints(mocker, tmp_path):
     service = MagicMock()
     mp4_path = tmp_path / "video.mp4"
