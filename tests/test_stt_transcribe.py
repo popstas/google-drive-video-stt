@@ -10,7 +10,7 @@ from src.stt import transcribe as transcribe_mod
 from src.stt.base import STTError
 
 
-def _cfg(provider="openai") -> Config:
+def _cfg(provider="deepgram") -> Config:
     return Config(
         folder_ids=[],
         poll_interval=600,
@@ -20,11 +20,11 @@ def _cfg(provider="openai") -> Config:
         data_dir=Path("data"),
         proxy_url="",
         stt_provider=provider,
-        openai_api_key="sk-x" if provider == "openai" else "",
+        openai_api_key="",
         deepgram_api_key="dg-x" if provider == "deepgram" else "",
-        google_cloud_project="p" if provider == "google" else "",
-        google_stt_gcs_bucket="b" if provider == "google" else "",
-        asr_url="http://localhost:9000" if provider == "asr" else "",
+        google_cloud_project="",
+        google_stt_gcs_bucket="",
+        asr_url="",
         stt_language="ru" if provider == "deepgram" else "",
         stt_chunk_seconds=600,
     )
@@ -37,82 +37,24 @@ def test_transcribe_file_disabled_raises(tmp_path):
         transcribe_mod.transcribe_file(mp3, _cfg(provider=""))
 
 
-def test_transcribe_file_chunks_and_merges(mocker, tmp_path):
-    mp3 = tmp_path / "a.mp3"
-    mp3.write_bytes(b"audio-data")
-
-    chunk_paths = [tmp_path / "c1.mp3", tmp_path / "c2.mp3", tmp_path / "c3.mp3"]
-    for c in chunk_paths:
-        c.write_bytes(b"x")
-
-    mocker.patch("src.stt.transcribe.chunk_mp3", return_value=chunk_paths)
-
-    provider = MagicMock()
-    provider.transcribe_full.return_value = None
-    provider.transcribe_chunk.side_effect = ["one", "two", "three"]
-    mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
-
-    text = transcribe_mod.transcribe_file(mp3, _cfg())
-
-    assert text == "one\n\ntwo\n\nthree"
-    assert provider.transcribe_chunk.call_count == 3
-
-
-def test_transcribe_file_skips_empty_parts(mocker, tmp_path):
-    mp3 = tmp_path / "a.mp3"
-    mp3.write_bytes(b"x")
-    chunks = [tmp_path / "c1.mp3", tmp_path / "c2.mp3"]
-    for c in chunks:
-        c.write_bytes(b"x")
-
-    mocker.patch("src.stt.transcribe.chunk_mp3", return_value=chunks)
-    provider = MagicMock()
-    provider.transcribe_full.return_value = None
-    provider.transcribe_chunk.side_effect = ["", "later"]
-    mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
-
-    assert transcribe_mod.transcribe_file(mp3, _cfg()) == "later"
-
-
 def test_transcribe_file_missing_input(tmp_path):
     with pytest.raises(FileNotFoundError):
         transcribe_mod.transcribe_file(tmp_path / "missing.mp3", _cfg())
 
 
-def test_transcribe_full_returning_none_falls_back_to_chunking(mocker, tmp_path):
-    mp3 = tmp_path / "a.mp3"
-    mp3.write_bytes(b"x")
-    chunks = [tmp_path / "c1.mp3"]
-    chunks[0].write_bytes(b"x")
-
-    chunk_mock = mocker.patch("src.stt.transcribe.chunk_mp3", return_value=chunks)
-    provider = MagicMock()
-    provider.transcribe_full.return_value = None
-    provider.transcribe_chunk.return_value = "chunked"
-    mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
-
-    result = transcribe_mod.transcribe_file(mp3, _cfg())
-
-    assert result == "chunked"
-    provider.transcribe_full.assert_called_once_with(mp3)
-    assert chunk_mock.called
-    assert provider.transcribe_chunk.call_count == 1
-
-
-def test_transcribe_full_returning_string_skips_chunking(mocker, tmp_path):
+def test_transcribe_file_deepgram_full_file(mocker, tmp_path):
     mp3 = tmp_path / "a.mp3"
     mp3.write_bytes(b"x")
 
-    chunk_mock = mocker.patch("src.stt.transcribe.chunk_mp3")
     provider = MagicMock()
-    provider.transcribe_full.return_value = "[00:00:00] Speaker 1: hello"
+    provider.transcribe_full.return_value = "[00:00:00] Speaker 1: привет"
+    provider.last_request_id = None
     mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
 
-    result = transcribe_mod.transcribe_file(mp3, _cfg(provider="google"))
+    result = transcribe_mod.transcribe_file(mp3, _cfg(provider="deepgram"))
 
-    assert result == "[00:00:00] Speaker 1: hello"
+    assert result == "[00:00:00] Speaker 1: привет"
     provider.transcribe_full.assert_called_once_with(mp3)
-    chunk_mock.assert_not_called()
     provider.transcribe_chunk.assert_not_called()
 
 
@@ -121,49 +63,14 @@ def test_transcribe_full_empty_string_raises(mocker, tmp_path):
     mp3 = tmp_path / "a.mp3"
     mp3.write_bytes(b"x")
 
-    chunk_mock = mocker.patch("src.stt.transcribe.chunk_mp3")
     provider = MagicMock()
     provider.transcribe_full.return_value = ""
+    provider.last_request_id = None
     mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
 
     with pytest.raises(STTError, match="empty transcript"):
-        transcribe_mod.transcribe_file(mp3, _cfg(provider="google"))
+        transcribe_mod.transcribe_file(mp3, _cfg(provider="deepgram"))
 
-    chunk_mock.assert_not_called()
-    provider.transcribe_chunk.assert_not_called()
-
-
-def test_transcribe_chunks_all_empty_raises(mocker, tmp_path):
-    mp3 = tmp_path / "a.mp3"
-    mp3.write_bytes(b"x")
-    chunks = [tmp_path / "c1.mp3", tmp_path / "c2.mp3"]
-    for chunk in chunks:
-        chunk.write_bytes(b"x")
-
-    mocker.patch("src.stt.transcribe.chunk_mp3", return_value=chunks)
-    provider = MagicMock()
-    provider.transcribe_full.return_value = None
-    provider.transcribe_chunk.side_effect = ["", ""]
-    mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
-
-    with pytest.raises(STTError, match="empty transcript"):
-        transcribe_mod.transcribe_file(mp3, _cfg(provider="openai"))
-
-
-def test_transcribe_file_deepgram_full_file_skips_chunking(mocker, tmp_path):
-    mp3 = tmp_path / "a.mp3"
-    mp3.write_bytes(b"x")
-
-    chunk_mock = mocker.patch("src.stt.transcribe.chunk_mp3")
-    provider = MagicMock()
-    provider.transcribe_full.return_value = "[00:00:00] Speaker 1: привет"
-    mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
-
-    result = transcribe_mod.transcribe_file(mp3, _cfg(provider="deepgram"))
-
-    assert result == "[00:00:00] Speaker 1: привет"
-    provider.transcribe_full.assert_called_once_with(mp3)
-    chunk_mock.assert_not_called()
     provider.transcribe_chunk.assert_not_called()
 
 

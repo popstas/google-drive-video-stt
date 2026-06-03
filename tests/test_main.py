@@ -10,7 +10,6 @@ from src import main
 from src.auth import AuthError
 from src.config import Config
 from src.stt.base import STTError
-from src.stt.google_provider import GoogleBlobRetainedTimeoutError
 
 
 def make_config(
@@ -1120,35 +1119,6 @@ def test_run_once_aggregates_retry_total_from_process_telemetry(mocker, caplog):
         main.run_once(service, cfg)
 
     assert "retry_total=2" in caplog.text
-
-
-def test_run_once_counts_google_timeout_blob_retention(mocker, caplog):
-    service = MagicMock()
-    cfg = make_config(folder_ids=["f1"], stt_provider="google", google_cloud_project="proj", google_stt_gcs_bucket="bucket", stt_language="en-US")
-
-    mocker.patch(
-        "src.main.drive.list_folder_state",
-        return_value=[_item("v1", "a.mp4", has_mp3=True, has_txt=False, mp3_id="m1", mp3_name="a.mp3")],
-    )
-    mocker.patch(
-        "src.main.process_item",
-        side_effect=GoogleBlobRetainedTimeoutError(
-            "Google Cloud STT batch_recognize did not complete within 3600.0s; GCS blob gs://bucket/blob retained for manual cleanup",
-            gcs_uri="gs://bucket/blob",
-        ),
-    )
-    notify_mock = mocker.patch("src.main.notify.notify_error")
-    mocker.patch("src.main.time.monotonic", side_effect=[40.0, 42.0])
-
-    with caplog.at_level("INFO"):
-        main.run_once(service, cfg)
-
-    notify_mock.assert_called_once()
-    assert (
-        "Cycle summary [provider=google, outcome=partial_failure, folders=1, pending=1, "
-        "processed=0, failed=1, retry_total=0, gcs_blob_orphans=1, skipped_size=0, folder_errors=0, "
-        "dry_run=False, duration_s=2.000]"
-    ) in caplog.text
 
 
 def test_main_runs_loop_and_sleeps(mocker):

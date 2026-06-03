@@ -17,7 +17,6 @@ from src import drive, notify, openai_pipeline, postprocess
 from src.auth import AuthError, build_drive_service
 from src.config import Config, load_config
 from src.extractor import extract_m4a_copy, extract_mp3
-from src.stt.google_provider import GoogleBlobRetainedTimeoutError
 from src.stt.transcribe import transcribe_file
 
 logger = logging.getLogger(__name__)
@@ -200,8 +199,6 @@ def _processing_mode(*, needs_mp3: bool, needs_txt: bool) -> str:
 def _processing_outcome(exc: Exception | None) -> str:
     if exc is None:
         return "success"
-    if isinstance(exc, GoogleBlobRetainedTimeoutError):
-        return "gcs_blob_retained_timeout"
     return "failed"
 
 
@@ -640,8 +637,6 @@ def run_once(
             except Exception as exc:
                 cycle_failed += 1
                 cycle_retry_total += _retry_count_from_exception(exc)
-                if isinstance(exc, GoogleBlobRetainedTimeoutError):
-                    cycle_gcs_blob_orphans += 1
                 file_name = item.get("file", {}).get("name")
                 logger.exception(
                     "Failed to process %s in folder %s", file_name, folder_id

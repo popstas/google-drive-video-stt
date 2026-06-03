@@ -10,14 +10,14 @@ class STTError(RuntimeError):
 
 class STTProvider(ABC):
     @abstractmethod
-    def transcribe_chunk(self, audio_path: Path) -> str:
-        ...
-
-    def transcribe_full(self, audio_path: Path) -> str | None:
+    def transcribe_full(self, audio_path: Path) -> str:
         """Transcribe the entire audio file in one call.
 
-        Providers that support full-file transcription (e.g. batched APIs with
-        diarization) override this and return the transcript string. Returning
-        None means the caller should fall back to chunked transcription.
+        Deepgram (the only supported provider) transcribes the full file with
+        diarization in a single request and returns the formatted transcript.
         """
-        return None
+        ...
+
+    def transcribe_chunk(self, audio_path: Path) -> str:
+        """Backwards-compatible alias; full-file transcription is the contract."""
+        return self.transcribe_full(audio_path)
