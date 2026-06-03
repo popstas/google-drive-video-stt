@@ -151,16 +151,16 @@ Reference skill files: `docs/reference/relabel_transcript.py`,
 - Modify: `src/drive.py`, `src/cli.py`
 - Modify tests: `tests/test_drive.py`, `tests/test_cli.py`
 
-- [ ] Add `find_newest_mp4(service, folder_id) -> dict | None` in `src/drive.py`
+- [x] Add `find_newest_mp4(service, folder_id) -> dict | None` in `src/drive.py`
       using `files.list` ordered by `createdTime desc` (mp4, not trashed),
       returning the file dict or None when empty.
-- [ ] Add a `latest [--folder ID] [--dry-run]` subcommand in `src/cli.py` that
+- [x] Add a `latest [--folder ID] [--dry-run]` subcommand in `src/cli.py` that
       resolves the folder (arg or first of `FOLDER_IDS`), finds the newest mp4,
       and dispatches to `main_module.process_target` (honoring `--dry-run`);
       log clearly when the folder has no mp4.
-- [ ] Write tests: `find_newest_mp4` ordering/empty cases (mock Drive); `latest`
+- [x] Write tests: `find_newest_mp4` ordering/empty cases (mock Drive); `latest`
       dispatch and dry-run (mock `process_target`).
-- [ ] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
+- [x] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
 
 ### Task 7: Replace the OpenAI refiner with keypoints generation
 

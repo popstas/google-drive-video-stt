@@ -108,6 +108,27 @@ def cmd_process(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_latest(args: argparse.Namespace) -> None:
+    config = load_config()
+    folder_id = args.folder or (config.folder_ids[0] if config.folder_ids else None)
+    if not folder_id:
+        logger.error("No folder to inspect; set FOLDER_IDS or pass --folder")
+        raise SystemExit(1)
+    service = auth.build_drive_service(data_dir=config.data_dir)
+    newest = drive.find_newest_mp4(service, folder_id)
+    if newest is None:
+        logger.info("Folder %s has no mp4 files", folder_id)
+        return
+    logger.info("Latest mp4 in %s: %s (%s)", folder_id, newest["name"], newest["id"])
+    main_module.process_target(
+        service,
+        newest["id"],
+        config,
+        is_folder=False,
+        dry_run=args.dry_run,
+    )
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     config = load_config(validate_providers=False)
     credentials_path = config.data_dir / "credentials.json"
@@ -295,6 +316,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_processing_safety_args(p_process)
     p_process.set_defaults(func=cmd_process)
+
+    p_latest = sub.add_parser(
+        "latest",
+        help="Process the newest mp4 in a folder",
+    )
+    _set_parser_safety_description(
+        p_latest,
+        summary="Process the most recently created mp4 in a folder.",
+        safety_note=(
+            "this command spends STT credits on the newest mp4. Use --dry-run first to "
+            "confirm which file would be processed."
+        ),
+    )
+    p_latest.add_argument(
+        "--folder",
+        default=None,
+        help="Folder ID to inspect (default: first of FOLDER_IDS)",
+    )
+    p_latest.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show which file would be processed without downloading or transcribing",
+    )
+    p_latest.set_defaults(func=cmd_latest)
 
     p_doctor = sub.add_parser(
         "doctor",

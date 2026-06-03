@@ -109,6 +109,11 @@ across every pending configured folder.
 
 Run one polling cycle. Prefer `--dry-run` first for folder-wide work.
 
+### `latest [--folder ID] [--dry-run]`
+
+Process the newest mp4 in a folder (the first of `FOLDER_IDS` unless `--folder`
+is given). Prefer `--dry-run` first to confirm which file would be processed.
+
 ### `process <target> [--folder] [--reprocess-txt] [--dry-run] [--max-size SIZE] [--confirm-large]`
 
 Process one Drive file or folder. Prefer a single file id. Ask before

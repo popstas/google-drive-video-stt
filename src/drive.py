@@ -84,6 +84,27 @@ def _list_files_by_mime(service: Any, folder_id: str, mime_type: str) -> list[di
     return files
 
 
+def find_newest_mp4(service: Any, folder_id: str) -> dict | None:
+    """Return the most recently created mp4 in a folder, or None when empty."""
+    query = (
+        f"'{folder_id}' in parents and mimeType = '{MP4_MIME}' and trashed = false"
+    )
+    response = (
+        service.files()
+        .list(
+            q=query,
+            fields="files(id, name, mimeType, size, appProperties)",
+            orderBy="createdTime desc",
+            pageSize=1,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        )
+        .execute()
+    )
+    files = response.get("files", [])
+    return files[0] if files else None
+
+
 def list_unprocessed_mp4(service: Any, folder_id: str) -> list[dict]:
     mp4_files = _list_files_by_mime(service, folder_id, MP4_MIME)
     mp3_files = _list_files_by_mime(service, folder_id, MP3_MIME)

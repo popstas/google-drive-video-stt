@@ -313,6 +313,71 @@ def test_process_dispatches_safety_flags(mocker, tmp_path):
     )
 
 
+def test_latest_dispatch_uses_first_folder(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path, folder_ids=["folderA", "folderB"])
+    load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
+    service = MagicMock()
+    build_mock = mocker.patch("src.cli.auth.build_drive_service", return_value=service)
+    newest = {"id": "v9", "name": "newest.mp4"}
+    find_mock = mocker.patch("src.cli.drive.find_newest_mp4", return_value=newest)
+    target_mock = mocker.patch("src.cli.main_module.process_target")
+
+    cli.main(["latest"])
+
+    load_mock.assert_called_once_with()
+    build_mock.assert_called_once_with(data_dir=tmp_path)
+    find_mock.assert_called_once_with(service, "folderA")
+    target_mock.assert_called_once_with(
+        service,
+        "v9",
+        cfg,
+        is_folder=False,
+        dry_run=False,
+    )
+
+
+def test_latest_dispatch_honors_folder_and_dry_run(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    service = MagicMock()
+    mocker.patch("src.cli.auth.build_drive_service", return_value=service)
+    newest = {"id": "v1", "name": "x.mp4"}
+    find_mock = mocker.patch("src.cli.drive.find_newest_mp4", return_value=newest)
+    target_mock = mocker.patch("src.cli.main_module.process_target")
+
+    cli.main(["latest", "--folder", "folderZ", "--dry-run"])
+
+    find_mock.assert_called_once_with(service, "folderZ")
+    target_mock.assert_called_once_with(
+        service,
+        "v1",
+        cfg,
+        is_folder=False,
+        dry_run=True,
+    )
+
+
+def test_latest_no_mp4_skips_processing(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    service = MagicMock()
+    mocker.patch("src.cli.auth.build_drive_service", return_value=service)
+    mocker.patch("src.cli.drive.find_newest_mp4", return_value=None)
+    target_mock = mocker.patch("src.cli.main_module.process_target")
+
+    cli.main(["latest"])
+
+    target_mock.assert_not_called()
+
+
+def test_latest_without_folder_config_errors(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path, folder_ids=[])
+    mocker.patch("src.cli.load_config", return_value=cfg)
+
+    with pytest.raises(SystemExit):
+        cli.main(["latest"])
+
+
 def test_speakers_set_writes_drive_app_property(mocker, tmp_path):
     cfg = make_config(data_dir=tmp_path)
     load_mock = mocker.patch("src.cli.load_config", return_value=cfg)

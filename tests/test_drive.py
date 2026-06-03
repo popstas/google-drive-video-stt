@@ -527,3 +527,28 @@ def test_upload_explicit_name_overrides_local_name(tmp_path, mocker):
 
     create_kwargs = service.files.return_value.create.call_args.kwargs
     assert create_kwargs["body"]["name"] == "Call 2026/05/28 Rec.mp3"
+
+
+def test_find_newest_mp4_returns_first_file():
+    service = MagicMock()
+    newest = {"id": "v9", "name": "newest.mp4", "mimeType": "video/mp4"}
+    service.files.return_value.list.return_value.execute.return_value = {
+        "files": [newest]
+    }
+
+    result = drive.find_newest_mp4(service, "folder1")
+
+    assert result == newest
+    list_kwargs = service.files.return_value.list.call_args.kwargs
+    assert list_kwargs["orderBy"] == "createdTime desc"
+    assert list_kwargs["pageSize"] == 1
+    assert "video/mp4" in list_kwargs["q"]
+    assert "trashed = false" in list_kwargs["q"]
+    assert "folder1" in list_kwargs["q"]
+
+
+def test_find_newest_mp4_empty_folder_returns_none():
+    service = MagicMock()
+    service.files.return_value.list.return_value.execute.return_value = {"files": []}
+
+    assert drive.find_newest_mp4(service, "folder1") is None
