@@ -77,15 +77,15 @@ Reference skill files: `docs/reference/relabel_transcript.py`,
   `tests/test_pipeline_executor.py`, `tests/test_setup.py`
 - Modify tests: `tests/test_cli.py`
 
-- [ ] Remove the `plan`, `execute`, `setup`, and `refresh-names` subcommands and
+- [x] Remove the `plan`, `execute`, `setup`, and `refresh-names` subcommands and
       their `cmd_*` handlers from `src/cli.py`; drop the now-unused imports
       (`pipeline_executor`, `pipeline_policy`, `pipeline_profile`, `setup`).
-- [ ] Simplify `cmd_doctor` to report `DATA_DIR`, credentials/token presence,
+- [x] Simplify `cmd_doctor` to report `DATA_DIR`, credentials/token presence,
       `FOLDER_IDS` count, `STT_PROVIDER`, and (with `--drive`) folder listing -
       without `pipeline_profile` readiness.
-- [ ] Delete the pipeline/setup source files and `config/pipelines/`.
-- [ ] Delete the obsolete tests; update `test_cli.py` to the reduced command set.
-- [ ] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
+- [x] Delete the pipeline/setup source files and `config/pipelines/`.
+- [x] Delete the obsolete tests; update `test_cli.py` to the reduced command set.
+- [x] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
 
 ### Task 3: Trim and extend Config
 

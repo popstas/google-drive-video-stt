@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
-from src import auth, drive, pipeline_executor, pipeline_policy, pipeline_profile, setup
+from src import auth, drive
 from src import main as main_module
 from src.config import load_config
 from src.stt.transcribe import transcribe_file
@@ -75,55 +75,6 @@ def cmd_auth(args: argparse.Namespace) -> None:
     logger.info("Token saved to %s", config.data_dir / "token.json")
 
 
-def cmd_setup(args: argparse.Namespace) -> None:
-    setup.run_setup()
-
-
-def _parse_json_argument(raw: str) -> dict:
-    payload = json.loads(raw)
-    if not isinstance(payload, dict):
-        raise ValueError("intent JSON must be an object")
-    return payload
-
-
-def _load_intent_argument(args: argparse.Namespace) -> dict:
-    if args.intent_json_file:
-        raw = Path(args.intent_json_file).read_text(encoding="utf-8-sig")
-    else:
-        raw = args.intent_json
-    return _parse_json_argument(raw)
-
-
-def _add_intent_input(parser: argparse.ArgumentParser) -> None:
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--json", dest="intent_json", help="Intent JSON object")
-    group.add_argument(
-        "--json-file",
-        dest="intent_json_file",
-        metavar="PATH",
-        help="Read the intent JSON object from a file",
-    )
-
-
-def cmd_plan(args: argparse.Namespace) -> None:
-    load_config(validate_providers=False)
-    profile = pipeline_profile.load_pipeline_profile()
-    plan = pipeline_policy.plan_process(_load_intent_argument(args), profile)
-    print(json.dumps(plan, ensure_ascii=False, indent=2))
-
-
-def cmd_execute(args: argparse.Namespace) -> None:
-    config = load_config(validate_providers=False)
-    profile = pipeline_profile.load_pipeline_profile()
-    result = pipeline_executor.execute_process(
-        _load_intent_argument(args),
-        config,
-        profile,
-        confirmed=args.confirm,
-    )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-
-
 def cmd_run(args: argparse.Namespace) -> None:
     main_module.main()
 
@@ -166,13 +117,6 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print(f"token.json: {'OK' if token_path.exists() else 'missing'}")
     print(f"FOLDER_IDS: {len(config.folder_ids)} configured")
     print(f"STT_PROVIDER: {config.stt_provider or 'not configured'}")
-    profile = pipeline_profile.load_pipeline_profile()
-    readiness = {
-        **pipeline_profile.required_secret_status(profile),
-        **pipeline_profile.required_setting_status(profile),
-    }
-    for key, state in readiness.items():
-        print(f"{key}: {'configured' if state['configured'] else 'missing'}")
 
     if not args.drive:
         print("Drive auth: not checked (use --drive)")
@@ -195,12 +139,6 @@ def cmd_speakers_set(args: argparse.Namespace) -> None:
         {drive.SPEAKER_NAMES_PROPERTY: names},
     )
     logger.info("Speaker names saved on %s", args.target)
-
-
-def cmd_refresh_names(args: argparse.Namespace) -> None:
-    config = load_config(validate_providers=False)
-    service = auth.build_drive_service(data_dir=config.data_dir)
-    main_module.refresh_artifact_names(service, args.target)
 
 
 def cmd_transcribe(args: argparse.Namespace) -> None:
@@ -266,8 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="gdstt",
         description=(
             "Operator CLI for the Google Drive video STT service. Prefer "
-            "setup for first-time local setup, then doctor -> list -> process <file-id> "
-            "--dry-run -> process <file-id> "
+            "doctor -> list -> process <file-id> --dry-run -> process <file-id> "
             "before folder-wide run-once or run."
         ),
         epilog=(
@@ -290,31 +227,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="OAuth redirect URL for the manual flow (optional)",
     )
     p_auth.set_defaults(func=cmd_auth)
-
-    p_setup = sub.add_parser(
-        "setup",
-        help="Guide first-time local setup for Drive auth and the default provider",
-    )
-    p_setup.set_defaults(func=cmd_setup)
-
-    p_plan = sub.add_parser(
-        "plan",
-        help="Build a read-only JSON execution plan from an agent intent",
-    )
-    _add_intent_input(p_plan)
-    p_plan.set_defaults(func=cmd_plan)
-
-    p_execute = sub.add_parser(
-        "execute",
-        help="Execute an agent intent through the configured pipeline profile",
-    )
-    _add_intent_input(p_execute)
-    p_execute.add_argument(
-        "--confirm",
-        action="store_true",
-        help="Confirm a plan that requires explicit approval",
-    )
-    p_execute.set_defaults(func=cmd_execute)
 
     p_run = sub.add_parser(
         "run",
@@ -396,13 +308,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_speakers_set.add_argument("target", help="Drive MP4 file ID")
     p_speakers_set.add_argument("names", nargs="+", help="Speaker names in order")
     p_speakers_set.set_defaults(func=cmd_speakers_set)
-
-    p_refresh_names = sub.add_parser(
-        "refresh-names",
-        help="Rename linked MP3/TXT artifacts to match the current MP4 name",
-    )
-    p_refresh_names.add_argument("target", help="Drive MP4 file ID")
-    p_refresh_names.set_defaults(func=cmd_refresh_names)
 
     p_transcribe = sub.add_parser(
         "transcribe", help="Transcribe a local audio file with the configured provider"
