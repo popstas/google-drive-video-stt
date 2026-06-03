@@ -15,13 +15,14 @@ ENV_VARS = [
     "PROXY_URL",
     "STT_PROVIDER",
     "STT_LANGUAGE",
-    "STT_CHUNK_SECONDS",
     "STT_POSTPROCESS",
     "DRIVE_MP3_ARTIFACT",
     "OPENAI_API_KEY",
     "OPENAI_MODEL",
-    "OPENAI_POSTPROCESS",
+    "OPENAI_KEYPOINTS",
     "OPENAI_BATCH",
+    "OUTPUT_TARGET",
+    "OUTPUT_DIR",
     "DEEPGRAM_API_KEY",
     "DEEPGRAM_API_KEY_FILE",
     "DEEPGRAM_MODEL",
@@ -30,9 +31,6 @@ ENV_VARS = [
     "DEEPGRAM_TXT_FORMATTER",
     "DEEPGRAM_KEYTERMS_ENABLED",
     "DEEPGRAM_KEYTERMS_FILE",
-    "GOOGLE_CLOUD_PROJECT",
-    "GOOGLE_STT_GCS_BUCKET",
-    "ASR_URL",
 ]
 
 
@@ -57,9 +55,11 @@ def test_defaults_when_no_env(monkeypatch):
     assert cfg.telegram_chat_id == ""
     assert cfg.data_dir == Path("data")
     assert cfg.stt_provider == "deepgram"
-    assert cfg.stt_chunk_seconds == 600
     assert cfg.stt_language == "ru"
     assert cfg.stt_postprocess is True
+    assert cfg.output_target == "drive"
+    assert cfg.output_dir is None
+    assert cfg.openai_keypoints is False
 
 
 def test_default_deepgram_processing_requires_key_and_suggests_setup(monkeypatch):
@@ -113,57 +113,81 @@ def test_drive_mp3_artifact_can_be_enabled_for_deepgram_m4a(monkeypatch):
 def test_openai_pipeline_defaults(monkeypatch):
     cfg = _load_drive_only_config()
     assert cfg.openai_model == "gpt-5.4-mini"
-    assert cfg.openai_postprocess is False
+    assert cfg.openai_keypoints is False
     assert cfg.openai_batch is False
 
 
-def test_openai_postprocess_requires_api_key(monkeypatch):
-    monkeypatch.setenv("OPENAI_POSTPROCESS", "true")
+def test_openai_keypoints_requires_api_key(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
     with pytest.raises(ValueError, match="OPENAI_API_KEY"):
         load_config()
 
 
-def test_validate_providers_false_skips_openai_secret(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "openai")
+def test_validate_providers_false_skips_openai_keypoints_secret(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
     cfg = load_config(validate_providers=False)
-    assert cfg.stt_provider == "openai"
+    assert cfg.openai_keypoints is True
     assert cfg.openai_api_key == ""
 
 
-def test_validate_providers_false_skips_provider_secrets(monkeypatch):
-    # A partially configured provider must not block Drive-only commands.
-    monkeypatch.setenv("STT_PROVIDER", "google")
-    cfg = load_config(validate_providers=False)
-    assert cfg.stt_provider == "google"
-
-
 def test_validate_providers_true_is_default(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "openai")
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
     with pytest.raises(ValueError, match="OPENAI_API_KEY"):
         load_config()
 
 
-def test_openai_postprocess_with_api_key(monkeypatch):
+def test_openai_keypoints_with_api_key(monkeypatch):
     monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("OPENAI_POSTPROCESS", "true")
+    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
     monkeypatch.setenv("OPENAI_BATCH", "true")
     cfg = load_config()
-    assert cfg.openai_postprocess is True
+    assert cfg.openai_keypoints is True
     assert cfg.openai_api_key == "sk-test"
     assert cfg.openai_model == "gpt-5.4"
     assert cfg.openai_batch is True
 
 
-def test_openai_postprocess_enabled_without_stt_provider(monkeypatch):
-    # OPENAI_POSTPROCESS is independent of STT_PROVIDER selection.
+def test_openai_keypoints_enabled_without_stt_provider(monkeypatch):
+    # OPENAI_KEYPOINTS is independent of STT_PROVIDER selection.
     monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("OPENAI_POSTPROCESS", "true")
+    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     cfg = load_config()
     assert cfg.stt_provider == ""
-    assert cfg.openai_postprocess is True
+    assert cfg.openai_keypoints is True
+
+
+def test_output_target_defaults_to_drive(monkeypatch):
+    cfg = _load_drive_only_config()
+    assert cfg.output_target == "drive"
+    assert cfg.output_dir is None
+
+
+def test_output_target_folder_requires_output_dir(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    monkeypatch.setenv("OUTPUT_TARGET", "folder")
+    with pytest.raises(ValueError, match="OUTPUT_DIR"):
+        load_config()
+
+
+def test_output_target_folder_with_output_dir(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    monkeypatch.setenv("OUTPUT_TARGET", "folder")
+    monkeypatch.setenv("OUTPUT_DIR", "/var/lib/transcripts")
+    cfg = load_config()
+    assert cfg.output_target == "folder"
+    assert cfg.output_dir == Path("/var/lib/transcripts")
+
+
+def test_invalid_output_target_raises(monkeypatch):
+    monkeypatch.setenv("OUTPUT_TARGET", "s3")
+    with pytest.raises(ValueError, match="OUTPUT_TARGET"):
+        load_config()
 
 
 def test_parses_single_folder_id(monkeypatch):
@@ -273,20 +297,6 @@ def test_blank_data_dir_uses_default(monkeypatch):
     monkeypatch.setenv("DATA_DIR", "")
     cfg = _load_drive_only_config()
     assert cfg.data_dir == Path("data")
-
-
-def test_stt_openai_requires_api_key(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "openai")
-    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
-        load_config()
-
-
-def test_stt_openai_with_api_key(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "openai")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    cfg = load_config()
-    assert cfg.stt_provider == "openai"
-    assert cfg.openai_api_key == "sk-test"
 
 
 def test_stt_deepgram_requires_api_key(monkeypatch):
@@ -489,74 +499,20 @@ def test_stt_deepgram_reads_keyterms_file_with_utf8_bom(monkeypatch, tmp_path):
     assert cfg.deepgram_keyterms == ("Kubernetes",)
 
 
-def test_stt_deepgram_key_file_is_ignored_for_other_providers(monkeypatch, tmp_path):
+def test_stt_deepgram_key_file_is_ignored_when_transcription_disabled(monkeypatch, tmp_path):
     missing_key_file = tmp_path / "missing.json"
-    monkeypatch.setenv("STT_PROVIDER", "asr")
-    monkeypatch.setenv("ASR_URL", "http://localhost:9000")
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
     monkeypatch.setenv("DEEPGRAM_API_KEY_FILE", str(missing_key_file))
 
     cfg = load_config()
 
-    assert cfg.stt_provider == "asr"
+    assert cfg.stt_provider == ""
     assert cfg.deepgram_api_key == ""
-
-
-def test_stt_google_requires_project_and_bucket(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "google")
-    with pytest.raises(ValueError, match="GOOGLE_CLOUD_PROJECT"):
-        load_config()
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-1")
-    with pytest.raises(ValueError, match="GOOGLE_STT_GCS_BUCKET"):
-        load_config()
-    monkeypatch.setenv("GOOGLE_STT_GCS_BUCKET", "my-stt-bucket")
-    with pytest.raises(ValueError, match="STT_LANGUAGE"):
-        load_config()
-    monkeypatch.setenv("STT_LANGUAGE", "en-US")
-    cfg = load_config()
-    assert cfg.stt_provider == "google"
-    assert cfg.google_cloud_project == "proj-1"
-    assert cfg.google_stt_gcs_bucket == "my-stt-bucket"
-    assert cfg.stt_language == "en-US"
-
-
-def test_stt_google_rejects_empty_language(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "google")
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-1")
-    monkeypatch.setenv("GOOGLE_STT_GCS_BUCKET", "my-stt-bucket")
-    monkeypatch.setenv("STT_LANGUAGE", "")
-    with pytest.raises(ValueError, match="STT_LANGUAGE"):
-        load_config()
-
-
-def test_stt_asr_requires_url(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "asr")
-    with pytest.raises(ValueError, match="ASR_URL"):
-        load_config()
-
-
-def test_stt_asr_with_url(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "asr")
-    monkeypatch.setenv("ASR_URL", "http://localhost:9000")
-    cfg = load_config()
-    assert cfg.stt_provider == "asr"
-    assert cfg.asr_url == "http://localhost:9000"
 
 
 def test_stt_unsupported_provider_raises(monkeypatch):
     monkeypatch.setenv("STT_PROVIDER", "azure")
     with pytest.raises(ValueError, match="STT_PROVIDER"):
-        load_config()
-
-
-def test_stt_chunk_seconds_invalid(monkeypatch):
-    monkeypatch.setenv("STT_CHUNK_SECONDS", "bad")
-    with pytest.raises(ValueError, match="STT_CHUNK_SECONDS"):
-        load_config()
-
-
-def test_stt_chunk_seconds_non_positive(monkeypatch):
-    monkeypatch.setenv("STT_CHUNK_SECONDS", "0")
-    with pytest.raises(ValueError, match="positive"):
         load_config()
 
 

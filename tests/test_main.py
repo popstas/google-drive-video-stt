@@ -20,15 +20,13 @@ def make_config(
     stt_provider="",
     openai_api_key="",
     deepgram_api_key="",
-    google_cloud_project="",
-    google_stt_gcs_bucket="",
-    asr_url="",
     stt_language="",
-    stt_chunk_seconds=600,
     deepgram_audio_source="m4a_copy",
     drive_mp3_artifact=True,
     stt_postprocess=False,
-    openai_postprocess=False,
+    output_target="drive",
+    output_dir=None,
+    openai_keypoints=False,
 ) -> Config:
     return Config(
         folder_ids=folder_ids if folder_ids is not None else ["folderA"],
@@ -41,13 +39,11 @@ def make_config(
         stt_provider=stt_provider,
         openai_api_key=openai_api_key,
         deepgram_api_key=deepgram_api_key,
-        google_cloud_project=google_cloud_project,
-        google_stt_gcs_bucket=google_stt_gcs_bucket,
-        asr_url=asr_url,
         stt_language=stt_language,
-        stt_chunk_seconds=stt_chunk_seconds,
         stt_postprocess=stt_postprocess,
-        openai_postprocess=openai_postprocess,
+        output_target=output_target,
+        output_dir=output_dir,
+        openai_keypoints=openai_keypoints,
         deepgram_audio_source=deepgram_audio_source,
         drive_mp3_artifact=drive_mp3_artifact,
     )
@@ -1377,64 +1373,3 @@ def test_process_item_uses_speaker_names_from_drive_properties(mocker, tmp_path)
     main.process_item(service, item, "f", cfg)
 
     assert captured["txt"] == "Alice: hi there\nBob: hello back"
-
-
-def test_process_item_openai_postprocess_replaces_deterministic(mocker, tmp_path):
-    service = MagicMock()
-    mp4_path = tmp_path / "video.mp4"
-    mp3_path = tmp_path / "video.mp3"
-
-    mocker.patch("src.main.drive.download", return_value=mp4_path)
-    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
-    captured = {}
-
-    def fake_upload(svc, local_path, folder, mime_type, name=None, app_properties=None):
-        if mime_type == "text/plain":
-            captured["txt"] = local_path.read_text(encoding="utf-8")
-
-    mocker.patch("src.main.drive.upload", side_effect=fake_upload)
-    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
-    refine_mock = mocker.patch(
-        "src.main.openai_pipeline.refine_transcript", return_value="Alice: hi"
-    )
-    pp_mock = mocker.patch("src.main.postprocess.postprocess_transcript")
-
-    cfg = make_config(
-        stt_provider="openai",
-        openai_api_key="sk-x",
-        stt_postprocess=True,
-        openai_postprocess=True,
-    )
-    main.process_item(service, _item("fid", "Alice and Bob.mp4"), "f", cfg)
-
-    assert captured["txt"] == "Alice: hi"
-    refine_mock.assert_called_once()
-    pp_mock.assert_not_called()
-
-
-def test_process_item_openai_postprocess_uses_speaker_names_from_drive_properties(
-    mocker,
-    tmp_path,
-):
-    service = MagicMock()
-    mp4_path = tmp_path / "video.mp4"
-    mp3_path = tmp_path / "video.mp3"
-
-    mocker.patch("src.main.drive.download", return_value=mp4_path)
-    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
-    mocker.patch("src.main.drive.upload")
-    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
-    refine_mock = mocker.patch(
-        "src.main.openai_pipeline.refine_transcript", return_value="Alice: hi"
-    )
-
-    cfg = make_config(
-        stt_provider="openai",
-        openai_api_key="sk-x",
-        openai_postprocess=True,
-    )
-    item = _item("fid", "Wrong One and Wrong Two.mp4")
-    item["file"]["appProperties"] = {"speaker_names": "[\"Alice\", \"Bob\"]"}
-    main.process_item(service, item, "f", cfg)
-
-    assert refine_mock.call_args.kwargs["speaker_names"] == ["Alice", "Bob"]

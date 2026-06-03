@@ -22,11 +22,7 @@ def _cfg(provider="deepgram") -> Config:
         stt_provider=provider,
         openai_api_key="",
         deepgram_api_key="dg-x" if provider == "deepgram" else "",
-        google_cloud_project="",
-        google_stt_gcs_bucket="",
-        asr_url="",
         stt_language="ru" if provider == "deepgram" else "",
-        stt_chunk_seconds=600,
     )
 
 

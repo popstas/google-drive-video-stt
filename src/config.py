@@ -9,7 +9,8 @@ except ImportError:
     load_dotenv = None
 
 
-SUPPORTED_STT_PROVIDERS = ("", "disabled", "openai", "google", "asr", "deepgram")
+SUPPORTED_STT_PROVIDERS = ("", "deepgram")
+OUTPUT_TARGETS = ("drive", "folder")
 DEEPGRAM_DIARIZE_MODELS = ("latest", "v1")
 DEEPGRAM_AUDIO_SOURCES = ("m4a_copy", "mp3_96k", "mp3_192k")
 DEEPGRAM_TXT_FORMATTERS = ("word_speaker", "utterance")
@@ -30,15 +31,13 @@ class Config:
     stt_provider: str
     openai_api_key: str
     deepgram_api_key: str
-    google_cloud_project: str
-    google_stt_gcs_bucket: str
-    asr_url: str
     stt_language: str
-    stt_chunk_seconds: int
     stt_postprocess: bool = True
     drive_mp3_artifact: bool = True
+    output_target: str = "drive"
+    output_dir: Path | None = None
+    openai_keypoints: bool = False
     openai_model: str = "gpt-5.4-mini"
-    openai_postprocess: bool = False
     openai_batch: bool = False
     deepgram_model: str = "nova-3"
     deepgram_diarize_model: str = "latest"
@@ -224,9 +223,6 @@ def load_config(*, validate_providers: bool = True) -> Config:
             or str(DEEPGRAM_DEFAULT_KEYTERMS_FILE),
             dotenv_path,
         )
-    google_cloud_project = os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
-    google_stt_gcs_bucket = os.environ.get("GOOGLE_STT_GCS_BUCKET", "").strip()
-    asr_url = os.environ.get("ASR_URL", "").strip()
     stt_language = os.environ.get("STT_LANGUAGE", "").strip()
     if stt_provider == "deepgram" and not stt_language:
         stt_language = "ru"
@@ -243,31 +239,33 @@ def load_config(*, validate_providers: bool = True) -> Config:
     )
 
     openai_model = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini").strip() or "gpt-5.4-mini"
-    openai_postprocess = _parse_bool(
-        os.environ.get("OPENAI_POSTPROCESS", ""), default=False
+    openai_keypoints = _parse_bool(
+        os.environ.get("OPENAI_KEYPOINTS", ""), default=False
     )
     openai_batch = _parse_bool(os.environ.get("OPENAI_BATCH", ""), default=False)
 
-    chunk_raw = os.environ.get("STT_CHUNK_SECONDS", "600").strip() or "600"
-    try:
-        stt_chunk_seconds = int(chunk_raw)
-    except ValueError as exc:
+    output_target = (
+        os.environ.get("OUTPUT_TARGET", "drive").strip().lower() or "drive"
+    )
+    if output_target not in OUTPUT_TARGETS:
         raise ValueError(
-            f"STT_CHUNK_SECONDS must be an integer, got: {chunk_raw!r}"
-        ) from exc
-    if stt_chunk_seconds <= 0:
-        raise ValueError(
-            f"STT_CHUNK_SECONDS must be positive, got: {stt_chunk_seconds}"
+            f"OUTPUT_TARGET must be one of {OUTPUT_TARGETS!r}, got: {output_target!r}"
         )
+    output_dir_raw = os.environ.get("OUTPUT_DIR", "").strip()
+    output_dir = (
+        _resolve_relative_to_dotenv(output_dir_raw, dotenv_path)
+        if output_dir_raw
+        else None
+    )
+    if output_target == "folder" and output_dir is None:
+        raise ValueError("OUTPUT_DIR is required when OUTPUT_TARGET=folder")
 
     # Provider-secret validation is skipped for commands that only need Drive/
     # data-dir settings (e.g. `gdstt auth`, `gdstt list`), so an unconfigured STT
     # provider can't block bootstrap/inspection commands.
     if validate_providers:
-        if stt_provider == "openai" and not openai_api_key:
-            raise ValueError("OPENAI_API_KEY is required when STT_PROVIDER=openai")
-        if openai_postprocess and not openai_api_key:
-            raise ValueError("OPENAI_API_KEY is required when OPENAI_POSTPROCESS is enabled")
+        if openai_keypoints and not openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required when OPENAI_KEYPOINTS is enabled")
         if stt_provider == "deepgram":
             if not deepgram_api_key:
                 raise ValueError(
@@ -293,23 +291,6 @@ def load_config(*, validate_providers: bool = True) -> Config:
                 deepgram_keyterms_enabled,
                 deepgram_keyterms_file,
             )
-        if stt_provider == "google":
-            if not google_cloud_project:
-                raise ValueError(
-                    "GOOGLE_CLOUD_PROJECT is required when STT_PROVIDER=google"
-                )
-            if not google_stt_gcs_bucket:
-                raise ValueError(
-                    "GOOGLE_STT_GCS_BUCKET is required when STT_PROVIDER=google"
-                )
-            if not stt_language:
-                raise ValueError(
-                    "STT_LANGUAGE is required when STT_PROVIDER=google "
-                    "(BCP-47 code, e.g. en-US, ru-RU). The `long` model has no "
-                    "auto-detect; only Chirp models accept `auto`."
-                )
-        if stt_provider == "asr" and not asr_url:
-            raise ValueError("ASR_URL is required when STT_PROVIDER=asr")
 
     return Config(
         folder_ids=folder_ids,
@@ -322,15 +303,13 @@ def load_config(*, validate_providers: bool = True) -> Config:
         stt_provider=stt_provider,
         openai_api_key=openai_api_key,
         deepgram_api_key=deepgram_api_key,
-        google_cloud_project=google_cloud_project,
-        google_stt_gcs_bucket=google_stt_gcs_bucket,
-        asr_url=asr_url,
         stt_language=stt_language,
-        stt_chunk_seconds=stt_chunk_seconds,
         stt_postprocess=stt_postprocess,
         drive_mp3_artifact=drive_mp3_artifact,
+        output_target=output_target,
+        output_dir=output_dir,
+        openai_keypoints=openai_keypoints,
         openai_model=openai_model,
-        openai_postprocess=openai_postprocess,
         openai_batch=openai_batch,
         deepgram_model=deepgram_model,
         deepgram_diarize_model=deepgram_diarize_model,

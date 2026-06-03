@@ -13,7 +13,7 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 import requests
 
-from src import drive, notify, openai_pipeline, postprocess
+from src import drive, notify, postprocess
 from src.auth import AuthError, build_drive_service
 from src.config import Config, load_config
 from src.extractor import extract_m4a_copy, extract_mp3
@@ -344,19 +344,7 @@ def process_item(
                     stt_audio_path = mp3_path
                 text = transcribe_file(stt_audio_path, config, cost_usd=cost_usd)
                 speaker_names = _speaker_names_from_file_info(file_info)
-                if config.openai_postprocess:
-                    cost_usd.setdefault("openai", None)
-                    openai_usage: dict[str, int] = {}
-                    text = openai_pipeline.refine_transcript(
-                        text,
-                        file_name,
-                        config,
-                        speaker_names=speaker_names,
-                        usage=openai_usage,
-                    )
-                    if openai_usage:
-                        usage["openai"] = openai_usage
-                elif config.stt_postprocess:
+                if config.stt_postprocess:
                     text = postprocess.postprocess_transcript(
                         text,
                         file_name,

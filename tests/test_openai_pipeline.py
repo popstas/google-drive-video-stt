@@ -29,11 +29,7 @@ def _config(**over) -> Config:
         stt_provider="",
         openai_api_key="sk-test",
         deepgram_api_key="",
-        google_cloud_project="",
-        google_stt_gcs_bucket="",
-        asr_url="",
         stt_language="",
-        stt_chunk_seconds=600,
     )
     base.update(over)
     return Config(**base)

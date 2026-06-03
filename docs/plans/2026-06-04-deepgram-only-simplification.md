@@ -93,18 +93,18 @@ Reference skill files: `docs/reference/relabel_transcript.py`,
 - Modify: `src/config.py`
 - Modify tests: `tests/test_config.py`
 
-- [ ] Remove `google_cloud_project`, `google_stt_gcs_bucket`, `asr_url`,
+- [x] Remove `google_cloud_project`, `google_stt_gcs_bucket`, `asr_url`,
       `openai_postprocess`, and `stt_chunk_seconds` fields and their parsing;
       reduce `SUPPORTED_STT_PROVIDERS` to `("", "deepgram")`.
-- [ ] Add fields: `output_target` (`drive` default | `folder`), `output_dir`
+- [x] Add fields: `output_target` (`drive` default | `folder`), `output_dir`
       (`Path | None`), `openai_keypoints` (bool, default False). Keep
       `openai_api_key`, `openai_model` (default `gpt-5.4-mini`), `openai_batch`.
-- [ ] Validate: `output_target` in `("drive", "folder")`; when `folder`,
+- [x] Validate: `output_target` in `("drive", "folder")`; when `folder`,
       `output_dir` is required; when `openai_keypoints` is True, `openai_api_key`
       is required. Drop the google/asr validation blocks.
-- [ ] Update `test_config.py`: remove google/asr/openai-STT cases; add
+- [x] Update `test_config.py`: remove google/asr/openai-STT cases; add
       output-target and openai-keypoints validation cases.
-- [ ] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
+- [x] Run `uv run pytest` and `uv run ruff check` - must pass before next task.
 
 ### Task 4: Add the output destination layer
 
