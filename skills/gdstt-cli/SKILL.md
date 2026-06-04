@@ -122,9 +122,14 @@ This is the primary, model-driven path. The CLI produces a raw transcript; the
 agent corrects speakers and writes the Keypoints document. The deterministic
 `relabel` command guarantees utterance text stays byte-for-byte.
 
-1. **Get the raw transcript.** `gdstt latest` (or `gdstt process <file-id>`, or
-   `gdstt transcribe <audio>`). Note the `base` name (the source file stem) - the
-   artifacts are `<base>.txt` and later `<base>.keypoints.md`.
+1. **Get the raw diarized transcript.** The relabel map keys are `Speaker N`
+   labels, so the input must still carry them. `gdstt transcribe <audio>` emits
+   raw `Speaker N` output (no post-processing). `gdstt latest` / `gdstt process
+   <file-id>` only keep `Speaker N` when `STT_POSTPROCESS=false`; under the
+   default `STT_POSTPROCESS=true` they already map labels to interlocutor names
+   in `<base>.txt`, so a `Speaker N` map matches nothing. Note the `base` name
+   (the source file stem) - the artifacts are `<base>.txt` and later
+   `<base>.keypoints.md`.
 2. **Reason about speakers.** Diarization usually emits more labels than people
    (e.g. `Speaker 1/2/3` for two participants). Map each label to a person by
    content: role and lexicon, who is addressed by name in a line (a line saying
