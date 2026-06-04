@@ -258,8 +258,8 @@ def test_list_folder_state_includes_keypoints_id_by_stem():
     items = drive.list_folder_state(service, "folder1")
 
     by_id = {it["file"]["id"]: it for it in items}
-    assert by_id["v1"]["keypoints_id"] == "k1"
-    assert by_id["v2"]["keypoints_id"] is None
+    assert by_id["v1"]["artifact_ids"] == {"keypoints": "k1"}
+    assert by_id["v2"]["artifact_ids"] == {}
 
 
 def test_list_folder_state_matches_keypoints_by_source_video_id_after_rename():
@@ -274,7 +274,38 @@ def test_list_folder_state_matches_keypoints_by_source_video_id_after_rename():
 
     items = drive.list_folder_state(service, "folder1")
 
-    assert items[0]["keypoints_id"] == "k1"
+    assert items[0]["artifact_ids"] == {"keypoints": "k1"}
+
+
+def test_list_folder_state_keys_artifact_ids_by_artifact_type():
+    # Multiple presets produce multiple sibling .md artifacts; each is keyed by its
+    # own artifact_type appProperty so the OpenAI stage can skip ones already made.
+    mp4 = [{"id": "v1", "name": "a.mp4", "mimeType": "video/mp4"}]
+    md = [
+        {
+            "id": "k1",
+            "name": "a.keypoints.md",
+            "mimeType": "text/markdown",
+            "appProperties": {"source_video_id": "v1", "artifact_type": "keypoints"},
+        },
+        {
+            "id": "c1",
+            "name": "a.transcript-cleanup.md",
+            "mimeType": "text/markdown",
+            "appProperties": {
+                "source_video_id": "v1",
+                "artifact_type": "transcript-cleanup",
+            },
+        },
+    ]
+    service = _make_list_service({"mp4": mp4, "mp3": [], "txt": [], "md": md})
+
+    items = drive.list_folder_state(service, "folder1")
+
+    assert items[0]["artifact_ids"] == {
+        "keypoints": "k1",
+        "transcript-cleanup": "c1",
+    }
 
 
 def test_list_folder_state_plain_user_md_not_matched_by_stem():
@@ -285,7 +316,7 @@ def test_list_folder_state_plain_user_md_not_matched_by_stem():
 
     items = drive.list_folder_state(service, "folder1")
 
-    assert items[0]["keypoints_id"] is None
+    assert items[0]["artifact_ids"] == {}
 
 
 def test_list_folder_state_keypoints_md_linked_to_other_video_not_stem_matched():
@@ -303,7 +334,7 @@ def test_list_folder_state_keypoints_md_linked_to_other_video_not_stem_matched()
 
     items = drive.list_folder_state(service, "folder1")
 
-    assert items[0]["keypoints_id"] is None
+    assert items[0]["artifact_ids"] == {}
 
 
 def test_get_file_metadata_requests_expected_fields():

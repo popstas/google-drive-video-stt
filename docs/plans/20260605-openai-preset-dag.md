@@ -167,20 +167,20 @@ recording that exercises speaker-named presets cheaply.
 
 ### Task 4: main.py wiring and multi-artifact idempotency
 
-- [ ] Replace the single `openai_keypoints` block in `process_item` with the
+- [x] Replace the single `openai_keypoints` block in `process_item` with the
       preset-DAG run, writing one artifact per produced preset tagged
       `artifact_type=<preset-name>`
-- [ ] Generalize `_save_and_upload_keypoints` into `_save_and_upload_preset(...)`
+- [x] Generalize `_save_and_upload_keypoints` into `_save_and_upload_preset(...)`
       and route per-preset usage into the process summary
-- [ ] Change `drive.list_folder_state` to return `artifact_ids` keyed by the
+- [x] Change `drive.list_folder_state` to return `artifact_ids` keyed by the
       `artifact_type` appProperty, keeping existing `.keypoints.md` files mapped to
       the `keypoints` preset
-- [ ] Compute per-file OpenAI-stage "needs" as enabled presets absent from
+- [x] Compute per-file OpenAI-stage "needs" as enabled presets absent from
       `artifact_ids` and pass them to `run_presets(..., only=...)`
-- [ ] write tests for wiring (one artifact per produced preset, correct
+- [x] write tests for wiring (one artifact per produced preset, correct
       artifact_type, skip already-present presets) and the new `list_folder_state`
       shape
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 5: CLI, doctor DAG view, docs, and end-to-end test
 

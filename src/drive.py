@@ -107,7 +107,15 @@ def find_newest_mp4(service: Any, folder_id: str) -> dict | None:
 
 
 def list_folder_state(service: Any, folder_id: str) -> list[dict]:
-    """Return mp4 files with sibling flags: {file, has_mp3, has_txt, mp3_id, txt_id, keypoints_id}."""
+    """Return mp4 files with sibling flags.
+
+    Each item is ``{file, has_mp3, has_txt, mp3_id, mp3_name, txt_id, artifact_ids}``
+    where ``artifact_ids`` maps each produced preset's ``artifact_type`` appProperty
+    to its Drive file id (e.g. ``{"keypoints": "k1"}``). The OpenAI stage consults
+    this to skip presets that already have an artifact. Legacy
+    ``<video-stem>.keypoints.md`` files uploaded before the appProperty existed are
+    folded onto the ``keypoints`` preset by stem.
+    """
     mp4_files = _list_files_by_mime(service, folder_id, MP4_MIME)
     mp3_files = _list_files_by_mime(service, folder_id, MP3_MIME)
     txt_files = _list_files_by_mime(service, folder_id, TXT_MIME)
@@ -119,7 +127,7 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
     # ``.keypoints`` suffix so they match back to the source video stem.
     #
     # The robust link is the ``source_video_id`` appProperty (see
-    # ``keypoints_by_source_id``); this bare-stem fallback only exists for
+    # ``artifacts_by_source_id``); this bare-stem fallback only exists for
     # legacy artifacts uploaded before that property was set. To avoid
     # false-matching a user-authored ``<something>.keypoints.md`` file as the
     # generated artifact of ``<something>.mp4`` (which would wrongly skip
@@ -137,14 +145,23 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
         keypoints_by_stem[_strip_keypoints_suffix(stem)] = f
     mp3_by_source_id = _files_by_source_video_id(mp3_files)
     txt_by_source_id = _files_by_source_video_id(txt_files)
-    keypoints_by_source_id = _files_by_source_video_id(md_files)
+    artifacts_by_source_id = _artifacts_by_source_video_id(md_files)
 
     items: list[dict] = []
     for mp4 in mp4_files:
         stem = drive_stem(mp4["name"])
         mp3 = mp3_by_source_id.get(mp4["id"]) or mp3_by_stem.get(stem)
         txt = txt_by_source_id.get(mp4["id"]) or txt_by_stem.get(stem)
-        keypoints = keypoints_by_source_id.get(mp4["id"]) or keypoints_by_stem.get(stem)
+
+        artifact_ids: dict[str, str] = {}
+        # Legacy bare-stem keypoints first; an authoritative source_video_id
+        # match (below) overrides it for the same artifact_type.
+        legacy_keypoints = keypoints_by_stem.get(stem)
+        if legacy_keypoints is not None:
+            artifact_ids["keypoints"] = legacy_keypoints["id"]
+        for artifact_type, f in artifacts_by_source_id.get(mp4["id"], {}).items():
+            artifact_ids[artifact_type] = f["id"]
+
         items.append({
             "file": mp4,
             "has_mp3": mp3 is not None,
@@ -152,7 +169,7 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
             "mp3_id": mp3["id"] if mp3 else None,
             "mp3_name": mp3["name"] if mp3 else None,
             "txt_id": txt["id"] if txt else None,
-            "keypoints_id": keypoints["id"] if keypoints else None,
+            "artifact_ids": artifact_ids,
         })
     return items
 
@@ -168,6 +185,24 @@ def _files_by_source_video_id(files: list[dict]) -> dict[str, dict]:
         if source_id:
             by_source_id[source_id] = item
     return by_source_id
+
+
+def _artifacts_by_source_video_id(files: list[dict]) -> dict[str, dict[str, dict]]:
+    """Group preset artifacts by source video id, then by ``artifact_type``.
+
+    Returns ``{source_video_id: {artifact_type: file}}``. A markdown artifact
+    carrying ``source_video_id`` but no ``artifact_type`` is assumed to be a legacy
+    keypoints document (the only artifact type that predates multi-preset support).
+    """
+    by_source: dict[str, dict[str, dict]] = {}
+    for item in files:
+        props = item.get("appProperties", {})
+        source_id = props.get(SOURCE_VIDEO_ID_PROPERTY)
+        if not source_id:
+            continue
+        artifact_type = props.get(ARTIFACT_TYPE_PROPERTY) or "keypoints"
+        by_source.setdefault(source_id, {})[artifact_type] = item
+    return by_source
 
 
 def download(
