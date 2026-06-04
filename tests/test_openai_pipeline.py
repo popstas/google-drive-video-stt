@@ -379,6 +379,67 @@ def test_content_to_text_handles_shapes(content):
     assert _content_to_text(content) == "line"
 
 
+# --- generalized run() -----------------------------------------------------
+
+def test_run_passes_instructions_and_input_sync():
+    captured: dict = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(output_text="result")
+
+    pipeline = OpenAIPipeline(api_key="sk-test", model="gpt-x")
+    pipeline._client = SimpleNamespace(responses=SimpleNamespace(create=create))
+
+    text, usage = pipeline.run("custom instructions", "custom input")
+    assert text == "result"
+    assert usage == {}
+    assert captured["instructions"] == "custom instructions"
+    assert captured["input"] == "custom input"
+    assert captured["model"] == "gpt-x"
+
+
+def test_run_empty_input_skips_api_call():
+    pipeline = OpenAIPipeline(api_key="sk-test")
+
+    def _boom():
+        raise AssertionError("client should not be built for empty input")
+
+    pipeline._get_client = _boom  # type: ignore[assignment]
+    assert pipeline.run("instr", "   \n ") == ("", {})
+
+
+def test_run_returns_usage_copy():
+    response = SimpleNamespace(
+        output_text="ok",
+        usage=SimpleNamespace(input_tokens=3, output_tokens=2, total_tokens=5),
+    )
+    pipeline = OpenAIPipeline(api_key="sk-test")
+    pipeline._client = SimpleNamespace(
+        responses=SimpleNamespace(create=lambda **kw: response)
+    )
+    text, usage = pipeline.run("instr", "in")
+    assert text == "ok"
+    assert usage == {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+    # The returned dict is a copy, independent of subsequent runs.
+    assert usage is not pipeline.last_usage
+
+
+def test_run_batch_uses_instructions():
+    line = json.dumps(
+        {"response": {"status_code": 200, "body": {"output_text": "batched"}}}
+    )
+    calls: dict = {}
+    pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
+    pipeline._client = _fake_batch_client(line + "\n", calls=calls)
+
+    text, _usage = pipeline.run("batch instructions", "batch input")
+    assert text == "batched"
+    body = calls["upload"]["file"][1].getvalue().decode("utf-8")
+    assert "batch instructions" in body
+    assert "batch input" in body
+
+
 # --- config integration ----------------------------------------------------
 
 def test_get_pipeline_reads_config():

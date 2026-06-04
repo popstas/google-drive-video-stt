@@ -219,6 +219,29 @@ class OpenAIPipeline:
             except Exception:
                 pass
 
+    def run(
+        self,
+        instructions: str,
+        input_text: str,
+    ) -> tuple[str, dict[str, int]]:
+        """Run one LLM pass: ``instructions`` over ``input_text``.
+
+        This is the generalized primitive behind every preset. It returns the
+        assistant text plus the usage dict for this call (also stored on
+        ``last_usage``). An empty ``input_text`` short-circuits without touching
+        the API. The sync and batch paths both take ``instructions`` as a
+        parameter so different presets can run different prompts.
+        """
+        self.last_usage = {}
+        input_text = input_text.strip()
+        if not input_text:
+            return input_text, {}
+        if self._use_batch:
+            text = self._generate_batch(instructions, input_text)
+        else:
+            text = self._generate_sync(instructions, input_text)
+        return text, dict(self.last_usage)
+
     def generate_keypoints(
         self,
         transcript: str,
@@ -226,21 +249,25 @@ class OpenAIPipeline:
         *,
         speaker_names: list[str] | None = None,
     ) -> str:
+        """Compatibility wrapper: build the keypoints prompt and run it.
+
+        Kept thin for existing callers/tests; new code should drive presets via
+        :meth:`run` and ``preset_pipeline.run_presets``.
+        """
         self.last_usage = {}
         transcript = transcript.strip()
         if not transcript:
             return transcript
         prompt = build_prompt(transcript, file_name, speaker_names=speaker_names)
-        if self._use_batch:
-            return self._generate_batch(prompt)
-        return self._generate_sync(prompt)
+        text, _ = self.run(INSTRUCTIONS, prompt)
+        return text
 
-    def _generate_sync(self, prompt: str) -> str:
+    def _generate_sync(self, instructions: str, prompt: str) -> str:
         client = self._get_client()
         try:
             response = client.responses.create(
                 model=self._model,
-                instructions=INSTRUCTIONS,
+                instructions=instructions,
                 input=prompt,
             )
         except Exception as exc:
@@ -248,15 +275,15 @@ class OpenAIPipeline:
         self.last_usage = _normalize_usage(getattr(response, "usage", None))
         return _extract_output_text(response)
 
-    def _generate_batch(self, prompt: str) -> str:
+    def _generate_batch(self, instructions: str, prompt: str) -> str:
         client = self._get_client()
         request = {
-            "custom_id": "keypoints-0",
+            "custom_id": "preset-0",
             "method": "POST",
             "url": RESPONSES_ENDPOINT,
             "body": {
                 "model": self._model,
-                "instructions": INSTRUCTIONS,
+                "instructions": instructions,
                 "input": prompt,
             },
         }

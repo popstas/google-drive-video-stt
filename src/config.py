@@ -46,6 +46,7 @@ class Config:
     openai_keypoints: bool = False
     openai_model: str = "gpt-5.4-mini"
     openai_batch: bool = False
+    openai_max_parallel: int = 4
     deepgram_model: str = "nova-3"
     deepgram_diarize_model: str = "latest"
     deepgram_audio_source: str = "m4a_copy"
@@ -117,6 +118,26 @@ def _load_deepgram_api_key(api_key: str, api_key_file: str) -> str:
                 return value.strip()
         return ""
     return ""
+
+
+def _parse_max_parallel(raw: object, *, default: int) -> int:
+    """Parse a positive ``openai.max_parallel`` worker cap (env string or YAML int)."""
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return default
+        raw = text
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"openai.max_parallel must be an integer, got: {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise ValueError(f"openai.max_parallel must be positive, got: {value}")
+    return value
 
 
 def _parse_bool(raw: str, *, default: bool) -> bool:
@@ -257,6 +278,9 @@ def _config_from_env(*, validate_providers: bool = True) -> Config:
         os.environ.get("OPENAI_KEYPOINTS", ""), default=False
     )
     openai_batch = _parse_bool(os.environ.get("OPENAI_BATCH", ""), default=False)
+    openai_max_parallel = _parse_max_parallel(
+        os.environ.get("OPENAI_MAX_PARALLEL", ""), default=4
+    )
 
     output_target = (
         os.environ.get("OUTPUT_TARGET", "drive").strip().lower() or "drive"
@@ -327,6 +351,7 @@ def _config_from_env(*, validate_providers: bool = True) -> Config:
         openai_keypoints=openai_keypoints,
         openai_model=openai_model,
         openai_batch=openai_batch,
+        openai_max_parallel=openai_max_parallel,
         deepgram_model=deepgram_model,
         deepgram_diarize_model=deepgram_diarize_model,
         deepgram_audio_source=deepgram_audio_source,
@@ -442,6 +467,7 @@ def _config_from_yaml(
     openai_model = _yaml_str(openai.get("model"), "gpt-5.4-mini") or "gpt-5.4-mini"
     openai_keypoints = _yaml_bool(openai.get("keypoints"), default=False)
     openai_batch = _yaml_bool(openai.get("batch"), default=False)
+    openai_max_parallel = _parse_max_parallel(openai.get("max_parallel"), default=4)
     presets = _resolve_presets(config_presets)
 
     deepgram_api_key = ""
@@ -535,6 +561,7 @@ def _config_from_yaml(
         openai_keypoints=openai_keypoints,
         openai_model=openai_model,
         openai_batch=openai_batch,
+        openai_max_parallel=openai_max_parallel,
         deepgram_model=deepgram_model,
         deepgram_diarize_model=deepgram_diarize_model,
         deepgram_audio_source=deepgram_audio_source,
@@ -577,6 +604,7 @@ def _config_to_yaml_dict(config: Config) -> dict:
             "api_key": config.openai_api_key,
             "model": config.openai_model,
             "batch": config.openai_batch,
+            "max_parallel": config.openai_max_parallel,
             "keypoints": config.openai_keypoints,
         },
         # Seed a presets block from the built-in keypoints pass. The DAG executor

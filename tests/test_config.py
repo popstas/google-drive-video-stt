@@ -22,6 +22,7 @@ ENV_VARS = [
     "OPENAI_MODEL",
     "OPENAI_KEYPOINTS",
     "OPENAI_BATCH",
+    "OPENAI_MAX_PARALLEL",
     "OUTPUT_TARGET",
     "OUTPUT_DIR",
     "DEEPGRAM_API_KEY",
@@ -832,3 +833,62 @@ def test_env_migration_drops_keypoints_when_gate_off(monkeypatch, tmp_path):
     cfg = load_config(config_path=config_file, validate_providers=False)
 
     assert cfg.presets == ()
+
+
+# --- openai.max_parallel ----------------------------------------------------
+
+
+def test_max_parallel_defaults_to_four(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(config_file, {"stt": {"provider": "disabled"}})
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    assert cfg.openai_max_parallel == 4
+
+
+def test_yaml_max_parallel_is_read(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {"stt": {"provider": "disabled"}, "openai": {"max_parallel": 8}},
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    assert cfg.openai_max_parallel == 8
+
+
+def test_yaml_max_parallel_must_be_positive(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {"stt": {"provider": "disabled"}, "openai": {"max_parallel": 0}},
+    )
+
+    with pytest.raises(ValueError, match="max_parallel must be positive"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
+def test_env_migration_reads_max_parallel(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOLDER_IDS", "f1")
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    monkeypatch.setenv("OPENAI_MAX_PARALLEL", "6")
+    config_file = tmp_path / "config.yml"
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    assert cfg.openai_max_parallel == 6
+
+
+def test_max_parallel_round_trips(monkeypatch, tmp_path):
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    monkeypatch.setenv("OPENAI_MAX_PARALLEL", "9")
+    cfg = load_config(validate_providers=False)
+
+    data = _config_to_yaml_dict(cfg)
+    config_file = tmp_path / "config.yml"
+    _write_yaml(config_file, data)
+    reloaded = load_config(config_path=config_file, validate_providers=False)
+
+    assert reloaded.openai_max_parallel == 9

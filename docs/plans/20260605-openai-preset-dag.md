@@ -148,22 +148,22 @@ recording that exercises speaker-named presets cheaply.
 
 ### Task 3: DAG executor over the OpenAI pipeline
 
-- [ ] Generalize `OpenAIPipeline` to a `run(instructions, input_text) -> (text,
+- [x] Generalize `OpenAIPipeline` to a `run(instructions, input_text) -> (text,
       usage)` method (sync and batch paths take `instructions` as a parameter)
-- [ ] Keep a thin `generate_keypoints` wrapper for compatibility with existing
+- [x] Keep a thin `generate_keypoints` wrapper for compatibility with existing
       callers and tests
-- [ ] Add `src/preset_pipeline.py` with `run_presets(...)` executing the DAG via a
+- [x] Add `src/preset_pipeline.py` with `run_presets(...)` executing the DAG via a
       `ThreadPoolExecutor` capped at `openai.max_parallel`, dispatching independent
       presets concurrently once dependencies finish
-- [ ] Build each preset's input from its dependency outputs (labeled separator per
+- [x] Build each preset's input from its dependency outputs (labeled separator per
       dependency) or the raw transcript when it has no dependencies, honoring
       per-preset model/batch fallback and an `only` subset
-- [ ] Aggregate partial failures: persist successful results, skip a failed preset's
+- [x] Aggregate partial failures: persist successful results, skip a failed preset's
       dependents, and surface a combined error after the stage
-- [ ] write tests for topological order, concurrent dispatch of independent presets,
+- [x] write tests for topological order, concurrent dispatch of independent presets,
       input concatenation, model/batch fallback, `only`, and partial-failure
       aggregation (OpenAI client mocked)
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 4: main.py wiring and multi-artifact idempotency
 
