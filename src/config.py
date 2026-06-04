@@ -6,6 +6,8 @@ from pathlib import Path
 
 import yaml
 
+from src.presets import BUILTIN_PRESETS, Preset, merge_presets, validate_dag
+
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -51,10 +53,18 @@ class Config:
     deepgram_keyterms_enabled: bool = True
     deepgram_keyterms_file: Path = DEEPGRAM_DEFAULT_KEYTERMS_FILE
     deepgram_keyterms: tuple[str, ...] = ()
+    presets: tuple[Preset, ...] = ()
 
 
 def _parse_folder_ids(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _resolve_presets(config_presets: dict | None) -> tuple[Preset, ...]:
+    """Merge config presets over built-ins, validate the DAG, and freeze the result."""
+    merged = merge_presets(BUILTIN_PRESETS, config_presets)
+    validate_dag(merged)
+    return tuple(merged.values())
 
 
 def _dotenv_path() -> Path:
@@ -296,6 +306,10 @@ def _config_from_env(*, validate_providers: bool = True) -> Config:
                 deepgram_keyterms_file,
             )
 
+    # Env config has no presets map; the built-in keypoints pass is gated by the
+    # legacy OPENAI_KEYPOINTS flag so the migrated YAML stays behavior-compatible.
+    presets = _resolve_presets({"keypoints": {"enabled": openai_keypoints}})
+
     return Config(
         folder_ids=folder_ids,
         poll_interval=poll_interval,
@@ -320,6 +334,7 @@ def _config_from_env(*, validate_providers: bool = True) -> Config:
         deepgram_keyterms_enabled=deepgram_keyterms_enabled,
         deepgram_keyterms_file=deepgram_keyterms_file,
         deepgram_keyterms=deepgram_keyterms,
+        presets=presets,
     )
 
 
@@ -386,6 +401,7 @@ def _config_from_yaml(
     stt = _as_mapping(raw.get("stt"), "stt")
     deepgram = _as_mapping(stt.get("deepgram"), "stt.deepgram")
     openai = _as_mapping(raw.get("openai"), "openai")
+    config_presets = _as_mapping(raw.get("presets"), "presets")
 
     folder_ids_raw = raw.get("folder_ids") or []
     if isinstance(folder_ids_raw, str):
@@ -426,6 +442,7 @@ def _config_from_yaml(
     openai_model = _yaml_str(openai.get("model"), "gpt-5.4-mini") or "gpt-5.4-mini"
     openai_keypoints = _yaml_bool(openai.get("keypoints"), default=False)
     openai_batch = _yaml_bool(openai.get("batch"), default=False)
+    presets = _resolve_presets(config_presets)
 
     deepgram_api_key = ""
     deepgram_model = _yaml_str(deepgram.get("model"), "nova-3") or "nova-3"
@@ -525,6 +542,7 @@ def _config_from_yaml(
         deepgram_keyterms_enabled=deepgram_keyterms_enabled,
         deepgram_keyterms_file=deepgram_keyterms_file,
         deepgram_keyterms=deepgram_keyterms,
+        presets=presets,
     )
 
 

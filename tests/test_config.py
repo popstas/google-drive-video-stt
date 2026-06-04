@@ -749,3 +749,86 @@ def test_migrate_config_force_overwrites(monkeypatch, tmp_path):
 
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     assert data["folder_ids"] == ["fresh"]
+
+
+# --- presets DAG wiring -----------------------------------------------------
+
+
+def test_yaml_presets_merge_over_builtins(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {
+                "transcript-cleanup": {"instructions": "clean it"},
+                "keypoints": {"depends_on": ["transcript-cleanup"]},
+            },
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    by_name = {p.name: p for p in cfg.presets}
+    assert set(by_name) == {"keypoints", "transcript-cleanup"}
+    assert by_name["keypoints"].depends_on == ("transcript-cleanup",)
+    # The built-in instructions are preserved when only depends_on is overridden.
+    assert by_name["keypoints"].artifact_suffix == ".keypoints.md"
+
+
+def test_yaml_presets_default_to_builtins_when_absent(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(config_file, {"stt": {"provider": "disabled"}})
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    assert {p.name for p in cfg.presets} == {"keypoints"}
+
+
+def test_yaml_presets_can_disable_builtin(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {"stt": {"provider": "disabled"}, "presets": {"keypoints": {"enabled": False}}},
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    assert cfg.presets == ()
+
+
+def test_yaml_presets_invalid_dag_raises(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {"summary": {"instructions": "s", "depends_on": ["ghost"]}},
+        },
+    )
+
+    with pytest.raises(ValueError, match="unknown or disabled"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
+def test_env_migration_seeds_keypoints_preset(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOLDER_IDS", "f1")
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-x")
+    config_file = tmp_path / "config.yml"
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    assert {p.name for p in cfg.presets} == {"keypoints"}
+
+
+def test_env_migration_drops_keypoints_when_gate_off(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOLDER_IDS", "f1")
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    monkeypatch.setenv("OPENAI_KEYPOINTS", "false")
+    config_file = tmp_path / "config.yml"
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    assert cfg.presets == ()

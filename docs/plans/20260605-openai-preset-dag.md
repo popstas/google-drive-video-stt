@@ -131,20 +131,20 @@ recording that exercises speaker-named presets cheaply.
 
 ### Task 2: Preset model, built-ins, merge, and DAG validation
 
-- [ ] Add `src/presets.py` with a frozen `Preset` dataclass (name, instructions,
+- [x] Add `src/presets.py` with a frozen `Preset` dataclass (name, instructions,
       depends_on, model, batch, artifact_suffix, enabled) and default suffix
       derivation
-- [ ] Define `BUILTIN_PRESETS` shipping at least `keypoints` with today's
+- [x] Define `BUILTIN_PRESETS` shipping at least `keypoints` with today's
       `INSTRUCTIONS` and `.keypoints.md` suffix
-- [ ] Implement `merge_presets()` so config presets override built-ins field-by-field,
+- [x] Implement `merge_presets()` so config presets override built-ins field-by-field,
       add new presets, and disable built-ins via `enabled: false`
-- [ ] Implement `validate_dag()` to verify dependencies exist and are enabled and
+- [x] Implement `validate_dag()` to verify dependencies exist and are enabled and
       that the graph has no cycles, raising on violation
-- [ ] Parse the YAML `presets` map into `Config.presets` and wire merge + validation
+- [x] Parse the YAML `presets` map into `Config.presets` and wire merge + validation
       into `load_config()`
-- [ ] write tests for merge (override/add/disable), DAG validation (valid, missing
+- [x] write tests for merge (override/add/disable), DAG validation (valid, missing
       dependency, cycle), and suffix derivation
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 3: DAG executor over the OpenAI pipeline
 

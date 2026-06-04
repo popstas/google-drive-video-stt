@@ -7,35 +7,21 @@ import time
 
 from src.config import Config
 from src.postprocess import extract_interlocutor_names
+from src.presets import INSTRUCTIONS
 from src.stt.base import STTError
 
 logger = logging.getLogger(__name__)
 
-# LLM keypoints pipeline modeled on the `keypoints-transcription` skill: take a
-# speaker-named transcript of a recorded conversation and produce a concise
-# Keypoints summary (Задачи / Тезисы / Открытые вопросы) grounded strictly in the
-# transcript, in plain Markdown without vault-style wikilinks.
-INSTRUCTIONS = (
-    "You are a meeting analyst. You receive a speaker-named transcript of a "
-    "recorded conversation and produce a concise Keypoints summary in Markdown, "
-    "written in the transcript's own language.\n"
-    "Return ONLY the Keypoints document with exactly these three sections, in this "
-    "order and with these exact headings:\n"
-    "## Задачи\n"
-    "Group action items under a `### <Ответственный>` subheading per assignee, "
-    "using the speaker's real name from the transcript; use `### Без "
-    "ответственного` when the owner is unclear. List each task as `- [ ] <task>` "
-    "and do not repeat the assignee name inside the task line.\n"
-    "## Тезисы\n"
-    "Key points and decisions, each as a `- ` bullet.\n"
-    "## Открытые вопросы\n"
-    "Unresolved questions, each as a `- ` bullet.\n"
-    "Rules: base every item strictly on the transcript - never invent facts, "
-    "tasks, or decisions. Omit a section's bullets only when the transcript truly "
-    "has none, but always keep the three headings. Plain text only: no wikilinks "
-    "(`[[...]]`), no em dashes (use `-`), no guillemets (use straight quotes). No "
-    "preamble, no explanation, no marketing."
-)
+# `INSTRUCTIONS` (the built-in `keypoints` preset prompt) lives in src.presets so the
+# preset registry is its single source of truth; it is re-exported here for callers
+# and tests that import it from the pipeline module.
+__all__ = [
+    "INSTRUCTIONS",
+    "OpenAIPipeline",
+    "build_prompt",
+    "generate_keypoints",
+    "get_pipeline",
+]
 
 DEFAULT_MODEL = "gpt-5.4-mini"
 RESPONSES_ENDPOINT = "/v1/responses"
