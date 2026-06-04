@@ -8,7 +8,7 @@
 
 ## Context (from discovery)
 - Files/components involved: fresh repo, all code to be created from scratch
-- Project structure defined in `docs/plan.md` — `src/` with 6 modules + tests
+- Initial project structure defined during planning — `src/` with 6 modules + tests
 - Dependencies: `google-api-python-client`, `google-auth-oauthlib`, `requests`, `ffmpeg` (system)
 - Package management: `uv` with `pyproject.toml`
 - All mutable data in `./data/` (gitignored)

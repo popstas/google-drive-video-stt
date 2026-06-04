@@ -2,7 +2,7 @@
 
 ## Overview
 
-This plan adopts the queued work in `docs/TODO.md` for the Google Drive video STT service.
+This plan adopts the completed queue for the Google Drive video STT service.
 The service currently runs headless, polling Drive folders, extracting MP3 from new MP4s, and
 optionally transcribing to a sibling `.txt`. The queued work adds an operator-facing CLI over
 the existing operations, a project skill that documents it, a transcript post-processing stage
@@ -18,7 +18,7 @@ dropped characters in output filenames, and a new OpenAI-based transcription/key
 - Idempotency is sibling-file based (presence of `<basename>.mp3` / `.txt` by basename).
 - Tests mock all external services (Drive, OpenAI, Google STT, ffmpeg); no network in tests.
 - `from __future__ import annotations` + `X | None` hints throughout; ruff line-length 100, py311.
-- Adopted from `docs/TODO.md` (5 queued items). CLI scope confirmed as "wrap all existing
+- Adopted from the project queue (5 items). CLI scope confirmed as "wrap all existing
   operations" (auth, run loop, run-once, on-demand process, transcribe, list/status).
 
 ## Development Approach
@@ -48,7 +48,7 @@ dropped characters in output filenames, and a new OpenAI-based transcription/key
   when extra speakers appear (beyond the expected 2) decides which real speaker each extra one
   merges into. The final transcript overwrites the original `.txt` on Google Drive.
 - **OpenAI pipeline**: mirrors the `keypoints-transcription` skill at
-  `/home/popstas/projects/text/obsidian/ExpertizeMe/.claude/skills/keypoints-transcription`.
+  `<private-vault>/.claude/skills/keypoints-transcription`.
   Config: `openai_api_key`, `proxy_url`, model `gpt-5.4-mini`, prompt derived from the skill.
   Use the modern OpenAI Responses API (optionally the OpenAI Agents SDK so the agent can run the
   Python scripts referenced in the skill). Consider batch-mode support (≈50% cost reduction).
@@ -97,7 +97,7 @@ dropped characters in output filenames, and a new OpenAI-based transcription/key
 
 ### Task 5: Add an OpenAI transcription/keypoints pipeline
 
-- [x] Study the `keypoints-transcription` skill at `/home/popstas/projects/text/obsidian/ExpertizeMe/.claude/skills/keypoints-transcription` and base the pipeline + prompt on it
+- [x] Study the `keypoints-transcription` skill at `<private-vault>/.claude/skills/keypoints-transcription` and base the pipeline + prompt on it
 - [x] Add config: `openai_api_key`, `proxy_url`, model `gpt-5.4-mini` (wire into `load_config()` / `Config` with validation)
 - [x] Implement the pipeline using the modern OpenAI Responses API (optionally the OpenAI Agents SDK so the agent can run the Python scripts referenced in the skill)
 - [x] Integrate as an STT/post-processing provider path consistent with the existing `src/stt/` provider dispatch
