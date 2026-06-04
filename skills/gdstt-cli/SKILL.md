@@ -151,19 +151,13 @@ agent corrects speakers and writes the Keypoints document. The deterministic
 5. **Run relabel:** `gdstt relabel --in <base>.txt --out <base>.transcript.md
    --map MAP.json`. Check stderr for `unmapped labels` and extend `default` until
    none remain. Confirm no `Speaker N` label survives in the output body.
-6. **Sensitive fragments.** Scan the relabeled body (case-insensitive) for
-   "не записывай / не пиши / вырежи это / убери это / не для протокола / офф
-   рекорд / off the record / между нами / это конфиденциально". Do not cut
-   silently: quote the fragment to the user, ask for boundaries, cut only after
-   confirmation, and leave `<!-- redacted: по просьбе участника -->` in place. If
-   no markers, say so in the final status.
-7. **Write `<base>.keypoints.md`** from the corrected transcript using the
+6. **Write `<base>.keypoints.md`** from the corrected transcript using the
    template below.
-8. **Place artifacts in the destination.** When working through Drive, the TXT is
+7. **Place artifacts in the destination.** When working through Drive, the TXT is
    already a sibling; upload the Keypoints file next to it. When `OUTPUT_TARGET=
    folder`, write both into `OUTPUT_DIR`.
-9. **Final status:** files created, the speaker mapping (who merged into whom),
-   any unmapped labels, and whether sensitive fragments were found.
+8. **Final status:** files created, the speaker mapping (who merged into whom),
+   and any unmapped labels.
 
 ### Keypoints Template
 

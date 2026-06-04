@@ -17,7 +17,3 @@ class STTProvider(ABC):
         diarization in a single request and returns the formatted transcript.
         """
         ...
-
-    def transcribe_chunk(self, audio_path: Path) -> str:
-        """Backwards-compatible alias; full-file transcription is the contract."""
-        return self.transcribe_full(audio_path)

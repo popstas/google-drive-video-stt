@@ -190,7 +190,7 @@ class OpenAIPipeline:
     ) -> None:
         if not api_key:
             raise STTError(
-                "OPENAI_API_KEY is required for the OpenAI post-processing pipeline"
+                "OPENAI_API_KEY is required for the OpenAI keypoints pipeline"
             )
         self._api_key = api_key
         self._model = model or DEFAULT_MODEL

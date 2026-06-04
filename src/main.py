@@ -588,31 +588,6 @@ def process_target(
     return [result] if result is not None else []
 
 
-def refresh_artifact_names(service: Any, file_id: str) -> None:
-    """Rename linked generated artifacts to match the current source MP4 stem."""
-    meta = _call_with_transient_retries(
-        lambda: drive.get_file_metadata(service, file_id),
-        description=f"get metadata for {file_id}",
-    )
-    parents = meta.get("parents") or []
-    if not parents:
-        raise RuntimeError(f"File {file_id} has no parent folder")
-    folder_id = parents[0]
-    items = _call_with_transient_retries(
-        lambda: drive.list_folder_state(service, folder_id),
-        description=f"list folder state for {folder_id}",
-    )
-    item = next((it for it in items if it["file"]["id"] == file_id), None)
-    if item is None:
-        raise RuntimeError(f"File {file_id} is not an MP4 in folder {folder_id}")
-
-    stem = drive.drive_stem(item["file"]["name"])
-    if item.get("mp3_id"):
-        drive.rename_file(service, item["mp3_id"], stem + ".mp3")
-    if item.get("txt_id"):
-        drive.rename_file(service, item["txt_id"], stem + ".txt")
-
-
 def run_once(
     service: Any,
     config: Config,

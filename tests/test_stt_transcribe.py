@@ -51,7 +51,6 @@ def test_transcribe_file_deepgram_full_file(mocker, tmp_path):
 
     assert result == "[00:00:00] Speaker 1: привет"
     provider.transcribe_full.assert_called_once_with(mp3)
-    provider.transcribe_chunk.assert_not_called()
 
 
 def test_transcribe_full_empty_string_raises(mocker, tmp_path):
@@ -66,8 +65,6 @@ def test_transcribe_full_empty_string_raises(mocker, tmp_path):
 
     with pytest.raises(STTError, match="empty transcript"):
         transcribe_mod.transcribe_file(mp3, _cfg(provider="deepgram"))
-
-    provider.transcribe_chunk.assert_not_called()
 
 
 def test_transcribe_file_logs_deepgram_cost(mocker, tmp_path, caplog):

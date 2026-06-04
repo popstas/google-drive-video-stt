@@ -114,6 +114,11 @@ def cmd_latest(args: argparse.Namespace) -> None:
     if not folder_id:
         logger.error("No folder to inspect; set FOLDER_IDS or pass --folder")
         raise SystemExit(1)
+    if not args.folder and len(config.folder_ids) > 1:
+        logger.info(
+            "%d folders configured; using the first (%s). Pass --folder to pick another.",
+            len(config.folder_ids), folder_id,
+        )
     service = auth.build_drive_service(data_dir=config.data_dir)
     newest = drive.find_newest_mp4(service, folder_id)
     if newest is None:

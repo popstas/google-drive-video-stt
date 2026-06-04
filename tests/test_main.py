@@ -693,37 +693,6 @@ def test_process_target_file_without_parent_raises(mocker):
         main.process_target(service, "v1", cfg)
 
 
-def test_refresh_artifact_names_renames_linked_artifacts(mocker):
-    service = MagicMock()
-    mocker.patch(
-        "src.main.drive.get_file_metadata",
-        return_value={
-            "id": "v1",
-            "name": "New name.mp4",
-            "mimeType": "video/mp4",
-            "parents": ["folderA"],
-        },
-    )
-    mocker.patch(
-        "src.main.drive.list_folder_state",
-        return_value=[
-            {
-                "file": {"id": "v1", "name": "New name.mp4"},
-                "has_mp3": True,
-                "has_txt": True,
-                "mp3_id": "m1",
-                "txt_id": "t1",
-            }
-        ],
-    )
-    rename_mock = mocker.patch("src.main.drive.rename_file")
-
-    main.refresh_artifact_names(service, "v1")
-
-    assert rename_mock.call_args_list[0].args == (service, "m1", "New name.mp3")
-    assert rename_mock.call_args_list[1].args == (service, "t1", "New name.txt")
-
-
 def test_run_once_iterates_all_folders_and_files(mocker):
     service = MagicMock()
     cfg = make_config(folder_ids=["f1", "f2"])

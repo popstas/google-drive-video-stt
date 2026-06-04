@@ -37,21 +37,8 @@ def test_get_provider_returns_deepgram_provider():
     assert isinstance(provider, DeepgramProvider)
     assert isinstance(provider, STTProvider)
     assert callable(provider.transcribe_full)
-    assert callable(provider.transcribe_chunk)
 
 
 def test_get_provider_unknown_name_raises():
     with pytest.raises(UnknownProviderError, match="Unknown STT provider"):
         get_provider(_cfg("bogus"))
-
-
-def test_transcribe_chunk_defaults_to_transcribe_full(tmp_path):
-    class DummyProvider(STTProvider):
-        def transcribe_full(self, audio_path: Path) -> str:
-            return f"full:{audio_path.name}"
-
-    provider = DummyProvider()
-    audio_path = tmp_path / "audio.mp3"
-    audio_path.write_bytes(b"x")
-
-    assert provider.transcribe_chunk(audio_path) == "full:audio.mp3"
