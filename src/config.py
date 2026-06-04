@@ -1,13 +1,20 @@
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+
+import yaml
 
 try:
     from dotenv import load_dotenv
 except ImportError:
     load_dotenv = None
 
+logger = logging.getLogger(__name__)
+
+CONFIG_FILE_NAME = "config.yml"
+CONFIG_PATH_ENV_VAR = "GDSTT_CONFIG"
 
 SUPPORTED_STT_PROVIDERS = ("", "deepgram")
 OUTPUT_TARGETS = ("drive", "folder")
@@ -135,7 +142,8 @@ def _load_deepgram_keyterms(enabled: bool, keyterms_file: Path) -> tuple[str, ..
     return keyterms
 
 
-def load_config(*, validate_providers: bool = True) -> Config:
+def _config_from_env(*, validate_providers: bool = True) -> Config:
+    """Build a Config from `.env`/environment variables (auto-migration source)."""
     dotenv_path = _dotenv_path()
     if load_dotenv is not None:
         load_dotenv(dotenv_path=dotenv_path, override=False, encoding="utf-8-sig")
@@ -313,3 +321,313 @@ def load_config(*, validate_providers: bool = True) -> Config:
         deepgram_keyterms_file=deepgram_keyterms_file,
         deepgram_keyterms=deepgram_keyterms,
     )
+
+
+def _resolve_relative_to(raw: str, base: Path) -> Path:
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    return base / path
+
+
+def _resolve_config_file_path(config_path: str | Path | None = None) -> Path:
+    """Resolve the config.yml path: explicit arg > GDSTT_CONFIG > <data_dir>/config.yml.
+
+    The path is a bootstrap pointer to the file, not an application setting, so the
+    only environment read here is the optional ``GDSTT_CONFIG`` override and the
+    ``DATA_DIR`` hint that locates the default ``./data`` directory.
+    """
+    if config_path:
+        return Path(config_path)
+    env_path = os.environ.get(CONFIG_PATH_ENV_VAR, "").strip()
+    if env_path:
+        return Path(env_path)
+    dotenv_path = _dotenv_path()
+    data_dir = _resolve_relative_to_dotenv(
+        os.environ.get("DATA_DIR", "data").strip() or "data",
+        dotenv_path,
+    )
+    return data_dir / CONFIG_FILE_NAME
+
+
+def _as_mapping(value: object, label: str) -> dict:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    raise ValueError(f"{label} must be a mapping in {CONFIG_FILE_NAME}")
+
+
+def _yaml_str(value: object, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def _yaml_bool(value: object, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return _parse_bool(value, default=default)
+    raise ValueError(f"Expected boolean value, got: {value!r}")
+
+
+def _config_from_yaml(
+    raw: dict,
+    config_file: Path,
+    *,
+    validate_providers: bool = True,
+) -> Config:
+    """Build a Config from the grouped `data/config.yml` schema."""
+    base = config_file.parent
+    output = _as_mapping(raw.get("output"), "output")
+    stt = _as_mapping(raw.get("stt"), "stt")
+    deepgram = _as_mapping(stt.get("deepgram"), "stt.deepgram")
+    openai = _as_mapping(raw.get("openai"), "openai")
+
+    folder_ids_raw = raw.get("folder_ids") or []
+    if isinstance(folder_ids_raw, str):
+        folder_ids = _parse_folder_ids(folder_ids_raw)
+    elif isinstance(folder_ids_raw, (list, tuple)):
+        folder_ids = [str(item).strip() for item in folder_ids_raw if str(item).strip()]
+    else:
+        raise ValueError("folder_ids must be a list or comma-separated string")
+
+    poll_raw = raw.get("poll_interval", 600)
+    try:
+        poll_interval = int(poll_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"poll_interval must be an integer, got: {poll_raw!r}") from exc
+    if poll_interval <= 0:
+        raise ValueError(f"poll_interval must be positive, got: {poll_interval}")
+
+    bitrate = _yaml_str(raw.get("bitrate"), "96k") or "96k"
+    data_dir = _resolve_relative_to(
+        _yaml_str(raw.get("data_dir"), "data") or "data", base
+    )
+    proxy_url = _yaml_str(raw.get("proxy_url"))
+
+    stt_provider = _yaml_str(stt.get("provider"), "deepgram").lower()
+    if stt_provider == "disabled":
+        stt_provider = ""
+    if stt_provider not in SUPPORTED_STT_PROVIDERS:
+        raise ValueError(
+            f"stt.provider must be one of {SUPPORTED_STT_PROVIDERS!r}, got: {stt_provider!r}"
+        )
+
+    stt_language = _yaml_str(stt.get("language"))
+    if stt_provider == "deepgram" and not stt_language:
+        stt_language = "ru"
+    stt_postprocess = _yaml_bool(stt.get("postprocess"), default=True)
+
+    openai_api_key = _yaml_str(openai.get("api_key"))
+    openai_model = _yaml_str(openai.get("model"), "gpt-5.4-mini") or "gpt-5.4-mini"
+    openai_keypoints = _yaml_bool(openai.get("keypoints"), default=False)
+    openai_batch = _yaml_bool(openai.get("batch"), default=False)
+
+    deepgram_api_key = ""
+    deepgram_model = _yaml_str(deepgram.get("model"), "nova-3") or "nova-3"
+    deepgram_diarize_model = (
+        _yaml_str(deepgram.get("diarize_model"), "latest").lower() or "latest"
+    )
+    deepgram_audio_source = (
+        _yaml_str(deepgram.get("audio_source"), "m4a_copy").lower() or "m4a_copy"
+    )
+    deepgram_txt_formatter = (
+        _yaml_str(deepgram.get("txt_formatter"), "word_speaker").lower() or "word_speaker"
+    )
+    deepgram_keyterms_enabled = _yaml_bool(
+        deepgram.get("keyterms_enabled"), default=True
+    )
+    deepgram_keyterms_file = _resolve_relative_to(
+        _yaml_str(deepgram.get("keyterms_file"), str(DEEPGRAM_DEFAULT_KEYTERMS_FILE))
+        or str(DEEPGRAM_DEFAULT_KEYTERMS_FILE),
+        base,
+    )
+    deepgram_keyterms: tuple[str, ...] = ()
+
+    drive_mp3_artifact_default = not (
+        stt_provider == "deepgram" and deepgram_audio_source == "m4a_copy"
+    )
+    drive_mp3_artifact = _yaml_bool(
+        stt.get("drive_mp3_artifact"), default=drive_mp3_artifact_default
+    )
+
+    output_target = _yaml_str(output.get("target"), "drive").lower() or "drive"
+    if output_target not in OUTPUT_TARGETS:
+        raise ValueError(
+            f"output.target must be one of {OUTPUT_TARGETS!r}, got: {output_target!r}"
+        )
+    output_dir_raw = _yaml_str(output.get("dir"))
+    output_dir = _resolve_relative_to(output_dir_raw, base) if output_dir_raw else None
+    if output_target == "folder" and output_dir is None:
+        raise ValueError("output.dir is required when output.target=folder")
+
+    if validate_providers:
+        if openai_keypoints and not openai_api_key:
+            raise ValueError(
+                "openai.api_key is required when openai.keypoints is enabled"
+            )
+        if stt_provider == "deepgram":
+            api_key_file = _yaml_str(deepgram.get("api_key_file"))
+            deepgram_api_key = _load_deepgram_api_key(
+                _yaml_str(deepgram.get("api_key")),
+                str(_resolve_relative_to(api_key_file, base)) if api_key_file else "",
+            )
+            if not deepgram_api_key:
+                raise ValueError(
+                    "deepgram.api_key is required when stt.provider=deepgram. "
+                    "Add stt.deepgram.api_key to your config.yml."
+                )
+            if deepgram_diarize_model not in DEEPGRAM_DIARIZE_MODELS:
+                raise ValueError(
+                    f"stt.deepgram.diarize_model must be one of "
+                    f"{DEEPGRAM_DIARIZE_MODELS!r}, got: {deepgram_diarize_model!r}"
+                )
+            if deepgram_audio_source not in DEEPGRAM_AUDIO_SOURCES:
+                raise ValueError(
+                    f"stt.deepgram.audio_source must be one of "
+                    f"{DEEPGRAM_AUDIO_SOURCES!r}, got: {deepgram_audio_source!r}"
+                )
+            if deepgram_txt_formatter not in DEEPGRAM_TXT_FORMATTERS:
+                raise ValueError(
+                    f"stt.deepgram.txt_formatter must be one of "
+                    f"{DEEPGRAM_TXT_FORMATTERS!r}, got: {deepgram_txt_formatter!r}"
+                )
+            deepgram_keyterms = _load_deepgram_keyterms(
+                deepgram_keyterms_enabled,
+                deepgram_keyterms_file,
+            )
+
+    return Config(
+        folder_ids=folder_ids,
+        poll_interval=poll_interval,
+        bitrate=bitrate,
+        data_dir=data_dir,
+        proxy_url=proxy_url,
+        stt_provider=stt_provider,
+        openai_api_key=openai_api_key,
+        deepgram_api_key=deepgram_api_key,
+        stt_language=stt_language,
+        stt_postprocess=stt_postprocess,
+        drive_mp3_artifact=drive_mp3_artifact,
+        output_target=output_target,
+        output_dir=output_dir,
+        openai_keypoints=openai_keypoints,
+        openai_model=openai_model,
+        openai_batch=openai_batch,
+        deepgram_model=deepgram_model,
+        deepgram_diarize_model=deepgram_diarize_model,
+        deepgram_audio_source=deepgram_audio_source,
+        deepgram_txt_formatter=deepgram_txt_formatter,
+        deepgram_keyterms_enabled=deepgram_keyterms_enabled,
+        deepgram_keyterms_file=deepgram_keyterms_file,
+        deepgram_keyterms=deepgram_keyterms,
+    )
+
+
+def _config_to_yaml_dict(config: Config) -> dict:
+    """Serialize a Config into the grouped `config.yml` schema."""
+    return {
+        "folder_ids": list(config.folder_ids),
+        "poll_interval": config.poll_interval,
+        "bitrate": config.bitrate,
+        "data_dir": str(config.data_dir),
+        "proxy_url": config.proxy_url,
+        "output": {
+            "target": config.output_target,
+            "dir": str(config.output_dir) if config.output_dir else None,
+        },
+        "stt": {
+            "provider": config.stt_provider,
+            "language": config.stt_language,
+            "postprocess": config.stt_postprocess,
+            "drive_mp3_artifact": config.drive_mp3_artifact,
+            "deepgram": {
+                "api_key": config.deepgram_api_key,
+                "model": config.deepgram_model,
+                "diarize_model": config.deepgram_diarize_model,
+                "audio_source": config.deepgram_audio_source,
+                "txt_formatter": config.deepgram_txt_formatter,
+                "keyterms_enabled": config.deepgram_keyterms_enabled,
+                "keyterms_file": str(config.deepgram_keyterms_file),
+            },
+        },
+        "openai": {
+            "api_key": config.openai_api_key,
+            "model": config.openai_model,
+            "batch": config.openai_batch,
+            "keypoints": config.openai_keypoints,
+        },
+        # Seed a presets block from the built-in keypoints pass. The DAG executor
+        # (later tasks) reads this map; here it captures the current single-pass gate.
+        "presets": {
+            "keypoints": {"enabled": config.openai_keypoints},
+        },
+    }
+
+
+def _dump_yaml(data: dict) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+
+
+def _read_config_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return ""
+
+
+def load_config(
+    *,
+    validate_providers: bool = True,
+    config_path: str | Path | None = None,
+) -> Config:
+    """Load configuration from `data/config.yml`, auto-migrating from `.env` once.
+
+    When the resolved config file is missing or empty, build the configuration from
+    the existing `.env`/environment, persist it as YAML for future runs, and return
+    the in-memory values. Otherwise read settings solely from the YAML file.
+    """
+    resolved = _resolve_config_file_path(config_path)
+    text = _read_config_text(resolved) if resolved.exists() else ""
+    if text.strip():
+        raw = yaml.safe_load(text)
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"{resolved} must contain a YAML mapping, got: {type(raw).__name__}"
+            )
+        return _config_from_yaml(raw, resolved, validate_providers=validate_providers)
+
+    # Auto-migration: build from env, persist best-effort, then use in-memory values.
+    config = _config_from_env(validate_providers=validate_providers)
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_text(_dump_yaml(_config_to_yaml_dict(config)), encoding="utf-8")
+        logger.info("Migrated configuration from environment to %s", resolved)
+    except OSError as exc:
+        logger.warning("Could not write migrated config file %s: %s", resolved, exc)
+    return config
+
+
+def migrate_config(
+    *,
+    force: bool = False,
+    config_path: str | Path | None = None,
+) -> Path:
+    """Write `data/config.yml` from the current `.env`/environment.
+
+    Raises if the target already exists and ``force`` is False. Validation of
+    provider secrets is skipped so migration works for inspection-only setups.
+    """
+    resolved = _resolve_config_file_path(config_path)
+    if resolved.exists() and _read_config_text(resolved).strip() and not force:
+        raise ValueError(
+            f"{resolved} already exists; pass --force to overwrite it."
+        )
+    config = _config_from_env(validate_providers=False)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text(_dump_yaml(_config_to_yaml_dict(config)), encoding="utf-8")
+    return resolved

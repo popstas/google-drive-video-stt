@@ -743,3 +743,33 @@ def test_latest_prints_spend_summary(mocker, capsys, tmp_path):
     out = capsys.readouterr().out
     assert "Spend summary:" in out
     assert "Deepgram cost $0.5000" in out
+
+
+def test_config_migrate_command_writes_file(mocker, capsys, tmp_path):
+    config_file = tmp_path / "config.yml"
+    migrate = mocker.patch("src.cli.migrate_config", return_value=config_file)
+
+    cli.main(["config", "migrate"])
+
+    migrate.assert_called_once_with(force=False)
+    out = capsys.readouterr().out
+    assert str(config_file) in out
+    assert "Wrote configuration" in out
+
+
+def test_config_migrate_command_passes_force(mocker, tmp_path):
+    config_file = tmp_path / "config.yml"
+    migrate = mocker.patch("src.cli.migrate_config", return_value=config_file)
+
+    cli.main(["config", "migrate", "--force"])
+
+    migrate.assert_called_once_with(force=True)
+
+
+def test_config_migrate_command_reports_error(mocker):
+    mocker.patch("src.cli.migrate_config", side_effect=ValueError("already exists"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["config", "migrate"])
+
+    assert excinfo.value.code == 1

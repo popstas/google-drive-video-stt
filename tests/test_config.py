@@ -1,9 +1,10 @@
 from pathlib import Path
 
 import pytest
+import yaml
 from dotenv import load_dotenv as real_load_dotenv
 
-from src.config import load_config
+from src.config import _config_to_yaml_dict, load_config, migrate_config
 
 ENV_VARS = [
     "FOLDER_IDS",
@@ -35,10 +36,16 @@ ENV_VARS = [
 
 
 @pytest.fixture(autouse=True)
-def clean_env(monkeypatch):
+def clean_env(monkeypatch, tmp_path):
     for var in ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
     monkeypatch.setattr("src.config.load_dotenv", lambda *a, **kw: False)
+    # Point the config-file resolver at a throwaway per-test path so auto-migration
+    # never reads or writes the repo's real data/config.yml. Tests that exercise the
+    # env-loading path still hit the migration branch (the file never exists), and
+    # the default keyterms file keeps resolving against the repo cwd.
+    monkeypatch.setenv("GDSTT_CONFIG", str(tmp_path / "config.yml"))
     yield
 
 
@@ -516,3 +523,229 @@ def test_full_env_combination(monkeypatch):
     assert cfg.poll_interval == 300
     assert cfg.bitrate == "192k"
     assert cfg.data_dir == Path("mydata")
+
+
+# --- config.yml loading -----------------------------------------------------
+
+
+def _write_yaml(path: Path, data: dict) -> None:
+    path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+def test_loads_grouped_yaml(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "folder_ids": ["abc", "def"],
+            "poll_interval": 300,
+            "bitrate": "128k",
+            "data_dir": "mydata",
+            "proxy_url": "socks5://proxy:9050",
+            "output": {"target": "drive", "dir": None},
+            "stt": {
+                "provider": "deepgram",
+                "language": "ru",
+                "postprocess": False,
+                "deepgram": {
+                    "api_key": "dg-yaml",
+                    "model": "nova-2",
+                    "keyterms_enabled": False,
+                },
+            },
+            "openai": {"api_key": "sk-yaml", "model": "gpt-5.4", "batch": True},
+        },
+    )
+
+    cfg = load_config(config_path=config_file)
+
+    assert cfg.folder_ids == ["abc", "def"]
+    assert cfg.poll_interval == 300
+    assert cfg.bitrate == "128k"
+    assert cfg.data_dir == tmp_path / "mydata"
+    assert cfg.proxy_url == "socks5://proxy:9050"
+    assert cfg.stt_provider == "deepgram"
+    assert cfg.deepgram_api_key == "dg-yaml"
+    assert cfg.deepgram_model == "nova-2"
+    assert cfg.stt_postprocess is False
+    assert cfg.openai_api_key == "sk-yaml"
+    assert cfg.openai_model == "gpt-5.4"
+    assert cfg.openai_batch is True
+
+
+def test_yaml_disabled_provider_is_mp3_only(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(config_file, {"stt": {"provider": "disabled"}})
+
+    cfg = load_config(config_path=config_file)
+
+    assert cfg.stt_provider == ""
+    assert cfg.stt_language == ""
+
+
+def test_yaml_deepgram_requires_api_key(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(config_file, {"stt": {"provider": "deepgram"}})
+
+    with pytest.raises(ValueError, match="deepgram.api_key is required"):
+        load_config(config_path=config_file)
+
+
+def test_yaml_openai_keypoints_requires_api_key(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {"stt": {"provider": "disabled"}, "openai": {"keypoints": True}},
+    )
+
+    with pytest.raises(ValueError, match="openai.api_key is required"):
+        load_config(config_path=config_file)
+
+
+def test_yaml_invalid_output_target_raises(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(config_file, {"stt": {"provider": "disabled"}, "output": {"target": "s3"}})
+
+    with pytest.raises(ValueError, match="output.target"):
+        load_config(config_path=config_file)
+
+
+def test_yaml_folder_target_requires_dir(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {"stt": {"provider": "disabled"}, "output": {"target": "folder"}},
+    )
+
+    with pytest.raises(ValueError, match="output.dir is required"):
+        load_config(config_path=config_file)
+
+
+def test_yaml_rejects_non_mapping_document(tmp_path):
+    config_file = tmp_path / "config.yml"
+    config_file.write_text("- just\n- a\n- list\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must contain a YAML mapping"):
+        load_config(config_path=config_file)
+
+
+def test_yaml_validate_providers_false_skips_secrets(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {"stt": {"provider": "deepgram"}, "openai": {"keypoints": True}},
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    assert cfg.stt_provider == "deepgram"
+    assert cfg.openai_keypoints is True
+    assert cfg.deepgram_api_key == ""
+
+
+# --- auto-migration ---------------------------------------------------------
+
+
+def test_auto_migration_writes_config_yml_when_missing(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOLDER_IDS", "mig1,mig2")
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    config_file = tmp_path / "config.yml"
+    assert not config_file.exists()
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    assert cfg.folder_ids == ["mig1", "mig2"]
+    assert config_file.exists()
+    written = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert written["folder_ids"] == ["mig1", "mig2"]
+    assert written["stt"]["provider"] == ""
+    assert "presets" in written
+
+
+def test_auto_migration_triggers_on_empty_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOLDER_IDS", "only-env")
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    config_file = tmp_path / "config.yml"
+    config_file.write_text("   \n", encoding="utf-8")
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    assert cfg.folder_ids == ["only-env"]
+    assert yaml.safe_load(config_file.read_text(encoding="utf-8"))["folder_ids"] == ["only-env"]
+
+
+def test_existing_yaml_takes_precedence_over_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOLDER_IDS", "from-env")
+    config_file = tmp_path / "config.yml"
+    _write_yaml(config_file, {"folder_ids": ["from-yaml"], "stt": {"provider": "disabled"}})
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    assert cfg.folder_ids == ["from-yaml"]
+
+
+def test_gdstt_config_env_var_resolves_path(monkeypatch, tmp_path):
+    config_file = tmp_path / "custom-config.yml"
+    _write_yaml(config_file, {"folder_ids": ["env-path"], "stt": {"provider": "disabled"}})
+    monkeypatch.setenv("GDSTT_CONFIG", str(config_file))
+
+    cfg = load_config(validate_providers=False)
+
+    assert cfg.folder_ids == ["env-path"]
+
+
+def test_config_to_yaml_dict_round_trips(monkeypatch, tmp_path):
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    monkeypatch.setenv("FOLDER_IDS", "rt1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-rt")
+    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
+    cfg = load_config(validate_providers=False)
+
+    data = _config_to_yaml_dict(cfg)
+    config_file = tmp_path / "config.yml"
+    _write_yaml(config_file, data)
+    reloaded = load_config(config_path=config_file, validate_providers=False)
+
+    assert reloaded.folder_ids == ["rt1"]
+    assert reloaded.openai_api_key == "sk-rt"
+    assert reloaded.openai_keypoints is True
+    assert reloaded.stt_provider == ""
+
+
+# --- migrate_config ---------------------------------------------------------
+
+
+def test_migrate_config_writes_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOLDER_IDS", "m1")
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    config_file = tmp_path / "config.yml"
+
+    written_path = migrate_config(config_path=config_file)
+
+    assert written_path == config_file
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["folder_ids"] == ["m1"]
+    assert data["presets"]["keypoints"]["enabled"] is False
+
+
+def test_migrate_config_refuses_existing_without_force(monkeypatch, tmp_path):
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    config_file = tmp_path / "config.yml"
+    config_file.write_text("folder_ids: [keep]\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="already exists"):
+        migrate_config(config_path=config_file)
+
+    assert config_file.read_text(encoding="utf-8") == "folder_ids: [keep]\n"
+
+
+def test_migrate_config_force_overwrites(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOLDER_IDS", "fresh")
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+    config_file = tmp_path / "config.yml"
+    config_file.write_text("folder_ids: [stale]\n", encoding="utf-8")
+
+    migrate_config(config_path=config_file, force=True)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["folder_ids"] == ["fresh"]

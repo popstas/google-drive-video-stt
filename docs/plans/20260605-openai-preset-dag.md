@@ -113,21 +113,21 @@ recording that exercises speaker-named presets cheaply.
 
 ### Task 1: config.yml load, auto-migration, and config migrate command
 
-- [ ] Rewrite `load_config()` to read settings from `data/config.yml` with the
+- [x] Rewrite `load_config()` to read settings from `data/config.yml` with the
       grouped schema (`output`, `stt.deepgram`, `openai`, `presets`), mapping onto
       the frozen `Config` dataclass
-- [ ] Resolve the config-file path from `<data_dir>/config.yml`, a `--config PATH`
+- [x] Resolve the config-file path from `<data_dir>/config.yml`, a `--config PATH`
       flag, and a `GDSTT_CONFIG` env var (path bootstrap only)
-- [ ] Implement auto-migration: when `config.yml` is missing or empty and `.env`/env
+- [x] Implement auto-migration: when `config.yml` is missing or empty and `.env`/env
       is present, build config from env, serialize to YAML, write `data/config.yml`,
       then load from the in-memory values
-- [ ] Add a `gdstt config migrate [--force]` command that writes `data/config.yml`
+- [x] Add a `gdstt config migrate [--force]` command that writes `data/config.yml`
       from the current `.env`/environment and seeds a `presets` block from built-ins
-- [ ] Preserve all current validation rules (raise on misconfiguration) and remove
+- [x] Preserve all current validation rules (raise on misconfiguration) and remove
       `python-dotenv`/`os.environ` reads from the normal load path
-- [ ] write tests for YAML loading, auto-migration (missing/empty file), validation
+- [x] write tests for YAML loading, auto-migration (missing/empty file), validation
       errors, and the `config migrate` command
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 2: Preset model, built-ins, merge, and DAG validation
 

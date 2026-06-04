@@ -11,7 +11,7 @@ from typing import TextIO
 from src import auth, drive
 from src import main as main_module
 from src import relabel_transcript
-from src.config import load_config
+from src.config import load_config, migrate_config
 from src.stt.transcribe import transcribe_file
 
 logger = logging.getLogger(__name__)
@@ -216,6 +216,15 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     for folder_id in config.folder_ids:
         items = drive.list_folder_state(service, folder_id)
         print(f"Folder {folder_id}: OK, {len(items)} mp4 file(s)")
+
+
+def cmd_config_migrate(args: argparse.Namespace) -> None:
+    try:
+        path = migrate_config(force=args.force)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from exc
+    print(f"Wrote configuration to {path}")
 
 
 def cmd_speakers_set(args: argparse.Namespace) -> None:
@@ -436,6 +445,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also authenticate and list configured Drive folders",
     )
     p_doctor.set_defaults(func=cmd_doctor)
+
+    p_config = sub.add_parser(
+        "config",
+        help="Manage gdstt configuration (data/config.yml)",
+    )
+    config_sub = p_config.add_subparsers(dest="config_command", required=True)
+    p_config_migrate = config_sub.add_parser(
+        "migrate",
+        help="Generate data/config.yml from the current .env/environment",
+    )
+    p_config_migrate.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing config.yml",
+    )
+    p_config_migrate.set_defaults(func=cmd_config_migrate)
 
     p_speakers = sub.add_parser(
         "speakers",
