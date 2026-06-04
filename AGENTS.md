@@ -14,11 +14,16 @@ Markdown and shared repo docs over editor-specific overlays.
 
 This repository polls Google Drive folders for MP4 files, extracts audio when
 needed, transcribes with Deepgram, optionally post-processes the transcript and
-generates a Keypoints document, and writes sibling artifacts back to Drive or to a
-local folder.
+runs a config-defined DAG of OpenAI presets (each preset writes its own sibling
+artifact, e.g. Keypoints), and writes the results back to Drive or to a local
+folder.
 
-The code is env-driven through `src/config.py`, the main runtime lives in
-`src/main.py`, and STT provider dispatch lives in `src/stt/__init__.py`.
+The code is configured through `data/config.yml` (loaded by `src/config.py`); the
+main runtime lives in `src/main.py`, preset definitions in `src/presets.py`, the
+DAG executor in `src/preset_pipeline.py`, and STT provider dispatch in
+`src/stt/__init__.py`. `.env` is no longer a runtime source: on first run an
+existing `.env`/environment is auto-migrated into `data/config.yml` and every
+subsequent run reads only the YAML.
 
 ## Commands
 
@@ -32,7 +37,9 @@ uv run ruff check            # lint (line-length 100, target py311)
 gdstt auth [--manual]        # OAuth refresh or recovery flow
 uv run python -m src.auth    # module entry for the same OAuth flow
 uv run python -m src.main    # run the polling loop locally
-gdstt <auth|doctor|latest|run|run-once|process|transcribe|relabel|speakers|list>  # operator CLI (src/cli.py)
+gdstt <auth|doctor|latest|run|run-once|process|transcribe|relabel|speakers|list|config>  # operator CLI (src/cli.py)
+gdstt config migrate [--force]  # (re)write data/config.yml from the current .env/environment
+gdstt --config PATH <command>   # point at a non-default config.yml (or set GDSTT_CONFIG)
 docker compose up -d --build # containerized deployment (mounts ./data)
 ```
 
@@ -41,10 +48,13 @@ docker compose up -d --build # containerized deployment (mounts ./data)
 ## Architecture
 
 Headless service: polls Google Drive folders, extracts audio from new MP4s via
-ffmpeg, transcribes to a `.txt`, and optionally generates a `.keypoints.md`
-document. All flow is env-driven through `Config` (`src/config.py`, frozen
-dataclass built by `load_config()` which validates provider-specific required vars
-and raises on misconfiguration).
+ffmpeg, transcribes to a `.txt`, and optionally runs the enabled OpenAI presets to
+write per-preset sibling artifacts (e.g. `.keypoints.md`). All flow is driven by
+`Config` (`src/config.py`, frozen dataclass built by `load_config()` which reads
+`data/config.yml`, validates provider-specific required values, and raises on
+misconfiguration). `load_config()` resolves the config path from `--config PATH`,
+the `GDSTT_CONFIG` env var, or `<data_dir>/config.yml`, and auto-migrates a
+`.env`/environment into YAML when the file is missing or empty.
 
 **Polling loop** (`src/main.py`): `main()` builds the Drive service once, then loops
 `run_once()` every `POLL_INTERVAL` seconds. Per file, `process_item` computes two
@@ -68,10 +78,20 @@ artifact is written, gated by `stt_postprocess` (local path, `src/postprocess.py
 it cleans whitespace, parses interlocutor names from the file name, maps them onto
 diarized `Speaker N` labels, and merges spurious extra speakers.
 
-**Keypoints** (`src/openai_pipeline.py`, gated by `openai_keypoints`): after the
-transcript is written, `generate_keypoints` calls the OpenAI Responses API (sync, or
-the Batch API when `OPENAI_BATCH`) to produce a `<base>.keypoints.md` document
-(`## Задачи` / `## Тезисы` / `## Открытые вопросы`, plain text).
+**Preset DAG** (`src/presets.py` + `src/preset_pipeline.py`): after the transcript
+is written, `process_item` runs the enabled presets that are still missing an
+artifact. Each preset is one OpenAI pass (`src/openai_pipeline.py`, sync or the
+Batch API per preset) whose input is its dependency outputs concatenated with a
+labeled separator, or the raw transcript when it has no dependencies. Independent
+presets run in parallel (a `ThreadPoolExecutor` capped at `openai.max_parallel`),
+and each non-empty output is written as `<base><artifact_suffix>` tagged
+`artifact_type=<preset-name>`. Built-in presets ship in `BUILTIN_PRESETS` (at least
+`keypoints`, producing `## Задачи` / `## Тезисы` / `## Открытые вопросы`, plain
+text); `config.yml` presets override built-ins field-by-field, add new presets, and
+disable a built-in with `enabled: false`. `validate_dag()` rejects unknown/disabled
+dependencies and cycles. If a preset fails, its dependents are skipped while
+independent branches still persist, then an aggregated error makes the file retry
+and re-run only the still-missing presets on a later cycle.
 
 **Output layer** (`src/output.py`): `write_artifact` writes each artifact either as
 a Drive sibling (`OUTPUT_TARGET=drive` — upload, or update an existing sibling in
@@ -110,20 +130,28 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
 
 ## Core invariants
 
-- `STT_PROVIDER` is Deepgram-only. When it is absent, `load_config()` treats it as
-  `deepgram`; set `STT_PROVIDER=disabled` (or empty) to skip transcription and only
+- `stt.provider` is Deepgram-only. When it is absent, `load_config()` treats it as
+  `deepgram`; set `stt.provider: disabled` (or empty) to skip transcription and only
   manage MP3 artifacts.
 - Bootstrap and Drive-only commands use `load_config(validate_providers=False)`:
-  `auth`, `doctor`, `list` / `status`, and `speakers set`.
+  `auth`, `doctor`, `list` / `status`, `speakers set`, and `config migrate`.
 - Processing commands validate provider configuration and can spend credits:
   `run`, `run-once`, `process`, `latest`, and `transcribe`.
 - `relabel` is a local file transform that touches no Drive and spends nothing.
-- `OPENAI_KEYPOINTS=true` runs after the transcript is produced and requires
-  `OPENAI_API_KEY`; it writes a `<base>.keypoints.md` document.
-- `OUTPUT_TARGET` selects where artifacts land: `drive` (siblings) or `folder`
-  (`OUTPUT_DIR`, required when `folder`).
-- Idempotency relies on `appProperties.source_video_id` and sibling stem
-  matching as a fallback.
+- Configuration is `data/config.yml` (grouped `output`, `stt.deepgram`, `openai`,
+  and a top-level `presets` map). `.env` is auto-migrated into YAML on first run;
+  `gdstt config migrate [--force]` regenerates it explicitly. Resolve a non-default
+  file with `gdstt --config PATH ...` or the `GDSTT_CONFIG` env var.
+- Enabled presets run after the transcript is produced and require `openai.api_key`;
+  each writes a `<base><artifact_suffix>` document tagged `artifact_type=<name>`.
+  Having no enabled presets replaces the old `OPENAI_KEYPOINTS=false` gate.
+- `output.target` selects where artifacts land: `drive` (siblings) or `folder`
+  (`output.dir`, required when `folder`).
+- Idempotency relies on `appProperties.source_video_id`, the per-artifact
+  `appProperties.artifact_type` (so each preset's sibling is detected
+  independently via `list_folder_state`'s `artifact_ids`), and sibling stem
+  matching as a fallback. Existing `.keypoints.md` files carry
+  `artifact_type=keypoints` and map onto the `keypoints` preset with no migration.
 - New or changed operator behavior should be reflected in
   `tests/test_skill_docs.py` and `skills/gdstt-cli/SKILL.md`.
 
@@ -147,10 +175,11 @@ provider tuning into the Deepgram notes in `README.md` / `SKILL.md`.
 
 Today that means:
 
-- Deepgram is the default and only transcription path; `STT_PROVIDER=""` keeps
+- Deepgram is the default and only transcription path; `stt.provider=""` keeps
   MP3-only mode.
-- Keypoints generation (`OPENAI_KEYPOINTS`) is documented as an optional layer on
-  top of the transcript, independent of the STT path.
+- The OpenAI preset DAG (the `presets` map, with `keypoints` shipped as a built-in)
+  is documented as an optional layer on top of the transcript, independent of the
+  STT path.
 
 ## Conventions
 

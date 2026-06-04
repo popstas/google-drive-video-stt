@@ -19,9 +19,10 @@ speech-to-text pipelines.
   relabeling, and folder-state inspection
 - Local post-processing that maps diarized `Speaker N` labels to the interlocutor
   names parsed from the file name
-- Optional Keypoints generation (`## Задачи` / `## Тезисы` / `## Открытые
-  вопросы`) via the OpenAI Responses API
-- Output to Google Drive siblings or to a local folder (`OUTPUT_TARGET`)
+- Config-defined DAG of OpenAI presets (each writes its own sibling artifact, e.g.
+  the built-in Keypoints pass: `## Задачи` / `## Тезисы` / `## Открытые вопросы`),
+  with independent presets run in parallel via the OpenAI Responses API
+- Output to Google Drive siblings or to a local folder (`output.target`)
 - Sibling `.mp3`/`.txt` names preserve the full Drive file name, including `/`
   characters
 - Explicit speaker names can be stored on the Drive MP4 when the filename is not
@@ -34,8 +35,8 @@ speech-to-text pipelines.
 - `ffmpeg` available on `PATH` for local runs (already included in the Docker image)
 - Google Cloud project with the Drive API enabled and OAuth client metadata in
   `data/credentials.json`
-- A Deepgram API key for transcription (`STT_PROVIDER=deepgram`)
-- Optional: an OpenAI API key when `OPENAI_KEYPOINTS=true`
+- A Deepgram API key for transcription (`stt.provider: deepgram`)
+- Optional: an OpenAI API key when any OpenAI preset is enabled (e.g. `keypoints`)
 - Optional: a Telegram bot token + chat ID for error notifications
 - Optional: an HTTP(S) or SOCKS proxy via `PROXY_URL`; SOCKS support is included
   through the `requests[socks]` dependency
@@ -55,12 +56,20 @@ For development in this checkout, install the editable environment too:
 uv sync --extra dev
 ```
 
-Then create `.env` from the template and fill in the required values:
+Configuration lives in `data/config.yml`. The fastest way to create it is to fill
+in `.env` from the template and let the first run (or `gdstt config migrate`)
+auto-generate the YAML from it:
 
 ```bash
 cp .env.example .env
 # Set at least FOLDER_IDS, DEEPGRAM_API_KEY, and (if used) OUTPUT_DIR / OPENAI_API_KEY
+gdstt config migrate   # writes data/config.yml from .env; first run also does this
 ```
+
+`.env` is only read during this one-time migration; afterwards every command reads
+`data/config.yml` exclusively. You can also author `data/config.yml` by hand (see
+[Configuration](#configuration)). Point at a non-default file with
+`gdstt --config PATH ...` or the `GDSTT_CONFIG` env var.
 
 After `data/credentials.json` is in place (see below), authenticate once and
 verify access with the safe operator flow:
@@ -172,7 +181,52 @@ Drive folder, the folder id is the last path segment in the browser URL:
 
 ## Configuration
 
-All configuration is environment-driven. See `.env.example`.
+All configuration lives in `data/config.yml`. It is grouped under `output`, `stt`
+(with a nested `deepgram` block), and `openai`, plus a top-level `presets` map. On
+first run (or via `gdstt config migrate`) the file is auto-generated from the
+`.env`/environment described by the table below; afterwards `.env` is no longer
+read. Resolve a non-default file with `gdstt --config PATH ...` or `GDSTT_CONFIG`.
+
+```yaml
+folder_ids: [abc, def]
+poll_interval: 600
+bitrate: 96k
+data_dir: data
+proxy_url: ""
+output:
+  target: drive          # drive | folder
+  dir: null              # required when target=folder
+stt:
+  provider: deepgram     # "" / disabled => MP3-only
+  language: ru
+  postprocess: true
+  drive_mp3_artifact: false
+  deepgram:
+    api_key: "..."
+    model: nova-3
+    diarize_model: latest
+    audio_source: m4a_copy
+    txt_formatter: word_speaker
+    keyterms_enabled: true
+    keyterms_file: config/deepgram-keyterms.txt
+openai:
+  api_key: "..."
+  model: gpt-5.4-mini    # global default model for presets
+  batch: false           # global default batch mode for presets
+  max_parallel: 4        # cap on presets run concurrently
+presets:
+  transcript-cleanup:
+    instructions: "Clean up the raw transcript..."
+  keypoints:
+    depends_on: [transcript-cleanup]   # overrides the built-in keypoints preset
+  expertizeme-managers:
+    depends_on: [transcript-cleanup]
+    instructions: "Extract per-manager action items..."
+```
+
+Presets define the OpenAI post-processing DAG (see
+[Preset DAG](#preset-dag-keypoints-and-beyond)). The env-var names below are still
+recognized by the one-time migration and map onto these YAML keys:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -287,15 +341,31 @@ intentionally want to run STT again and overwrite the existing `.txt` in place. 
 `.txt` and `.mp3` artifacts are tagged with the source MP4 id, so future source
 renames do not break artifact detection.
 
-### Keypoints generation
+### Preset DAG (Keypoints and beyond)
 
-When `OPENAI_KEYPOINTS=true`, the service generates a Keypoints document after the
-transcript is produced and writes it as `<base>.keypoints.md` next to the
-transcript (`src/openai_pipeline.py`, OpenAI Responses API). The document contains
-`## Задачи` (grouped by `### Ответственный`), `## Тезисы`, and `## Открытые
-вопросы` in plain text. It requires `OPENAI_API_KEY`, honors `PROXY_URL`, uses
-`OPENAI_MODEL` (default `gpt-5.4-mini`), and can run through the OpenAI Batch API
-(`OPENAI_BATCH=true`) for ~50% lower cost at the price of higher latency.
+After the transcript is produced, the service runs the **enabled presets** defined
+in `data/config.yml` (`src/presets.py` + `src/preset_pipeline.py`, OpenAI Responses
+API). Each preset is one OpenAI pass with its own `instructions`; it feeds on the
+concatenated outputs of its `depends_on` presets, or the raw transcript when it has
+none, and writes its own sibling artifact `<base><artifact_suffix>` (default
+`.<name>.md`) tagged `artifact_type=<name>`. Independent presets run in parallel up
+to `openai.max_parallel`, and each preset may set its own `model`/`batch`, falling
+back to the `openai` defaults.
+
+A built-in `keypoints` preset ships with the code and produces a `<base>.keypoints.md`
+document containing `## Задачи` (grouped by `### Ответственный`), `## Тезисы`, and
+`## Открытые вопросы` in plain text. Config presets override built-ins
+field-by-field, add new presets, and disable a built-in with `enabled: false`.
+Running any enabled preset requires `openai.api_key`, honors `proxy_url`, and uses
+the per-preset or global `openai.model`/`openai.batch` (the Batch API is ~50%
+cheaper at the price of higher latency). The canonical example chain is
+`transcript-cleanup -> keypoints + expertizeme-managers`.
+
+Idempotency is per preset: `list_folder_state` reports an `artifact_ids` map keyed
+by `artifact_type`, so only the presets still missing an artifact are produced on a
+later cycle. Existing `.keypoints.md` files map onto the `keypoints` preset with no
+migration. `gdstt doctor` prints the resolved config path and the resolved preset
+DAG (names, dependencies, enabled state).
 
 For an agent-driven path (reason about speakers, confirm the mapping, relabel
 deterministically, and write the Keypoints document by hand), see
@@ -323,7 +393,8 @@ The process loops forever, sleeping `POLL_INTERVAL` seconds between cycles.
 
 `uv sync` installs a `gdstt` console script that wraps every operation
 (equivalently `uv run python -m src.cli`). All commands read configuration from
-`.env` / the environment via `load_config()`.
+`data/config.yml` via `load_config()` (auto-migrated from `.env` on first run);
+pass `gdstt --config PATH ...` or set `GDSTT_CONFIG` to use a non-default file.
 
 Safe operator flow: `gdstt doctor` -> `gdstt list` -> `gdstt process <file-id> --dry-run`
 -> `gdstt process <file-id>`. Move to `run-once` or continuous `run` only after
@@ -340,6 +411,8 @@ gdstt speakers set <file-id> "Alice" "Bob"   # store explicit speaker names on a
 gdstt transcribe <audio> [-o out.txt]   # STT-only on a local file; prints to stdout by default
 gdstt relabel --in SRC --out OUT --map MAP.json [--no-header]   # deterministic local speaker relabeling
 gdstt list [--folder ID]   # show sibling mp3/txt state without doing work (alias: status)
+gdstt config migrate [--force]   # (re)write data/config.yml from the current .env/environment
+gdstt --config PATH <command>    # use a non-default config.yml (or set GDSTT_CONFIG)
 ```
 
 `process` auto-detects whether the ID is a file or a folder; pass `--folder` to

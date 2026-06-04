@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -11,7 +12,12 @@ from typing import TextIO
 from src import auth, drive
 from src import main as main_module
 from src import relabel_transcript
-from src.config import load_config, migrate_config
+from src.config import (
+    CONFIG_PATH_ENV_VAR,
+    load_config,
+    migrate_config,
+    resolve_config_file_path,
+)
 from src.stt.transcribe import transcribe_file
 
 logger = logging.getLogger(__name__)
@@ -196,16 +202,32 @@ def cmd_latest(args: argparse.Namespace) -> None:
     _print_spend_summary(telemetry, dry_run=args.dry_run)
 
 
+def _print_preset_dag(config) -> None:
+    """Report the resolved preset DAG (names, dependencies, enabled state)."""
+    presets = config.presets
+    if not presets:
+        print("Presets: none enabled")
+        return
+    print(f"Presets: {len(presets)} enabled")
+    for preset in presets:
+        deps = ", ".join(preset.depends_on) if preset.depends_on else "transcript"
+        state = "enabled" if preset.enabled else "disabled"
+        print(f"  {preset.name} ({state}) <- {deps}")
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     config = load_config(validate_providers=False)
     credentials_path = config.data_dir / "credentials.json"
     token_path = config.data_dir / "token.json"
+    config_path = resolve_config_file_path()
 
+    print(f"config: {config_path} ({'OK' if config_path.exists() else 'missing'})")
     print(f"DATA_DIR: {config.data_dir}")
     print(f"credentials.json: {'OK' if credentials_path.exists() else 'missing'}")
     print(f"token.json: {'OK' if token_path.exists() else 'missing'}")
     print(f"FOLDER_IDS: {len(config.folder_ids)} configured")
     print(f"STT_PROVIDER: {config.stt_provider or 'not configured'}")
+    _print_preset_dag(config)
 
     if not args.drive:
         print("Drive auth: not checked (use --drive)")
@@ -324,6 +346,15 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Safety: run and folder-wide processing can spend STT credits across pending "
             "files. Start with --dry-run when the command supports it."
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to config.yml (overrides the GDSTT_CONFIG env var and the default "
+            "<data_dir>/config.yml). Must appear before the subcommand."
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -530,6 +561,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser = build_parser()
     args = parser.parse_args(argv)
+    # --config is a bootstrap pointer to config.yml, not an application setting;
+    # surface it through the same GDSTT_CONFIG env var load_config already resolves
+    # so every command honors it without threading config_path through each call.
+    if getattr(args, "config", None):
+        os.environ[CONFIG_PATH_ENV_VAR] = args.config
     args.func(args)
 
 

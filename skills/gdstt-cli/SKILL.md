@@ -2,8 +2,8 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.2.0
-last_updated: 2026-06-04
+version: 2.3.0
+last_updated: 2026-06-05
 ---
 
 # gdstt CLI
@@ -61,8 +61,8 @@ Drive-only и bootstrap-команды используют `load_config(validat
 и не тратят кредиты: `auth`, `doctor`, `list` / `status`, `speakers set`.
 
 Обрабатывающие команды валидируют конфиг провайдера и могут тратить кредиты
-Deepgram (и, при `OPENAI_KEYPOINTS=true`, OpenAI): `run`, `run-once`, `process`,
-`latest`, `transcribe`.
+Deepgram (и, при включённых OpenAI-пресетах, OpenAI): `run`, `run-once`,
+`process`, `latest`, `transcribe`.
 
 `relabel` - локальное преобразование файла: Drive не трогает и ничего не тратит.
 
@@ -121,8 +121,9 @@ Deepgram (и, при `OPENAI_KEYPOINTS=true`, OpenAI): `run`, `run-once`, `proce
 
 ### `doctor [--drive]`
 
-Показать `DATA_DIR`, наличие credentials/token, число `FOLDER_IDS` и
-`STT_PROVIDER`. С `--drive` дополнительно аутентифицируется и перечисляет
+Показать путь к активному `config.yml`, `DATA_DIR`, наличие credentials/token,
+число `FOLDER_IDS`, `STT_PROVIDER` и разрешённый DAG пресетов (имена,
+зависимости, enabled). С `--drive` дополнительно аутентифицируется и перечисляет
 настроенные папки.
 
 ### `config migrate [--force]`
@@ -130,7 +131,8 @@ Deepgram (и, при `OPENAI_KEYPOINTS=true`, OpenAI): `run`, `run-once`, `proce
 Сгенерировать `data/config.yml` из текущего `.env`/окружения (с блоком
 `presets`). Конфиг авто-мигрируется при первом запуске, если файл отсутствует
 или пуст; эта команда - явная регенерация. `--force` перезаписывает
-существующий файл.
+существующий файл. Указать нестандартный файл: `gdstt --config PATH <command>`
+или переменная окружения `GDSTT_CONFIG`.
 
 ## Рабочий процесс Keypoints (агент)
 
@@ -221,8 +223,15 @@ Deepgram (и, при `OPENAI_KEYPOINTS=true`, OpenAI): `run`, `run-once`, `proce
 - Без воды и маркетинга.
 - Пунктуацию и стиль **не перегенерируй** - правь sed-ом (см. шаг 6).
 
-Для автоматического пути без агента выстави `OPENAI_KEYPOINTS=true`, и сервис сам
-пишет `<base>.keypoints.md` через OpenAI Responses API одним вызовом.
+Для автоматического пути без агента включи пресеты в `data/config.yml`: встроенный
+пресет `keypoints` пишет `<base>.keypoints.md` через OpenAI Responses API. Пресеты
+образуют DAG (`depends_on`) - каждый пресет это один проход OpenAI со своими
+`instructions`, пишет свой соседний артефакт `<base><artifact_suffix>` (по
+умолчанию `.<имя>.md`, метка `artifact_type=<имя>`); независимые пресеты идут
+параллельно. Конфиг-пресеты переопределяют встроенные по полям, добавляют новые и
+отключают встроенный через `enabled: false`. Канонический пример цепочки:
+`transcript-cleanup -> keypoints + expertizeme-managers`. Идемпотентность - по
+пресетам: повторный прогон делает только недостающие артефакты.
 
 ## Vault-интеграция (опционально)
 
@@ -284,15 +293,18 @@ Deepgram (и, при `OPENAI_KEYPOINTS=true`, OpenAI): `run`, `run-once`, `proce
 
 ## Ключевые заметки
 
-- Deepgram - единственный STT-провайдер; `STT_PROVIDER=""` оставляет режим
+- Deepgram - единственный STT-провайдер; `stt.provider=""` оставляет режим
   только-MP3.
-- Идемпотентность - через `appProperties.source_video_id` и совпадение по стему
-  как legacy-fallback; существующие соседние файлы обновляются на месте, не
-  дублируются.
+- Идемпотентность - через `appProperties.source_video_id`, пер-артефактный
+  `appProperties.artifact_type` (каждый пресет детектится отдельно через
+  `artifact_ids` в `list_folder_state`) и совпадение по стему как legacy-fallback;
+  существующие соседние файлы обновляются на месте, не дублируются. Существующие
+  `.keypoints.md` несут `artifact_type=keypoints` и ложатся на пресет `keypoints`
+  без миграции.
 - Транзиентные чтения метаданных Drive, состояния папки и загрузки повторяются до
   отказа цикла. Загрузки автоматически не повторяются.
 - `process_item` логирует провайдера, исход, число повторов и длительность;
   `run-once` логирует сводку по папке и одну сводку цикла
   (pending/processed/failed).
-- `OUTPUT_TARGET=drive` пишет артефакты как соседние файлы Drive;
-  `OUTPUT_TARGET=folder` пишет их в `OUTPUT_DIR`.
+- `output.target=drive` пишет артефакты как соседние файлы Drive;
+  `output.target=folder` пишет их в `output.dir`.

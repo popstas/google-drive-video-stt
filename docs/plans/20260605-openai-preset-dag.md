@@ -184,20 +184,20 @@ recording that exercises speaker-named presets cheaply.
 
 ### Task 5: CLI, doctor DAG view, docs, and end-to-end test
 
-- [ ] Add the global `--config PATH` flag and `GDSTT_CONFIG` support to the CLI
+- [x] Add the global `--config PATH` flag and `GDSTT_CONFIG` support to the CLI
       parser and make `gdstt doctor` report the resolved config path and the resolved
       preset DAG (names, dependencies, enabled state)
-- [ ] Update `AGENTS.md` (config posture, presets, idempotency note), `README.md`
+- [x] Update `AGENTS.md` (config posture, presets, idempotency note), `README.md`
       (config.yml setup replacing `.env`), and `skills/gdstt-cli/SKILL.md` (operator
       workflow + presets)
-- [ ] Update `tests/test_skill_docs.py` invariants to match the new operator behavior
-- [ ] Add a marked end-to-end test (excluded from the default `uv run pytest`) that
+- [x] Update `tests/test_skill_docs.py` invariants to match the new operator behavior
+- [x] Add a marked end-to-end test (excluded from the default `uv run pytest`) that
       runs `gdstt process 18czgPfHG3SWy8B8xCuKHBtCYqrME0sJC` with `output.target=folder`
       into a temp dir and asserts the `.txt` plus each enabled preset artifact exist,
       with `transcript-cleanup` feeding both `keypoints` and `expertizeme-managers`
-- [ ] write tests for the `config migrate` CLI output and `--config`/`GDSTT_CONFIG`
+- [x] write tests for the `config migrate` CLI output and `--config`/`GDSTT_CONFIG`
       resolution if not already covered
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 6: Verify acceptance criteria
 

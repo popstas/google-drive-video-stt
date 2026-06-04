@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 from dataclasses import dataclass, field
 from unittest.mock import MagicMock
 
 import pytest
 
 from src import cli
+from src.presets import Preset
 from tests.test_main import make_config
 
 
@@ -773,3 +775,65 @@ def test_config_migrate_command_reports_error(mocker):
         cli.main(["config", "migrate"])
 
     assert excinfo.value.code == 1
+
+
+def test_config_flag_exports_env_and_doctor_reports_path(
+    mocker, capsys, tmp_path, monkeypatch
+):
+    # Seed the var so monkeypatch restores/clears it after the test even though the
+    # CLI assigns os.environ directly.
+    monkeypatch.setenv(cli.CONFIG_PATH_ENV_VAR, str(tmp_path / "placeholder.yml"))
+    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    target = tmp_path / "custom.yml"
+
+    cli.main(["--config", str(target), "doctor"])
+
+    assert os.environ[cli.CONFIG_PATH_ENV_VAR] == str(target)
+    out = capsys.readouterr().out
+    assert f"config: {target} (missing)" in out
+
+
+def test_doctor_without_config_flag_leaves_env_var_untouched(
+    mocker, tmp_path, monkeypatch
+):
+    sentinel = str(tmp_path / "from-env.yml")
+    monkeypatch.setenv(cli.CONFIG_PATH_ENV_VAR, sentinel)
+    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+
+    cli.main(["doctor"])
+
+    assert os.environ[cli.CONFIG_PATH_ENV_VAR] == sentinel
+
+
+def test_doctor_reports_preset_dag(mocker, capsys, tmp_path, monkeypatch):
+    monkeypatch.delenv(cli.CONFIG_PATH_ENV_VAR, raising=False)
+    presets = (
+        Preset(name="transcript-cleanup", instructions="clean"),
+        Preset(
+            name="keypoints",
+            instructions="kp",
+            depends_on=("transcript-cleanup",),
+        ),
+    )
+    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path, presets=presets)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+
+    cli.main(["doctor"])
+
+    out = capsys.readouterr().out
+    assert "Presets: 2 enabled" in out
+    assert "transcript-cleanup (enabled) <- transcript" in out
+    assert "keypoints (enabled) <- transcript-cleanup" in out
+
+
+def test_doctor_reports_no_presets_when_none_enabled(mocker, capsys, tmp_path, monkeypatch):
+    monkeypatch.delenv(cli.CONFIG_PATH_ENV_VAR, raising=False)
+    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path, presets=())
+    mocker.patch("src.cli.load_config", return_value=cfg)
+
+    cli.main(["doctor"])
+
+    out = capsys.readouterr().out
+    assert "Presets: none enabled" in out

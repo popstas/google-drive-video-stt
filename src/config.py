@@ -390,6 +390,16 @@ def _resolve_config_file_path(config_path: str | Path | None = None) -> Path:
     return data_dir / CONFIG_FILE_NAME
 
 
+def resolve_config_file_path(config_path: str | Path | None = None) -> Path:
+    """Public resolver for the active config.yml path (CLI flag/env/data-dir).
+
+    Thin wrapper over :func:`_resolve_config_file_path` so callers like the CLI's
+    ``doctor`` can report which file ``load_config`` would read without reaching
+    into a private helper.
+    """
+    return _resolve_config_file_path(config_path)
+
+
 def _as_mapping(value: object, label: str) -> dict:
     if value is None:
         return {}

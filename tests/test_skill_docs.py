@@ -160,6 +160,28 @@ def test_skill_vault_integration_is_optional_and_impersonal():
         assert "<" in link, f"wikilink must be a placeholder, not a real name: [[{link}]]"
 
 
+def test_skill_documents_config_yml_and_preset_dag():
+    """The operator skill must teach the config.yml + preset-DAG posture."""
+    text = SKILL_PATH.read_text(encoding="utf-8")
+
+    assert "config.yml" in text
+    assert "config migrate" in text
+    assert "GDSTT_CONFIG" in text
+    # Preset DAG vocabulary the operator needs to author/inspect presets.
+    assert "depends_on" in text
+    assert "artifact_type" in text
+
+
+def test_agents_doc_documents_config_yml_and_preset_dag():
+    text = AGENTS_PATH.read_text(encoding="utf-8")
+
+    assert "data/config.yml" in text
+    assert "preset" in text.lower()
+    assert "artifact_type" in text
+    # The .env -> YAML auto-migration is the breaking-change operators must know.
+    assert "auto-migrat" in text.lower()
+
+
 def test_agents_doc_exists_with_source_of_truth_pointer():
     assert AGENTS_PATH.exists(), f"missing AGENTS.md: {AGENTS_PATH}"
     text = AGENTS_PATH.read_text(encoding="utf-8")

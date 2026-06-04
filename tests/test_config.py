@@ -4,7 +4,13 @@ import pytest
 import yaml
 from dotenv import load_dotenv as real_load_dotenv
 
-from src.config import _config_to_yaml_dict, load_config, migrate_config
+from src.config import (
+    CONFIG_FILE_NAME,
+    _config_to_yaml_dict,
+    load_config,
+    migrate_config,
+    resolve_config_file_path,
+)
 
 ENV_VARS = [
     "FOLDER_IDS",
@@ -683,6 +689,27 @@ def test_existing_yaml_takes_precedence_over_env(monkeypatch, tmp_path):
     cfg = load_config(config_path=config_file, validate_providers=False)
 
     assert cfg.folder_ids == ["from-yaml"]
+
+
+def test_resolve_config_file_path_prefers_explicit_arg(monkeypatch, tmp_path):
+    monkeypatch.setenv("GDSTT_CONFIG", str(tmp_path / "from-env.yml"))
+    explicit = tmp_path / "explicit.yml"
+
+    assert resolve_config_file_path(explicit) == explicit
+
+
+def test_resolve_config_file_path_honors_env_var(monkeypatch, tmp_path):
+    env_path = tmp_path / "from-env.yml"
+    monkeypatch.setenv("GDSTT_CONFIG", str(env_path))
+
+    assert resolve_config_file_path() == env_path
+
+
+def test_resolve_config_file_path_defaults_to_data_dir(monkeypatch, tmp_path):
+    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "datadir"))
+
+    assert resolve_config_file_path() == tmp_path / "datadir" / CONFIG_FILE_NAME
 
 
 def test_gdstt_config_env_var_resolves_path(monkeypatch, tmp_path):
