@@ -103,8 +103,8 @@ logs the best-effort Deepgram cost. Deepgram sends a full-file audio copy
 (`m4a_copy`, `mp3_96k`, or `mp3_192k`); tuning stays provider-specific, but the CLI
 workflow stays stable.
 
-**Auth** (`src/auth.py`): single OAuth user credential covers Drive (scopes `drive`
-+ `cloud-platform`) — no service account. `gdstt auth` runs the OAuth flow for
+**Auth** (`src/auth.py`): single OAuth user credential covers Drive (scope `drive`)
+— no service account. `gdstt auth` runs the OAuth flow for
 initial setup, refresh, recovery, or headless/manual exchange.
 `load_credentials` inspects the saved token's
 `scopes` directly (because `from_authorized_user_file` echoes the requested scopes, not the

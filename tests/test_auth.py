@@ -140,7 +140,7 @@ def test_load_credentials_missing_scope_raises(tmp_path, mocker):
             "client_id": "cid",
             "client_secret": "csec",
             "token_uri": "https://oauth2.googleapis.com/token",
-            "scopes": ["https://www.googleapis.com/auth/drive"],
+            "scopes": ["https://www.googleapis.com/auth/userinfo.email"],
         },
     )
 
@@ -241,9 +241,9 @@ def test_load_credentials_scopes_with_non_string_members_raises(tmp_path):
         auth.load_credentials(tmp_path)
 
 
-def test_scopes_includes_cloud_platform():
-    assert "https://www.googleapis.com/auth/cloud-platform" in auth.SCOPES
+def test_scopes_are_drive_only():
     assert "https://www.googleapis.com/auth/drive" in auth.SCOPES
+    assert "https://www.googleapis.com/auth/cloud-platform" not in auth.SCOPES
 
 
 def test_build_drive_service_uses_credentials(tmp_path, mocker):
