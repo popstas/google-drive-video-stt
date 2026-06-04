@@ -83,7 +83,7 @@ def test_empty_transcript_skips_api_call():
 
 # --- sync path -------------------------------------------------------------
 
-def test_refine_sync_uses_output_text():
+def test_keypoints_sync_uses_output_text():
     captured: dict = {}
 
     def create(**kwargs):
@@ -103,7 +103,7 @@ def test_refine_sync_uses_output_text():
     assert "## Открытые вопросы" in captured["instructions"]
 
 
-def test_refine_sync_captures_usage():
+def test_keypoints_sync_captures_usage():
     response = SimpleNamespace(
         output_text="Alice: hi",
         usage=SimpleNamespace(
@@ -129,7 +129,7 @@ def test_refine_sync_captures_usage():
     }
 
 
-def test_refine_sync_without_usage_keeps_usage_empty():
+def test_keypoints_sync_without_usage_keeps_usage_empty():
     pipeline = OpenAIPipeline(api_key="sk-test")
     pipeline._client = SimpleNamespace(
         responses=SimpleNamespace(
@@ -141,7 +141,7 @@ def test_refine_sync_without_usage_keeps_usage_empty():
     assert pipeline.last_usage == {}
 
 
-def test_refine_sync_walks_output_list():
+def test_keypoints_sync_walks_output_list():
     response = SimpleNamespace(
         output_text=None,
         output=[
@@ -160,7 +160,7 @@ def test_refine_sync_walks_output_list():
     assert pipeline.generate_keypoints("Speaker 1: hi there", "f.mp4") == "Alice: hi there"
 
 
-def test_refine_sync_error_is_wrapped():
+def test_keypoints_sync_error_is_wrapped():
     def boom(**kwargs):
         raise RuntimeError("network down")
 
@@ -170,7 +170,7 @@ def test_refine_sync_error_is_wrapped():
         pipeline.generate_keypoints("Speaker 1: hi", "f.mp4")
 
 
-def test_refine_sync_unexpected_response_raises():
+def test_keypoints_sync_unexpected_response_raises():
     pipeline = OpenAIPipeline(api_key="sk-test")
     pipeline._client = SimpleNamespace(
         responses=SimpleNamespace(create=lambda **kw: SimpleNamespace())
@@ -206,10 +206,10 @@ def _fake_batch_client(output_jsonl: str, *, status: str = "completed", calls=No
     )
 
 
-def test_refine_batch_round_trip():
+def test_keypoints_batch_round_trip():
     line = json.dumps(
         {
-            "custom_id": "transcript-0",
+            "custom_id": "keypoints-0",
             "response": {"status_code": 200, "body": {"output_text": "Alice: hi"}},
         }
     )
@@ -223,7 +223,7 @@ def test_refine_batch_round_trip():
     assert calls["content"] == "file-out"
 
 
-def test_refine_batch_captures_usage():
+def test_keypoints_batch_captures_usage():
     line = json.dumps(
         {
             "response": {
@@ -254,10 +254,10 @@ def test_refine_batch_captures_usage():
     }
 
 
-def test_refine_batch_parses_output_list_body():
+def test_keypoints_batch_parses_output_list_body():
     line = json.dumps(
         {
-            "custom_id": "transcript-0",
+            "custom_id": "keypoints-0",
             "response": {
                 "status_code": 200,
                 "body": {
@@ -273,24 +273,24 @@ def test_refine_batch_parses_output_list_body():
     assert pipeline.generate_keypoints("Speaker 2: yo", "f.mp4") == "Bob: yo"
 
 
-def test_refine_batch_failed_status_raises():
+def test_keypoints_batch_failed_status_raises():
     pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
     pipeline._client = _fake_batch_client("", status="failed")
     with pytest.raises(STTError, match="status 'failed'"):
         pipeline.generate_keypoints("Speaker 1: hi", "f.mp4")
 
 
-def test_refine_batch_empty_output_raises():
+def test_keypoints_batch_empty_output_raises():
     pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
     pipeline._client = _fake_batch_client("\n")
     with pytest.raises(STTError, match="no keypoints text"):
         pipeline.generate_keypoints("Speaker 1: hi", "f.mp4")
 
 
-def test_refine_batch_non_200_status_raises():
+def test_keypoints_batch_non_200_status_raises():
     line = json.dumps(
         {
-            "custom_id": "transcript-0",
+            "custom_id": "keypoints-0",
             "response": {"status_code": 500, "body": {"output_text": "leaked"}},
         }
     )
@@ -300,15 +300,15 @@ def test_refine_batch_non_200_status_raises():
         pipeline.generate_keypoints("Speaker 1: hi", "f.mp4")
 
 
-def test_refine_batch_line_error_raises():
-    line = json.dumps({"custom_id": "transcript-0", "error": {"message": "boom"}})
+def test_keypoints_batch_line_error_raises():
+    line = json.dumps({"custom_id": "keypoints-0", "error": {"message": "boom"}})
     pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
     pipeline._client = _fake_batch_client(line + "\n")
     with pytest.raises(STTError, match="batch request failed"):
         pipeline.generate_keypoints("Speaker 1: hi", "f.mp4")
 
 
-def test_refine_batch_malformed_json_raises():
+def test_keypoints_batch_malformed_json_raises():
     pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
     pipeline._client = _fake_batch_client("not json\n")
     with pytest.raises(STTError, match="not valid JSON"):
@@ -340,7 +340,7 @@ def _fake_batch_client_statuses(statuses, output_jsonl, *, calls=None):
     )
 
 
-def test_refine_batch_polls_until_completed(monkeypatch):
+def test_keypoints_batch_polls_until_completed(monkeypatch):
     monkeypatch.setattr("src.openai_pipeline.time.sleep", lambda _s: None)
     line = json.dumps(
         {"response": {"status_code": 200, "body": {"output_text": "Alice: hi"}}}
@@ -355,7 +355,7 @@ def test_refine_batch_polls_until_completed(monkeypatch):
     assert len(calls["retrieve"]) == 3
 
 
-def test_refine_batch_times_out(monkeypatch):
+def test_keypoints_batch_times_out(monkeypatch):
     monkeypatch.setattr("src.openai_pipeline.time.sleep", lambda _s: None)
     pipeline = OpenAIPipeline(
         api_key="sk-test", use_batch=True, poll_interval=1, batch_timeout=2
@@ -389,7 +389,7 @@ def test_get_pipeline_reads_config():
     assert pipeline._use_batch is True
 
 
-def test_refine_transcript_uses_configured_pipeline(monkeypatch):
+def test_generate_keypoints_uses_configured_pipeline(monkeypatch):
     def fake_get_client(self):
         return SimpleNamespace(
             responses=SimpleNamespace(
@@ -402,7 +402,7 @@ def test_refine_transcript_uses_configured_pipeline(monkeypatch):
     assert out == "Alice: hi"
 
 
-def test_refine_transcript_copies_usage_to_optional_collector(monkeypatch):
+def test_generate_keypoints_copies_usage_to_optional_collector(monkeypatch):
     usage = {}
 
     def fake_get_client(self):
@@ -441,7 +441,7 @@ def test_refine_transcript_copies_usage_to_optional_collector(monkeypatch):
     }
 
 
-def test_refine_transcript_clears_reused_collector_when_usage_is_absent(monkeypatch):
+def test_generate_keypoints_clears_reused_collector_when_usage_is_absent(monkeypatch):
     usage = {"input_tokens": 99}
 
     def fake_get_client(self):

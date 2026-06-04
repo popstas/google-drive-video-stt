@@ -175,7 +175,7 @@ def load_config(*, validate_providers: bool = True) -> Config:
     if stt_provider not in SUPPORTED_STT_PROVIDERS:
         raise ValueError(
             f"STT_PROVIDER must be one of {SUPPORTED_STT_PROVIDERS!r}, got: {stt_provider!r}"
-    )
+        )
     openai_api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     deepgram_api_key = ""
     deepgram_model = "nova-3"

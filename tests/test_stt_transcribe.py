@@ -116,3 +116,32 @@ def test_transcribe_file_logs_deepgram_cost_unavailable(mocker, tmp_path, caplog
 
     assert "Deepgram cost unavailable yet for a.mp3" in caplog.text
     assert "request_id=request-1" in caplog.text
+
+
+def test_transcribe_file_survives_deepgram_cost_lookup_error(mocker, tmp_path, caplog):
+    """A failing usage-cost lookup must not crash an otherwise-successful run."""
+    mp3 = tmp_path / "a.mp3"
+    mp3.write_bytes(b"x")
+
+    provider = MagicMock()
+    provider.transcribe_full.return_value = "[00:00:00] Speaker 1: text"
+    provider.last_request_id = "request-1"
+    provider.last_duration_seconds = None
+    mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
+    mocker.patch(
+        "src.stt.transcribe.fetch_request_cost_usd",
+        side_effect=RuntimeError("usage API down"),
+    )
+
+    cost_usd = {}
+    with caplog.at_level("INFO"):
+        result = transcribe_mod.transcribe_file(
+            mp3,
+            _cfg(provider="deepgram"),
+            cost_usd=cost_usd,
+        )
+
+    assert result == "[00:00:00] Speaker 1: text"
+    assert "Deepgram cost unavailable yet for a.mp3" in caplog.text
+    assert "usage API down" in caplog.text
+    assert cost_usd == {"deepgram": None}
