@@ -201,11 +201,12 @@ recording that exercises speaker-named presets cheaply.
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented (config.yml replaces
+- [x] verify all requirements from Overview are implemented (config.yml replaces
       `.env` with auto-migration, presets defined in config, dependency DAG executed
       in parallel, per-preset sibling artifacts, built-ins overridable)
-- [ ] run full project test suite (`uv run pytest`)
-- [ ] run project linter (`uv run ruff check`) - all issues must be fixed
+- [x] run full project test suite (`uv run pytest`) - 434 passed, 2 skipped (marked
+      e2e/live tests)
+- [x] run project linter (`uv run ruff check`) - all checks passed
 
 ## Post-Completion
 
