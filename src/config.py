@@ -225,21 +225,16 @@ def _config_from_env(*, validate_providers: bool = True) -> Config:
     deepgram_keyterms_enabled = True
     deepgram_keyterms_file = DEEPGRAM_DEFAULT_KEYTERMS_FILE
     deepgram_keyterms: tuple[str, ...] = ()
-    # Deepgram parsing reads files (DEEPGRAM_API_KEY_FILE) and raises on bad
-    # values (DEEPGRAM_KEYTERMS_ENABLED), so it is gated like the validation
-    # below: Drive-only commands (`gdstt auth`, `gdstt list`) must not be
-    # blocked by unrelated Deepgram config. The parsed values are only consumed
-    # when validation runs (transcription always uses validate_providers=True).
-    if validate_providers and stt_provider == "deepgram":
-        deepgram_api_key_file = os.environ.get("DEEPGRAM_API_KEY_FILE", "").strip()
-        deepgram_api_key = _load_deepgram_api_key(
-            os.environ.get("DEEPGRAM_API_KEY", ""),
-            (
-                str(_resolve_relative_to_dotenv(deepgram_api_key_file, dotenv_path))
-                if deepgram_api_key_file
-                else ""
-            ),
-        )
+    # Parse Deepgram settings whenever the provider is selected so auto-migration
+    # and `config migrate` serialize them faithfully into config.yml. Gating the
+    # parse on validate_providers (as before) made a validate_providers=False load
+    # — e.g. `gdstt doctor` / `gdstt config migrate` — persist empty/default
+    # Deepgram values, after which the next processing run failed from the
+    # migrated YAML. Validation (raising on missing/invalid values) stays gated on
+    # validate_providers below; for inspection-only loads (`gdstt auth`,
+    # `gdstt list`) a bad file or flag falls back to the default rather than
+    # blocking the command.
+    if stt_provider == "deepgram":
         deepgram_model = os.environ.get("DEEPGRAM_MODEL", "nova-3").strip() or "nova-3"
         deepgram_diarize_model = (
             os.environ.get("DEEPGRAM_DIARIZE_MODEL", "latest").strip().lower()
@@ -253,16 +248,35 @@ def _config_from_env(*, validate_providers: bool = True) -> Config:
             os.environ.get("DEEPGRAM_TXT_FORMATTER", "word_speaker").strip().lower()
             or "word_speaker"
         )
-        deepgram_keyterms_enabled = _parse_bool(
-            os.environ.get("DEEPGRAM_KEYTERMS_ENABLED", ""),
-            default=True,
-        )
+        try:
+            deepgram_keyterms_enabled = _parse_bool(
+                os.environ.get("DEEPGRAM_KEYTERMS_ENABLED", ""),
+                default=True,
+            )
+        except ValueError:
+            if validate_providers:
+                raise
+            deepgram_keyterms_enabled = True
         deepgram_keyterms_file = _resolve_relative_to_dotenv(
             os.environ.get("DEEPGRAM_KEYTERMS_FILE", str(DEEPGRAM_DEFAULT_KEYTERMS_FILE))
             .strip()
             or str(DEEPGRAM_DEFAULT_KEYTERMS_FILE),
             dotenv_path,
         )
+        deepgram_api_key_file = os.environ.get("DEEPGRAM_API_KEY_FILE", "").strip()
+        try:
+            deepgram_api_key = _load_deepgram_api_key(
+                os.environ.get("DEEPGRAM_API_KEY", ""),
+                (
+                    str(_resolve_relative_to_dotenv(deepgram_api_key_file, dotenv_path))
+                    if deepgram_api_key_file
+                    else ""
+                ),
+            )
+        except ValueError:
+            if validate_providers:
+                raise
+            deepgram_api_key = ""
     stt_language = os.environ.get("STT_LANGUAGE", "").strip()
     if stt_provider == "deepgram" and not stt_language:
         stt_language = "ru"
@@ -587,27 +601,39 @@ def _config_from_yaml(
     )
 
 
+def _relpath_for_config(path: Path | None, config_file: Path | None) -> str | None:
+    """Serialize a filesystem path so it round-trips through ``config.yml``.
+
+    ``_config_from_yaml`` resolves relative paths against the config file's parent
+    directory, so any path written to the YAML must be expressed relative to that
+    directory. Writing the bare ``str(path)`` instead made paths like
+    ``output.dir`` and ``deepgram.keyterms_file`` re-resolve under ``<data_dir>``
+    on the next load (e.g. ``out`` -> ``data/out``), breaking the second run.
+    """
+    if path is None:
+        return None
+    if config_file is None:
+        return str(path)
+    return os.path.relpath(path, config_file.parent)
+
+
 def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dict:
     """Serialize a Config into the grouped `config.yml` schema.
 
-    ``data_dir`` is written relative to the config file's parent directory so that
-    re-reading the YAML (which resolves relative paths against that parent) yields
-    the same directory. Otherwise a config at ``<data_dir>/config.yml`` carrying
-    ``data_dir: data`` would re-resolve to ``<data_dir>/data`` on the next load.
+    Filesystem paths (``data_dir``, ``output.dir``, ``deepgram.keyterms_file``)
+    are written relative to the config file's parent directory so that re-reading
+    the YAML (which resolves relative paths against that parent) yields the same
+    locations. See :func:`_relpath_for_config`.
     """
-    if config_file is not None:
-        data_dir_value = os.path.relpath(config.data_dir, config_file.parent)
-    else:
-        data_dir_value = str(config.data_dir)
     return {
         "folder_ids": list(config.folder_ids),
         "poll_interval": config.poll_interval,
         "bitrate": config.bitrate,
-        "data_dir": data_dir_value,
+        "data_dir": _relpath_for_config(config.data_dir, config_file),
         "proxy_url": config.proxy_url,
         "output": {
             "target": config.output_target,
-            "dir": str(config.output_dir) if config.output_dir else None,
+            "dir": _relpath_for_config(config.output_dir, config_file),
         },
         "stt": {
             "provider": config.stt_provider,
@@ -621,7 +647,9 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
                 "audio_source": config.deepgram_audio_source,
                 "txt_formatter": config.deepgram_txt_formatter,
                 "keyterms_enabled": config.deepgram_keyterms_enabled,
-                "keyterms_file": str(config.deepgram_keyterms_file),
+                "keyterms_file": _relpath_for_config(
+                    config.deepgram_keyterms_file, config_file
+                ),
             },
         },
         "openai": {

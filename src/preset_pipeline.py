@@ -74,6 +74,20 @@ def _closure(preset_map: Mapping[str, Preset], only: Iterable[str] | None) -> se
     return targets
 
 
+def dependency_names(
+    presets: Mapping[str, Preset] | Iterable[Preset], names: Iterable[str]
+) -> set[str]:
+    """Transitive dependencies of ``names``, excluding ``names`` themselves.
+
+    Used by callers to discover which already-produced presets a retry would feed
+    on, so their persisted artifacts can be passed back as ``precomputed`` instead
+    of being re-run.
+    """
+    preset_map = _as_preset_map(presets)
+    names = list(names)
+    return _closure(preset_map, names) - set(names)
+
+
 def _dependency_input(preset: Preset, results: Mapping[str, PresetResult]) -> str:
     """Concatenate dependency outputs with a labeled separator per dependency."""
     sections: list[str] = []
@@ -118,22 +132,39 @@ def run_presets(
     *,
     speaker_names: list[str] | None = None,
     only: Iterable[str] | None = None,
+    precomputed: Mapping[str, str] | None = None,
 ) -> dict[str, PresetResult]:
     """Execute the preset DAG and return a result per executed preset.
 
     Presets run in dependency order; independent presets are dispatched
     concurrently with up to ``config.openai_max_parallel`` workers. ``only``
     restricts execution to the named presets plus their transitive dependencies.
-    Failures do not abort the run: the failed preset and its dependents are
-    recorded (``error``/``skipped``) while independent branches still produce
-    output. Use :func:`aggregate_error` on the returned mapping to surface a
-    combined failure.
+    ``precomputed`` supplies already-produced outputs (e.g. a persisted artifact
+    from an earlier cycle) keyed by preset name: a dependency present there is
+    reused as-is instead of being re-run, so a retry does not re-bill presets that
+    already completed. Presets named in ``only`` always run even if ``precomputed``
+    carries a stale output for them. Failures do not abort the run: the failed
+    preset and its dependents are recorded (``error``/``skipped``) while
+    independent branches still produce output. Use :func:`aggregate_error` on the
+    returned mapping to surface a combined failure.
     """
     preset_map = _as_preset_map(presets)
+    # Materialize ``only`` once: it is consumed by both ``_closure`` and the
+    # ``only_set`` build below, and a one-shot iterable would otherwise be
+    # exhausted by the first use, leaving ``only_set`` empty so ``precomputed``
+    # could wrongly override an explicitly requested preset.
+    only = None if only is None else list(only)
     targets = _closure(preset_map, only)
+    only_set = set(only) if only is not None else set(preset_map)
 
     results: dict[str, PresetResult] = {}
-    pending: set[str] = set(targets)
+    # Seed reusable dependency outputs so the DAG skips re-running them. Only
+    # presets that are pure dependencies here (in the closure but not explicitly
+    # requested) are seeded; an explicitly requested preset always re-runs.
+    for name, text in (precomputed or {}).items():
+        if name in targets and name not in only_set:
+            results[name] = PresetResult(name=name, text=text)
+    pending: set[str] = set(targets) - set(results)
     max_workers = max(1, config.openai_max_parallel)
 
     def failed_dep(name: str) -> str | None:

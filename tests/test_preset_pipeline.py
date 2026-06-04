@@ -162,6 +162,70 @@ def test_only_unknown_preset_raises():
         run_presets("t", "f.mp4", _config(), presets, only=["missing"])
 
 
+def test_precomputed_dependency_is_reused_not_rerun():
+    presets = {
+        "cleanup": _preset("cleanup"),
+        "keypoints": _preset("keypoints", depends_on=("cleanup",)),
+    }
+    results = run_presets(
+        "t",
+        "f.mp4",
+        _config(),
+        presets,
+        only=["keypoints"],
+        precomputed={"cleanup": "persisted cleanup"},
+    )
+    # cleanup is not re-run: no pipeline call carries its instructions, and the
+    # seeded text feeds keypoints' input verbatim.
+    cleanup_runs = [i for i in FakePipeline.instances if any("INSTR_cleanup" in c[0] for c in i.calls)]
+    assert cleanup_runs == []
+    assert results["cleanup"].text == "persisted cleanup"
+    keypoints_input = FakePipeline.instances[0].calls[0][1]
+    assert "persisted cleanup" in keypoints_input
+
+
+def test_precomputed_does_not_override_explicitly_requested_preset():
+    presets = {"cleanup": _preset("cleanup")}
+    results = run_presets(
+        "t",
+        "f.mp4",
+        _config(),
+        presets,
+        only=["cleanup"],
+        precomputed={"cleanup": "stale"},
+    )
+    # cleanup is explicitly requested, so it runs even though a stale output exists.
+    assert results["cleanup"].text != "stale"
+    assert FakePipeline.instances[0].calls
+
+
+def test_precomputed_does_not_override_one_shot_only_iterable():
+    # ``only`` is consumed twice internally; a generator must not be exhausted by
+    # the first use, or the explicitly requested preset would be wrongly seeded
+    # from ``precomputed`` and skipped.
+    presets = {"cleanup": _preset("cleanup")}
+    results = run_presets(
+        "t",
+        "f.mp4",
+        _config(),
+        presets,
+        only=(name for name in ["cleanup"]),
+        precomputed={"cleanup": "stale"},
+    )
+    assert results["cleanup"].text != "stale"
+    assert FakePipeline.instances[0].calls
+
+
+def test_dependency_names_excludes_targets_themselves():
+    presets = {
+        "cleanup": _preset("cleanup"),
+        "keypoints": _preset("keypoints", depends_on=("cleanup",)),
+        "managers": _preset("managers", depends_on=("cleanup",)),
+    }
+    assert preset_pipeline.dependency_names(presets, ["keypoints"]) == {"cleanup"}
+    assert preset_pipeline.dependency_names(presets, ["cleanup"]) == set()
+
+
 def test_partial_failure_skips_dependents_runs_independent():
     presets = {
         "bad": _preset("bad", instructions="FAIL_root"),

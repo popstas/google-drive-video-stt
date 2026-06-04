@@ -179,6 +179,24 @@ def _run_preset_stage(
     if not missing:
         return
 
+    # Reuse dependency artifacts already persisted on Drive so a retry re-runs
+    # only the still-missing presets (per the plan): a dependency that completed
+    # on an earlier cycle is re-fed from its artifact instead of being re-run,
+    # which avoids extra OpenAI spend and keeps dependent siblings consistent with
+    # the dependency output that produced the earlier ones.
+    precomputed: dict[str, str] = {}
+    if not reprocess:
+        for dep in preset_pipeline.dependency_names(config.presets, missing):
+            existing_id = artifact_ids.get(dep)
+            if existing_id is None:
+                continue
+            precomputed[dep] = _call_with_transient_retries(
+                lambda existing_id=existing_id: drive.download_text(
+                    service, existing_id
+                ),
+                description=f"download {dep} artifact for {mp4_name}",
+            )
+
     results = preset_pipeline.run_presets(
         transcript,
         mp4_name,
@@ -186,6 +204,7 @@ def _run_preset_stage(
         config.presets,
         speaker_names=speaker_names,
         only=missing,
+        precomputed=precomputed,
     )
     for name in missing:
         result = results.get(name)
@@ -558,19 +577,39 @@ def _items_allowed_by_size(
     return allowed
 
 
+def _dry_run_preset_names(item: dict, config: Config, *, needs_txt: bool, reprocess_txt: bool) -> list[str]:
+    """Preset artifacts a real run would generate for this item.
+
+    Mirrors :func:`_run_preset_stage`: ``--reprocess-txt`` regenerates every
+    enabled preset, a fresh or reprocessable transcript generates the presets
+    still missing an artifact, and otherwise no preset work happens.
+    """
+    if not config.presets:
+        return []
+    if reprocess_txt:
+        return [preset.name for preset in config.presets]
+    if needs_txt or _needs_preset_reprocess(item, config, needs_txt=needs_txt):
+        return _missing_preset_names(item, config)
+    return []
+
+
 def _log_dry_run(folder_id: str, item: dict, config: Config, *, reprocess_txt: bool) -> None:
     file_info = item["file"]
     has_mp3 = item.get("has_mp3", False)
     has_txt = item.get("has_txt", False)
     needs_mp3 = _should_make_mp3_artifact(config) and not has_mp3
     needs_txt = bool(config.stt_provider) and (reprocess_txt or not has_txt)
+    preset_names = _dry_run_preset_names(
+        item, config, needs_txt=needs_txt, reprocess_txt=reprocess_txt
+    )
     logger.info(
-        "DRY RUN: would process %s (id=%s) in folder %s [mp3=%s, txt=%s]",
+        "DRY RUN: would process %s (id=%s) in folder %s [mp3=%s, txt=%s, presets=%s]",
         file_info["name"],
         file_info["id"],
         folder_id,
         "make" if needs_mp3 else "skip",
         "make" if needs_txt else "skip",
+        ",".join(preset_names) if preset_names else "skip",
     )
 
 
