@@ -582,7 +582,12 @@ def test_loads_grouped_yaml(tmp_path):
 
 def test_yaml_disabled_provider_is_mp3_only(tmp_path):
     config_file = tmp_path / "config.yml"
-    _write_yaml(config_file, {"stt": {"provider": "disabled"}})
+    # Disabling the built-in keypoints preset keeps this a pure mp3-only setup; with
+    # any enabled preset, an openai.api_key would be required.
+    _write_yaml(
+        config_file,
+        {"stt": {"provider": "disabled"}, "presets": {"keypoints": {"enabled": False}}},
+    )
 
     cfg = load_config(config_path=config_file)
 
@@ -592,9 +597,33 @@ def test_yaml_disabled_provider_is_mp3_only(tmp_path):
 
 def test_yaml_deepgram_requires_api_key(tmp_path):
     config_file = tmp_path / "config.yml"
-    _write_yaml(config_file, {"stt": {"provider": "deepgram"}})
+    # Supply an openai.api_key so the preset gate passes and the deepgram-specific
+    # validation is what surfaces.
+    _write_yaml(
+        config_file,
+        {"stt": {"provider": "deepgram"}, "openai": {"api_key": "sk-test"}},
+    )
 
     with pytest.raises(ValueError, match="deepgram.api_key is required"):
+        load_config(config_path=config_file)
+
+
+def test_yaml_enabled_preset_requires_openai_api_key(tmp_path):
+    config_file = tmp_path / "config.yml"
+    # A preset enabled via the presets map (not the legacy openai.keypoints flag) must
+    # still require an openai.api_key at load time.
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {
+                "keypoints": {"enabled": False},
+                "summary": {"instructions": "summarize"},
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="openai.api_key is required"):
         load_config(config_path=config_file)
 
 

@@ -286,6 +286,9 @@ def _config_from_env(*, validate_providers: bool = True) -> Config:
     openai_max_parallel = _parse_max_parallel(
         os.environ.get("OPENAI_MAX_PARALLEL", ""), default=4
     )
+    # Env config has no presets map; the built-in keypoints pass is gated by the
+    # legacy OPENAI_KEYPOINTS flag so the migrated YAML stays behavior-compatible.
+    presets = _resolve_presets({"keypoints": {"enabled": openai_keypoints}})
 
     output_target = (
         os.environ.get("OUTPUT_TARGET", "drive").strip().lower() or "drive"
@@ -307,8 +310,8 @@ def _config_from_env(*, validate_providers: bool = True) -> Config:
     # data-dir settings (e.g. `gdstt auth`, `gdstt list`), so an unconfigured STT
     # provider can't block bootstrap/inspection commands.
     if validate_providers:
-        if openai_keypoints and not openai_api_key:
-            raise ValueError("OPENAI_API_KEY is required when OPENAI_KEYPOINTS is enabled")
+        if presets and not openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required when any OpenAI preset is enabled")
         if stt_provider == "deepgram":
             if not deepgram_api_key:
                 raise ValueError(
@@ -334,10 +337,6 @@ def _config_from_env(*, validate_providers: bool = True) -> Config:
                 deepgram_keyterms_enabled,
                 deepgram_keyterms_file,
             )
-
-    # Env config has no presets map; the built-in keypoints pass is gated by the
-    # legacy OPENAI_KEYPOINTS flag so the migrated YAML stays behavior-compatible.
-    presets = _resolve_presets({"keypoints": {"enabled": openai_keypoints}})
 
     return Config(
         folder_ids=folder_ids,
@@ -524,9 +523,9 @@ def _config_from_yaml(
         raise ValueError("output.dir is required when output.target=folder")
 
     if validate_providers:
-        if openai_keypoints and not openai_api_key:
+        if presets and not openai_api_key:
             raise ValueError(
-                "openai.api_key is required when openai.keypoints is enabled"
+                "openai.api_key is required when any OpenAI preset is enabled"
             )
         if stt_provider == "deepgram":
             api_key_file = _yaml_str(deepgram.get("api_key_file"))
@@ -588,13 +587,23 @@ def _config_from_yaml(
     )
 
 
-def _config_to_yaml_dict(config: Config) -> dict:
-    """Serialize a Config into the grouped `config.yml` schema."""
+def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dict:
+    """Serialize a Config into the grouped `config.yml` schema.
+
+    ``data_dir`` is written relative to the config file's parent directory so that
+    re-reading the YAML (which resolves relative paths against that parent) yields
+    the same directory. Otherwise a config at ``<data_dir>/config.yml`` carrying
+    ``data_dir: data`` would re-resolve to ``<data_dir>/data`` on the next load.
+    """
+    if config_file is not None:
+        data_dir_value = os.path.relpath(config.data_dir, config_file.parent)
+    else:
+        data_dir_value = str(config.data_dir)
     return {
         "folder_ids": list(config.folder_ids),
         "poll_interval": config.poll_interval,
         "bitrate": config.bitrate,
-        "data_dir": str(config.data_dir),
+        "data_dir": data_dir_value,
         "proxy_url": config.proxy_url,
         "output": {
             "target": config.output_target,
@@ -666,7 +675,9 @@ def load_config(
     config = _config_from_env(validate_providers=validate_providers)
     try:
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(_dump_yaml(_config_to_yaml_dict(config)), encoding="utf-8")
+        resolved.write_text(
+            _dump_yaml(_config_to_yaml_dict(config, resolved)), encoding="utf-8"
+        )
         logger.info("Migrated configuration from environment to %s", resolved)
     except OSError as exc:
         logger.warning("Could not write migrated config file %s: %s", resolved, exc)
@@ -690,5 +701,7 @@ def migrate_config(
         )
     config = _config_from_env(validate_providers=False)
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    resolved.write_text(_dump_yaml(_config_to_yaml_dict(config)), encoding="utf-8")
+    resolved.write_text(
+        _dump_yaml(_config_to_yaml_dict(config, resolved)), encoding="utf-8"
+    )
     return resolved
