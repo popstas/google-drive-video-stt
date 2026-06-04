@@ -675,6 +675,32 @@ def test_process_prints_spend_summary_from_telemetry(mocker, capsys, tmp_path):
     assert "output=100" in out
 
 
+def test_process_spend_summary_reports_all_presets(mocker, capsys, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    telemetry = [
+        _Telemetry(
+            cost_usd={"deepgram": 0.10},
+            usage={
+                "openai_keypoints": {
+                    "total_tokens": 300, "input_tokens": 200, "output_tokens": 100,
+                },
+                "openai_expertizeme-managers": {
+                    "total_tokens": 50, "input_tokens": 40, "output_tokens": 10,
+                },
+            },
+        )
+    ]
+    mocker.patch("src.cli.main_module.process_target", return_value=telemetry)
+
+    cli.main(["process", "file123"])
+
+    out = capsys.readouterr().out
+    assert "OpenAI keypoints tokens: total=300, input=200, output=100" in out
+    assert "OpenAI expertizeme-managers tokens: total=50, input=40, output=10" in out
+
+
 def test_process_spend_summary_reports_pending_cost(mocker, capsys, tmp_path):
     cfg = make_config(data_dir=tmp_path)
     mocker.patch("src.cli.load_config", return_value=cfg)
@@ -824,8 +850,8 @@ def test_doctor_reports_preset_dag(mocker, capsys, tmp_path, monkeypatch):
 
     out = capsys.readouterr().out
     assert "Presets: 2 enabled" in out
-    assert "transcript-cleanup (enabled) <- transcript" in out
-    assert "keypoints (enabled) <- transcript-cleanup" in out
+    assert "transcript-cleanup <- transcript" in out
+    assert "keypoints <- transcript-cleanup" in out
 
 
 def test_doctor_reports_no_presets_when_none_enabled(mocker, capsys, tmp_path, monkeypatch):

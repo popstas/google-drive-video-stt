@@ -897,6 +897,28 @@ def test_yaml_max_parallel_must_be_positive(tmp_path):
         load_config(config_path=config_file, validate_providers=False)
 
 
+def test_yaml_max_parallel_rejects_bool(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {"stt": {"provider": "disabled"}, "openai": {"max_parallel": True}},
+    )
+
+    with pytest.raises(ValueError, match="max_parallel must be an integer"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
+def test_yaml_max_parallel_rejects_non_integer_float(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {"stt": {"provider": "disabled"}, "openai": {"max_parallel": 2.9}},
+    )
+
+    with pytest.raises(ValueError, match="max_parallel must be an integer"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
 def test_env_migration_reads_max_parallel(monkeypatch, tmp_path):
     monkeypatch.setenv("FOLDER_IDS", "f1")
     monkeypatch.setenv("STT_PROVIDER", "disabled")

@@ -70,23 +70,28 @@ def _format_deepgram_cost(cost_usd: dict[str, float | None]) -> str:
     return f"${cost:.4f}"
 
 
-def _format_keypoints_usage(usage: dict[str, dict[str, int]]) -> str | None:
-    keypoints = usage.get("openai_keypoints") if usage else None
-    if not keypoints:
-        return None
-    total = keypoints.get("total_tokens")
-    prompt = keypoints.get("input_tokens")
-    completion = keypoints.get("output_tokens")
-    parts = []
-    if total is not None:
-        parts.append(f"total={total}")
-    if prompt is not None:
-        parts.append(f"input={prompt}")
-    if completion is not None:
-        parts.append(f"output={completion}")
-    if not parts:
-        return None
-    return "OpenAI keypoints tokens: " + ", ".join(parts)
+def _format_preset_usage_lines(usage: dict[str, dict[str, int]]) -> list[str]:
+    """Render one OpenAI token-usage line per preset (``openai_<preset>`` key)."""
+    lines: list[str] = []
+    for key in sorted(usage or {}):
+        if not key.startswith("openai_"):
+            continue
+        stats = usage.get(key) or {}
+        total = stats.get("total_tokens")
+        prompt = stats.get("input_tokens")
+        completion = stats.get("output_tokens")
+        parts = []
+        if total is not None:
+            parts.append(f"total={total}")
+        if prompt is not None:
+            parts.append(f"input={prompt}")
+        if completion is not None:
+            parts.append(f"output={completion}")
+        if not parts:
+            continue
+        preset_name = key[len("openai_"):]
+        lines.append(f"OpenAI {preset_name} tokens: " + ", ".join(parts))
+    return lines
 
 
 def _print_spend_summary(telemetry: list, *, dry_run: bool = False) -> None:
@@ -108,9 +113,8 @@ def _print_spend_summary(telemetry: list, *, dry_run: bool = False) -> None:
             total_cost += float(cost)
             have_any_cost = True
         lines.append(f"  file {index}: Deepgram cost {_format_deepgram_cost(cost_usd)}")
-        keypoints_line = _format_keypoints_usage(usage)
-        if keypoints_line is not None:
-            lines.append(f"    {keypoints_line}")
+        for preset_line in _format_preset_usage_lines(usage):
+            lines.append(f"    {preset_line}")
     if len(telemetry) > 1 and have_any_cost:
         lines.append(f"  combined Deepgram cost: ${total_cost:.4f}")
     print("\n".join(lines))
@@ -208,11 +212,12 @@ def _print_preset_dag(config) -> None:
     if not presets:
         print("Presets: none enabled")
         return
+    # config.presets only ever holds enabled presets (merge_presets drops disabled
+    # ones), so there is no per-preset enabled/disabled state to annotate here.
     print(f"Presets: {len(presets)} enabled")
     for preset in presets:
         deps = ", ".join(preset.depends_on) if preset.depends_on else "transcript"
-        state = "enabled" if preset.enabled else "disabled"
-        print(f"  {preset.name} ({state}) <- {deps}")
+        print(f"  {preset.name} <- {deps}")
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:

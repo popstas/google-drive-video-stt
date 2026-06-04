@@ -240,6 +240,22 @@ def download(
     return dest_path
 
 
+def download_text(service: Any, file_id: str) -> str:
+    """Download a small text/markdown Drive file's content into memory.
+
+    Used to re-feed an existing transcript into the preset stage without
+    re-running STT when a Drive ``.txt`` sibling already exists but some preset
+    artifact is still missing.
+    """
+    request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+    buffer = io.BytesIO()
+    downloader = MediaIoBaseDownload(buffer, request)
+    done = False
+    while not done:
+        _status, done = downloader.next_chunk()
+    return buffer.getvalue().decode("utf-8-sig")
+
+
 def upload(
     service: Any,
     local_path: Path,

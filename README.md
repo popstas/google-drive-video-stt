@@ -247,6 +247,7 @@ recognized by the one-time migration and map onto these YAML keys:
 | `OPENAI_API_KEY` | — | Required when `OPENAI_KEYPOINTS=true` |
 | `OPENAI_MODEL` | `gpt-5.4-mini` | Model for the OpenAI keypoints pipeline |
 | `OPENAI_BATCH` | `false` | Submit keypoints generation via the OpenAI Batch API (~50% cheaper, higher latency) |
+| `OPENAI_MAX_PARALLEL` | `4` | Max number of independent presets run concurrently (maps to `openai.max_parallel`) |
 | `DEEPGRAM_API_KEY` | — | Required when `STT_PROVIDER=deepgram` unless `DEEPGRAM_API_KEY_FILE` is set |
 | `DEEPGRAM_API_KEY_FILE` | — | Optional file containing a raw Deepgram token or JSON with `api_key`, `deepgram_api_key`, or `DEEPGRAM_API_KEY` |
 | `DEEPGRAM_MODEL` | `nova-3` | Deepgram model name |

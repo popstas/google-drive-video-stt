@@ -124,11 +124,16 @@ def _parse_max_parallel(raw: object, *, default: int) -> int:
     """Parse a positive ``openai.max_parallel`` worker cap (env string or YAML int)."""
     if raw is None:
         return default
+    # bool is an int subclass: int(True) == 1 would silently accept a YAML bool.
+    if isinstance(raw, bool):
+        raise ValueError(f"openai.max_parallel must be an integer, got: {raw!r}")
     if isinstance(raw, str):
         text = raw.strip()
         if not text:
             return default
         raw = text
+    if isinstance(raw, float) and not raw.is_integer():
+        raise ValueError(f"openai.max_parallel must be an integer, got: {raw!r}")
     try:
         value = int(raw)
     except (TypeError, ValueError) as exc:

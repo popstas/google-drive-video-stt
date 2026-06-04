@@ -163,8 +163,11 @@ def _run_preset_stage(
 
     Only presets still missing an artifact are produced (``reprocess`` re-runs them
     all, overwriting in place). Successful, non-empty outputs are written as soon as
-    the stage returns; if any preset failed, an aggregated error is raised so the
-    file retries on a later cycle and re-runs only the still-missing presets.
+    the stage returns; if any preset failed, an aggregated error is raised. For
+    Drive targets the file is re-selected on a later cycle (its ``.txt`` sibling is
+    re-fed without re-running STT) so only the still-missing presets retry. Folder
+    targets write preset artifacts to local disk, which ``list_folder_state`` does
+    not track, so their preset stage runs once per transcription only.
     """
     preset_by_name = {preset.name: preset for preset in config.presets}
     if not preset_by_name:
@@ -219,6 +222,28 @@ def _prepare_deepgram_audio(mp4_path: Path, config: Config) -> Path:
 
 def _should_make_mp3_artifact(config: Config) -> bool:
     return config.drive_mp3_artifact
+
+
+def _missing_preset_names(item: dict, config: Config) -> list[str]:
+    """Enabled presets that have no artifact yet for this item."""
+    artifact_ids = item.get("artifact_ids") or {}
+    return [preset.name for preset in config.presets if preset.name not in artifact_ids]
+
+
+def _needs_preset_reprocess(item: dict, config: Config, *, needs_txt: bool) -> bool:
+    """Whether to re-run missing presets from an existing Drive transcript.
+
+    Only applies when a Drive ``.txt`` sibling already exists (``txt_id``) and the
+    transcript is not being regenerated this pass. Folder-mode transcripts have no
+    ``txt_id`` (the ``.txt`` lives on local disk, not as a Drive sibling), so they
+    are excluded — their preset artifacts are not tracked in ``artifact_ids`` and
+    would otherwise reprocess on every cycle.
+    """
+    if needs_txt or not config.presets:
+        return False
+    if item.get("txt_id") is None:
+        return False
+    return bool(_missing_preset_names(item, config))
 
 
 def _apply_local_output_state(items: list[dict], config: Config) -> list[dict]:
@@ -322,8 +347,9 @@ def process_item(
     stt_enabled = bool(config.stt_provider)
     needs_mp3 = _should_make_mp3_artifact(config) and not has_mp3
     needs_txt = stt_enabled and (reprocess_txt or not has_txt)
+    needs_presets = _needs_preset_reprocess(item, config, needs_txt=needs_txt)
 
-    if not needs_mp3 and not needs_txt:
+    if not needs_mp3 and not needs_txt and not needs_presets:
         return
 
     provider = _processing_provider(config, needs_txt=needs_txt)
@@ -419,6 +445,29 @@ def process_item(
                     reprocess=reprocess_txt,
                     usage=usage,
                 )
+            elif needs_presets:
+                # The transcript already exists on Drive; re-feed it to produce the
+                # still-missing presets (a failed earlier preset or a newly added
+                # one) without re-running STT.
+                text = _call_with_transient_retries(
+                    lambda: drive.download_text(service, item["txt_id"]),
+                    description=f"download transcript for {file_name} ({file_id})",
+                    retry_state=retry_state,
+                )
+                speaker_names = _speaker_names_from_file_info(file_info)
+                _run_preset_stage(
+                    service,
+                    file_id,
+                    file_name,
+                    text,
+                    folder_id,
+                    tmp_dir,
+                    config,
+                    speaker_names=speaker_names,
+                    artifact_ids=item.get("artifact_ids") or {},
+                    reprocess=False,
+                    usage=usage,
+                )
     except Exception as exc:
         error = exc
         setattr(exc, "gdstt_retry_count", retry_state.retry_count)
@@ -454,11 +503,16 @@ def process_item(
 
 def _pending_items(items: list[dict], config: Config) -> list[dict]:
     stt_enabled = bool(config.stt_provider)
-    return [
-        item for item in items
-        if (_should_make_mp3_artifact(config) and not item.get("has_mp3"))
-        or (stt_enabled and not item.get("has_txt"))
-    ]
+    pending = []
+    for item in items:
+        needs_txt = stt_enabled and not item.get("has_txt")
+        if (
+            (_should_make_mp3_artifact(config) and not item.get("has_mp3"))
+            or needs_txt
+            or _needs_preset_reprocess(item, config, needs_txt=needs_txt)
+        ):
+            pending.append(item)
+    return pending
 
 
 def _file_size_bytes(item: dict) -> int | None:
