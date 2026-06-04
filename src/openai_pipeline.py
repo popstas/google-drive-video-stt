@@ -223,6 +223,16 @@ class OpenAIPipeline:
         self._client = OpenAI(**kwargs)
         return self._client
 
+    def close(self) -> None:
+        """Release the underlying HTTP client (and any proxy connection pool)."""
+        client = self._client
+        self._client = None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
     def generate_keypoints(
         self,
         transcript: str,
@@ -325,8 +335,13 @@ def generate_keypoints(
 ) -> str:
     """Generate a Keypoints summary from a transcript via the configured pipeline."""
     pipeline = get_pipeline(config)
-    result = pipeline.generate_keypoints(text, file_name, speaker_names=speaker_names)
-    if usage is not None:
-        usage.clear()
-        usage.update(pipeline.last_usage)
-    return result
+    try:
+        result = pipeline.generate_keypoints(
+            text, file_name, speaker_names=speaker_names
+        )
+        if usage is not None:
+            usage.clear()
+            usage.update(pipeline.last_usage)
+        return result
+    finally:
+        pipeline.close()
