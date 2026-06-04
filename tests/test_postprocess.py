@@ -114,6 +114,19 @@ def test_extra_speaker_merged_into_frequent_neighbor():
     assert "Bob: bbb bbb bbb x bbb bbb" in out
 
 
+def test_extra_speaker_does_not_replace_first_two_speakers_when_names_known():
+    text = (
+        "Speaker 1: hello\n"
+        "Speaker 2: hi\n"
+        "Speaker 3: this is a longer stray turn\n"
+        "Speaker 2: back"
+    )
+
+    out = postprocess.map_speakers(text, ["Alice", "Bob"])
+
+    assert out == "Alice: hello\nBob: hi this is a longer stray turn back"
+
+
 def test_extra_speaker_falls_back_to_dominant_when_no_real_neighbor():
     # Speaker 3 only ever neighbors itself -> merged into the most talkative real speaker.
     text = (
@@ -126,6 +139,69 @@ def test_extra_speaker_falls_back_to_dominant_when_no_real_neighbor():
     assert "Speaker 3" not in out
     # Alice (Speaker 1) is dominant by word count; the stray turns attach to her.
     assert out.startswith("Alice: x y")
+
+
+def test_dominant_speaker_outside_canonical_range_maps_correctly():
+    # Diarization emits Speaker 1 and Speaker 3 (no Speaker 2) for a 2-party
+    # call, and Speaker 3 is the dominant talker. The old canonical branch
+    # forced labels 1..expected as real, which would have treated the main
+    # speaker (3) as a stray and merged their turns into the wrong name.
+    text = (
+        "Speaker 1: hi\n"
+        "Speaker 3: lots and lots to say here\n"
+        "Speaker 1: ok\n"
+        "Speaker 3: still going on at length\n"
+        "Speaker 1: sure\n"
+        "Speaker 3: and even more"
+    )
+    out = postprocess.map_speakers(text, ["Alice", "Bob"])
+    lines = out.split("\n")
+    # First appearance order: Speaker 1 -> Alice, Speaker 3 -> Bob.
+    assert lines[0] == "Alice: hi"
+    assert lines[1] == "Bob: lots and lots to say here"
+    assert "Speaker 1" not in out
+    assert "Speaker 3" not in out
+    # The dominant speaker's turns stay together under one name, not merged away.
+    assert "Bob: and even more" in out
+
+
+def test_dominant_out_of_range_speaker_not_treated_as_stray():
+    # Even when canonical labels 1..expected are all present, the most prominent
+    # speaker (by turn count) outside that range must remain a real speaker.
+    text = (
+        "Speaker 1: hello\n"
+        "Speaker 2: y\n"
+        "Speaker 3: a\n"
+        "Speaker 3: b\n"
+        "Speaker 3: c\n"
+        "Speaker 3: d"
+    )
+    out = postprocess.map_speakers(text, ["Alice", "Bob"], expected=2)
+    # Speaker 3 takes the most turns -> it is a real speaker, not merged.
+    assert "Speaker 3" not in out
+    # Speaker 1 (first appearance) and Speaker 3 are the two real speakers;
+    # Speaker 2 (a single short stray turn) merges into a neighbor.
+    assert "Speaker 2" not in out
+    assert "Alice: hello" in out
+    # Speaker 2's stray "y" merges into its neighbor Speaker 3 (-> Bob).
+    assert "Bob: y a b c d" in out
+
+
+def test_single_name_with_dominant_out_of_range_speaker():
+    # A single filename name must not collapse speakers (expected floored at 2),
+    # and the dominant out-of-range speaker still maps correctly.
+    text = (
+        "Speaker 1: hi\n"
+        "Speaker 3: a long dominant turn\n"
+        "Speaker 1: ok\n"
+        "Speaker 3: another dominant turn"
+    )
+    out = postprocess.map_speakers(text, ["Alice"])
+    lines = out.split("\n")
+    assert lines[0] == "Alice: hi"
+    # Second real speaker keeps a generic label rather than collapsing into Alice.
+    assert lines[1] == "Speaker 2: a long dominant turn"
+    assert "Speaker 3" not in out
 
 
 # --- orchestration ---------------------------------------------------------

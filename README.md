@@ -1,51 +1,84 @@
 # google-drive-video-stt
 
-Monitors Google Drive folders for new MP4 files, extracts MP3 audio with ffmpeg, and uploads the MP3 alongside the original. Designed as a headless preprocessing step for speech-to-text pipelines (e.g. NotebookLM, which rejects files over 200 MB, and Cloud STT, which doesn't accept MP4 directly).
+Monitors Google Drive folders for new MP4 files, optionally extracts MP3 audio
+with ffmpeg, transcribes them with Deepgram Nova-3 (speaker diarization), and
+writes a speaker-named transcript — plus an optional Keypoints document — back to
+Google Drive or to a local folder. Designed as a headless preprocessing step for
+speech-to-text pipelines.
 
 ## Features
 
 - Polls one or more Google Drive folders on a configurable interval
-- Idempotent: skips MP4s that already have a sibling `<basename>.mp3`
+- Idempotent: skips already-created artifacts, linked by source file id metadata
+  when available and by sibling name as a legacy fallback
 - Audio extraction via ffmpeg (`libmp3lame`, configurable bitrate)
+- Deepgram Nova-3 transcription with speaker diarization, full-file (no chunking)
 - Optional Telegram error notifications (success is silent)
-- Operator CLI (`gdstt`) wrapping auth, the polling loop, on-demand processing, local-file transcription, and folder-state inspection
-- Optional transcript post-processing (local or OpenAI LLM) that maps diarized speakers to the interlocutor names in the file name
-- Sibling `.mp3`/`.txt` names preserve the full Drive file name, including `/` characters
+- Operator CLI (`gdstt`) wrapping auth, the polling loop, on-demand processing,
+  newest-file processing, local-file transcription, deterministic speaker
+  relabeling, and folder-state inspection
+- Local post-processing that maps diarized `Speaker N` labels to the interlocutor
+  names parsed from the file name
+- Optional Keypoints generation (`## Задачи` / `## Тезисы` / `## Открытые
+  вопросы`) via the OpenAI Responses API
+- Output to Google Drive siblings or to a local folder (`OUTPUT_TARGET`)
+- Sibling `.mp3`/`.txt` names preserve the full Drive file name, including `/`
+  characters
+- Explicit speaker names can be stored on the Drive MP4 when the filename is not
+  enough for reliable speaker mapping
 - Docker-first deployment, all mutable state in `./data`
 
 ## Requirements
 
 - Python 3.11+ and [`uv`](https://github.com/astral-sh/uv) for local development
 - `ffmpeg` available on `PATH` for local runs (already included in the Docker image)
-- Google Cloud project with the Drive API enabled and OAuth client metadata in `credentials.json`
+- Google Cloud project with the Drive API enabled and OAuth client metadata in
+  `data/credentials.json`
+- A Deepgram API key for transcription (`STT_PROVIDER=deepgram`)
+- Optional: an OpenAI API key when `OPENAI_KEYPOINTS=true`
 - Optional: a Telegram bot token + chat ID for error notifications
 - Optional: an HTTP(S) or SOCKS proxy via `PROXY_URL`; SOCKS support is included
   through the `requests[socks]` dependency
 
 ## Setup
 
-1. Clone the repo and install dependencies (use `--extra dev` for tests/lint tools):
+For an operator-style local install, install the global CLI first:
 
-   ```bash
-   uv sync --extra dev
-   ```
+```bash
+uv tool install --editable .
+uv tool update-shell
+```
 
-2. Create or select a Google Cloud project, enable the required APIs, and prepare
-   `./data/credentials.json`. The CLI path is documented below.
+For development in this checkout, install the editable environment too:
 
-3. Copy `.env.example` to `.env` and fill in `FOLDER_IDS` (comma-separated Drive folder IDs) plus optional Telegram credentials:
+```bash
+uv sync --extra dev
+```
 
-   ```bash
-   cp .env.example .env
-   ```
+Then create `.env` from the template and fill in the required values:
 
-4. Run the OAuth flow once to mint a refresh token. This opens a browser and writes `data/token.json`:
+```bash
+cp .env.example .env
+# Set at least FOLDER_IDS, DEEPGRAM_API_KEY, and (if used) OUTPUT_DIR / OPENAI_API_KEY
+```
 
-   ```bash
-   uv run python -m src.auth
-   ```
+After `data/credentials.json` is in place (see below), authenticate once and
+verify access with the safe operator flow:
 
-## Google Cloud and Drive setup with gcloud
+```bash
+gdstt auth
+gdstt doctor --drive
+gdstt list
+gdstt process <file-id> --dry-run
+```
+
+## Google Drive setup
+
+This app authenticates with a single Google OAuth user credential covering Drive.
+It reads OAuth client metadata from `data/credentials.json` and writes its own
+`data/token.json` when you run `gdstt auth`.
+
+### Option A — gcloud / Application Default Credentials
 
 Install and initialize the Google Cloud CLI first:
 
@@ -54,39 +87,21 @@ gcloud init
 gcloud auth login --enable-gdrive-access
 ```
 
-Use an existing project:
+Use an existing project or create a dedicated one:
 
 ```bash
 gcloud config set project <project-id>
-```
-
-Or create a dedicated project for this service:
-
-```bash
+# or
 gcloud projects create <project-id> \
   --name="google-drive-video-stt" \
   --set-as-default
 ```
 
-If the project needs billing for Google Speech-to-Text or Cloud Storage, list
-billing accounts and link one:
+Enable the Drive API:
 
 ```bash
-gcloud billing accounts list
-gcloud billing projects link <project-id> --billing-account=<billing-account-id>
+gcloud services enable drive.googleapis.com
 ```
-
-Enable the APIs used by this app:
-
-```bash
-gcloud services enable \
-  drive.googleapis.com \
-  speech.googleapis.com \
-  storage.googleapis.com
-```
-
-`drive.googleapis.com` is needed for all runs. `speech.googleapis.com` and
-`storage.googleapis.com` are needed only when `STT_PROVIDER=google`.
 
 This app uses an installed-app OAuth client JSON at `data/credentials.json`.
 If you have initialized gcloud Application Default Credentials, create that file
@@ -94,7 +109,7 @@ from the local gcloud client metadata:
 
 ```powershell
 gcloud auth application-default login `
-  --scopes=https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/cloud-platform
+  --scopes=https://www.googleapis.com/auth/drive
 
 New-Item -ItemType Directory -Force data | Out-Null
 $adcPath = Join-Path $env:APPDATA "gcloud\application_default_credentials.json"
@@ -113,18 +128,29 @@ $client | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 data\credentials.
 
 The generated `data/credentials.json` contains only the OAuth client metadata.
 Do not copy the ADC `refresh_token` into it. The app creates its own
-`data/token.json` when you run `uv run python -m src.auth`.
+`data/token.json` when you run `gdstt auth`.
 
-If the ADC flow is not available in your environment, use the Google Cloud
-Console fallback: APIs & Services -> Credentials -> Create Credentials ->
-OAuth client ID -> Desktop app, then save the downloaded JSON as
-`data/credentials.json`. If Google asks for an OAuth consent screen first,
-configure it in external test mode and add your own Google account as a test
-user. The app requests these scopes: `https://www.googleapis.com/auth/drive`
-and `https://www.googleapis.com/auth/cloud-platform`.
+### Option B — Google Cloud Console OAuth client
 
-To create a Drive folder from the command line, use the Drive API with the
-gcloud access token:
+If the ADC flow is not available in your environment, use the Console fallback:
+APIs & Services -> Credentials -> Create Credentials -> OAuth client ID ->
+Desktop app, then save the downloaded JSON as `data/credentials.json`. If Google
+asks for an OAuth consent screen first, configure it in external test mode and add
+your own Google account as a test user. The app requests the
+`https://www.googleapis.com/auth/drive` scope.
+
+### Authenticating
+
+```bash
+gdstt auth
+gdstt auth --manual
+gdstt auth "http://localhost/?code=4/abc123&scope=..."
+```
+
+### Finding folder ids
+
+To create a Drive folder from the command line, use the Drive API with the gcloud
+access token:
 
 ```powershell
 $token = gcloud auth print-access-token
@@ -153,17 +179,20 @@ All configuration is environment-driven. See `.env.example`.
 | `FOLDER_IDS` | (required) | Comma-separated Google Drive folder IDs to monitor |
 | `POLL_INTERVAL` | `600` | Seconds between poll cycles |
 | `BITRATE` | `96k` | MP3 audio bitrate passed to ffmpeg |
+| `DRIVE_MP3_ARTIFACT` | auto | Upload an MP3 artifact to Drive. Defaults to `false` for `DEEPGRAM_AUDIO_SOURCE=m4a_copy`; `true` otherwise |
 | `TELEGRAM_BOT_TOKEN` | (empty) | If set with chat ID, errors are posted to Telegram |
 | `TELEGRAM_CHAT_ID` | (empty) | Telegram chat to receive error notifications |
 | `DATA_DIR` | `data` | Directory holding `credentials.json` and `token.json` |
-| `STT_PROVIDER` | (empty) | `openai`, `google`, `asr`, `deepgram`, or empty to disable transcription |
-| `STT_LANGUAGE` | (empty) | Language hint. `openai`/`asr`: optional (`en`, `ru`); empty = auto-detect. `google`: required BCP-47 (`en-US`, `ru-RU`); `deepgram`: empty defaults to `ru` |
-| `STT_CHUNK_SECONDS` | `600` | Chunk length for `openai`/`asr`. Ignored when `STT_PROVIDER=google` or `deepgram` |
+| `PROXY_URL` | (empty) | Optional `http`/`https`/`socks5` proxy for Telegram, Deepgram, and OpenAI |
+| `STT_PROVIDER` | `deepgram` | `deepgram` by default. Set `disabled` (or empty) to skip transcription and only manage MP3 artifacts |
+| `STT_LANGUAGE` | (empty) | Language hint. `deepgram`: empty defaults to `ru` |
 | `STT_POSTPROCESS` | `true` | Clean the transcript and map diarized `Speaker N` labels to the interlocutor names parsed from the file name, merging spurious extra speakers |
-| `OPENAI_POSTPROCESS` | `false` | Use the OpenAI Responses LLM pipeline to refine the transcript instead of the local `STT_POSTPROCESS` cleanup. Takes precedence over `STT_POSTPROCESS`. Requires `OPENAI_API_KEY` |
-| `OPENAI_MODEL` | `gpt-5.4-mini` | Model for the OpenAI post-processing pipeline |
-| `OPENAI_BATCH` | `false` | Submit OpenAI post-processing via the Batch API (~50% cheaper, higher latency) |
-| `OPENAI_API_KEY` | — | Required when `STT_PROVIDER=openai` or `OPENAI_POSTPROCESS=true` |
+| `OUTPUT_TARGET` | `drive` | Where artifacts are written: `drive` (sibling files) or `folder` (local `OUTPUT_DIR`) |
+| `OUTPUT_DIR` | — | Required when `OUTPUT_TARGET=folder`; local directory for transcript/keypoints files |
+| `OPENAI_KEYPOINTS` | `false` | Generate a `<base>.keypoints.md` Keypoints document via the OpenAI Responses API after transcription. Requires `OPENAI_API_KEY` |
+| `OPENAI_API_KEY` | — | Required when `OPENAI_KEYPOINTS=true` |
+| `OPENAI_MODEL` | `gpt-5.4-mini` | Model for the OpenAI keypoints pipeline |
+| `OPENAI_BATCH` | `false` | Submit keypoints generation via the OpenAI Batch API (~50% cheaper, higher latency) |
 | `DEEPGRAM_API_KEY` | — | Required when `STT_PROVIDER=deepgram` unless `DEEPGRAM_API_KEY_FILE` is set |
 | `DEEPGRAM_API_KEY_FILE` | — | Optional file containing a raw Deepgram token or JSON with `api_key`, `deepgram_api_key`, or `DEEPGRAM_API_KEY` |
 | `DEEPGRAM_MODEL` | `nova-3` | Deepgram model name |
@@ -172,55 +201,33 @@ All configuration is environment-driven. See `.env.example`.
 | `DEEPGRAM_TXT_FORMATTER` | `word_speaker` | Deepgram TXT formatter: `word_speaker` or `utterance` |
 | `DEEPGRAM_KEYTERMS_ENABLED` | `true` | Enables Nova-3 keyterm prompting |
 | `DEEPGRAM_KEYTERMS_FILE` | `config/deepgram-keyterms.txt` | Keyterms file, one term per line, max 100 |
-| `GOOGLE_CLOUD_PROJECT` | — | Required when `STT_PROVIDER=google` |
-| `GOOGLE_STT_GCS_BUCKET` | — | Required when `STT_PROVIDER=google`; bucket used to stage MP3 uploads |
-| `ASR_URL` | — | Required when `STT_PROVIDER=asr`; base URL of whisper-asr-webservice |
 
 ## Speech-to-text
 
-Setting `STT_PROVIDER` to a non-empty value transcribes each MP3 and uploads a sibling
-`<basename>.txt` next to the MP4/MP3.
-
-### Transcript post-processing
-
-By default (`STT_POSTPROCESS=true`) the transcript is post-processed before upload rather
-than stored as raw STT output. The local post-processor (`src/postprocess.py`) normalizes
-whitespace, parses the interlocutor names from the recording file name (e.g.
-`Alice and Bob - 2026/05/28 ... .mp4` → `Alice`, `Bob`), maps them onto the diarized
-`Speaker N` labels by order of appearance, and merges any extra (spurious) diarization
-speakers into the real one whose turns they continue. Speaker mapping only applies to
-diarized transcripts (`google` / `deepgram`); with non-diarizing providers (`openai` /
-`asr`) there are no `Speaker N` labels, so post-processing only normalizes whitespace.
-
-Set `OPENAI_POSTPROCESS=true` to instead refine the transcript with the OpenAI Responses
-API (`src/openai_pipeline.py`), which performs the same speaker mapping/merging via an LLM
-while keeping every utterance verbatim. It requires `OPENAI_API_KEY`, honors `PROXY_URL`,
-uses `OPENAI_MODEL` (default `gpt-5.4-mini`), and can run through the OpenAI Batch API
-(`OPENAI_BATCH=true`) for ~50% lower cost at the price of higher latency. When enabled it
-takes precedence over the local `STT_POSTPROCESS` path.
-
-When a sibling `.txt` already exists it is overwritten in place rather than duplicated.
+With `STT_PROVIDER=deepgram` (the default) each pending recording is transcribed
+through Deepgram and a sibling `<basename>.txt` is written next to the MP4 (or into
+`OUTPUT_DIR` when `OUTPUT_TARGET=folder`). Set `STT_PROVIDER=disabled` to skip
+transcription entirely and only manage the optional MP3 artifact.
 
 ### Deepgram Nova-3 (diarization)
 
 The `deepgram` provider submits a full-file audio copy to Deepgram's pre-recorded
 `/v1/listen` endpoint using Nova-3, Russian language, and `diarize_model=latest`
-by default. It is the recommended provider for Russian speaker diarization.
-It does not require the Deepgram SDK; the provider uses the existing `requests`
-HTTP client dependency.
+by default. It is the recommended provider for Russian speaker diarization. It
+does not require the Deepgram SDK; the provider uses the existing `requests` HTTP
+client dependency.
 
 Setup:
 
 1. Create a Deepgram API key.
 2. Set `STT_PROVIDER=deepgram` and either `DEEPGRAM_API_KEY` or
    `DEEPGRAM_API_KEY_FILE` in `.env`.
-3. Keep `STT_CHUNK_SECONDS` as-is; it is ignored because Deepgram receives one
-   full-file request so speaker labels remain consistent across the recording.
 
-`DEEPGRAM_API_KEY_FILE` may contain either the raw token or JSON with one of these fields:
-`api_key`, `deepgram_api_key`, or `DEEPGRAM_API_KEY`. The API key is never logged.
-After each successful Deepgram transcription, the service logs the request id, duration,
-and best-effort request cost in USD when Deepgram's usage API has recorded it.
+`DEEPGRAM_API_KEY_FILE` may contain either the raw token or JSON with one of these
+fields: `api_key`, `deepgram_api_key`, or `DEEPGRAM_API_KEY`. The API key is never
+logged. After each successful Deepgram transcription, the service logs the request
+id, duration, and best-effort request cost in USD when Deepgram's usage API has
+recorded it.
 
 The production defaults are:
 
@@ -235,18 +242,19 @@ DEEPGRAM_KEYTERMS_FILE=config/deepgram-keyterms.txt
 ```
 
 `m4a_copy` extracts a temporary AAC/M4A audio copy from the source MP4 for
-Deepgram without re-encoding. Use `mp3_96k` or `mp3_192k` to send a temporary
-MP3 instead. The sibling MP3 uploaded to Drive is still produced as before. If an
-MP3 already exists but TXT is missing, Deepgram downloads the MP4 again so it can
-use the selected high-quality audio source.
+Deepgram without re-encoding. Use `mp3_96k` or `mp3_192k` to send a temporary MP3
+instead. With the Deepgram `m4a_copy` default, no extra Drive MP3 is uploaded
+unless `DRIVE_MP3_ARTIFACT=true` is set. If an MP3 already exists but TXT is
+missing, Deepgram downloads the MP4 again so it can use the selected high-quality
+audio source.
 
 `word_speaker` is a Deepgram-only TXT formatter. It uses `utterances` for readable
 timing, but splits a line when `words[].speaker` changes inside the utterance.
 Set `DEEPGRAM_TXT_FORMATTER=utterance` to use the older utterance-level formatter.
 
-Keyterms are read from `DEEPGRAM_KEYTERMS_FILE`, one term per line. Blank lines
-and lines beginning with `#` are ignored. At most 100 keyterms are allowed, and
-they are sent only when `DEEPGRAM_MODEL=nova-3`.
+Keyterms are read from `DEEPGRAM_KEYTERMS_FILE`, one term per line. Blank lines and
+lines beginning with `#` are ignored. At most 100 keyterms are allowed, and they
+are sent only when `DEEPGRAM_MODEL=nova-3`.
 
 Sample output:
 
@@ -257,34 +265,49 @@ Sample output:
 
 Deepgram sync pre-recorded requests have a processing-time limit: Nova/Base/Enhanced
 requests that process for more than 10 minutes may return `504 Gateway Timeout`.
-Callback mode would avoid that for long files, but it requires a public callback endpoint
-and is intentionally not implemented in this first provider.
+Callback mode would avoid that for long files, but it requires a public callback
+endpoint and is intentionally not implemented. In practice this limit has not been
+hit: a 1.5-hour (~90 minute) recording has been transcribed through the sync
+endpoint without triggering a `504`, so the documented caveat above is a worst-case
+warning rather than a hard ceiling observed in real use.
 
-### Google (batched + diarization)
+### Transcript post-processing
 
-The `google` provider uses Speech-to-Text v2 `BatchRecognize` with speaker diarization,
-authenticated by the same OAuth user credentials as Drive (no service account).
+By default (`STT_POSTPROCESS=true`) the transcript is post-processed before it is
+written rather than stored as raw STT output. The local post-processor
+(`src/postprocess.py`) normalizes whitespace, parses the interlocutor names from
+the recording file name (e.g. `Alice and Bob - 2026/05/28 ... .mp4` → `Alice`,
+`Bob`), maps them onto the diarized `Speaker N` labels by order of appearance, and
+merges any extra (spurious) diarization speakers into the real one whose turns they
+continue.
 
-Setup:
+When a sibling `.txt` already exists, normal polling skips it to avoid spending STT
+credits repeatedly. Use `gdstt process <file-id> --reprocess-txt` when you
+intentionally want to run STT again and overwrite the existing `.txt` in place. New
+`.txt` and `.mp3` artifacts are tagged with the source MP4 id, so future source
+renames do not break artifact detection.
 
-1. Enable the Speech-to-Text and Cloud Storage APIs on your GCP project.
-2. Create a GCS bucket (same region as your recognizer) — e.g. `gsutil mb -l us gs://<bucket>`.
-3. Set `GOOGLE_CLOUD_PROJECT`, `GOOGLE_STT_GCS_BUCKET`, and `STT_LANGUAGE` (BCP-47, e.g. `en-US`) in `.env`.
-4. Re-run the OAuth flow once so the new `cloud-platform` scope is granted:
+### Keypoints generation
 
-   ```bash
-   rm data/token.json && uv run python -m src.auth
-   ```
+When `OPENAI_KEYPOINTS=true`, the service generates a Keypoints document after the
+transcript is produced and writes it as `<base>.keypoints.md` next to the
+transcript (`src/openai_pipeline.py`, OpenAI Responses API). The document contains
+`## Задачи` (grouped by `### Ответственный`), `## Тезисы`, and `## Открытые
+вопросы` in plain text. It requires `OPENAI_API_KEY`, honors `PROXY_URL`, uses
+`OPENAI_MODEL` (default `gpt-5.4-mini`), and can run through the OpenAI Batch API
+(`OPENAI_BATCH=true`) for ~50% lower cost at the price of higher latency.
 
-Each MP3 is uploaded to `gs://<bucket>/stt-<uuid>-<name>.mp3`, transcribed as a single batch
-job, then the staged blob is deleted. `STT_CHUNK_SECONDS` does not apply.
+For an agent-driven path (reason about speakers, confirm the mapping, relabel
+deterministically, and write the Keypoints document by hand), see
+[`skills/gdstt-cli/SKILL.md`](skills/gdstt-cli/SKILL.md).
 
-Sample output:
+### Output destination
 
-```
-[00:00:00] Speaker 1: hello, thanks for joining today
-[00:00:05] Speaker 2: hi, glad to be here
-```
+`OUTPUT_TARGET` controls where the transcript and keypoints files land. With the
+default `drive`, they are written as siblings of the source MP4 and uploaded (or
+updated in place when one already exists). With `folder`, the service writes
+`<output_dir>/<base_name>.txt` (and `.keypoints.md`), creating `OUTPUT_DIR` if it
+is missing. `OUTPUT_DIR` is required when `OUTPUT_TARGET=folder`.
 
 ## Usage
 
@@ -298,22 +321,84 @@ The process loops forever, sleeping `POLL_INTERVAL` seconds between cycles.
 
 ### CLI
 
-`uv sync` installs a `gdstt` console script that wraps every operation (equivalently
-`uv run python -m src.cli`). All commands read configuration from `.env` / the
-environment via `load_config()`.
+`uv sync` installs a `gdstt` console script that wraps every operation
+(equivalently `uv run python -m src.cli`). All commands read configuration from
+`.env` / the environment via `load_config()`.
+
+Safe operator flow: `gdstt doctor` -> `gdstt list` -> `gdstt process <file-id> --dry-run`
+-> `gdstt process <file-id>`. Move to `run-once` or continuous `run` only after
+that single-file path looks correct.
 
 ```bash
 gdstt auth [response_url]   # one-time interactive OAuth → data/token.json
-gdstt run                  # polling loop (same as python -m src.main)
-gdstt run-once             # a single poll cycle, then exit
-gdstt process <id> [--folder]   # process a Drive file or folder on demand
+gdstt doctor [--drive]      # check Drive/OAuth configuration without changing it
+gdstt latest [--folder ID] [--dry-run] [--max-size SIZE] [--confirm-large]   # process the newest mp4 in a folder
+gdstt run                   # continuous polling; can spend STT credits across all pending configured folders
+gdstt run-once [--dry-run] [--max-size SIZE] [--confirm-large]   # single cycle; use --dry-run first
+gdstt process <id> [--folder] [--reprocess-txt] [--dry-run] [--max-size SIZE] [--confirm-large]   # single target or folder; use --dry-run first
+gdstt speakers set <file-id> "Alice" "Bob"   # store explicit speaker names on an MP4
 gdstt transcribe <audio> [-o out.txt]   # STT-only on a local file; prints to stdout by default
+gdstt relabel --in SRC --out OUT --map MAP.json [--no-header]   # deterministic local speaker relabeling
 gdstt list [--folder ID]   # show sibling mp3/txt state without doing work (alias: status)
 ```
 
-`process` auto-detects whether the ID is a file or a folder; pass `--folder` to force
-folder handling. `list`/`status` defaults to the configured `FOLDER_IDS` when `--folder`
-is omitted.
+`process` auto-detects whether the ID is a file or a folder; pass `--folder` to
+force folder handling. `latest` resolves the folder from `--folder` or the first of
+`FOLDER_IDS` and processes the newest (most recently created) mp4. `list`/`status`
+defaults to the configured `FOLDER_IDS` when `--folder` is omitted.
+`--reprocess-txt` intentionally spends STT provider credits again and overwrites
+the linked `.txt` when one exists. `speakers set` affects future local
+post-processing; combine it with `process <file-id> --reprocess-txt` when an
+already-uploaded transcript needs to be regenerated with corrected names.
+
+`relabel` is a local file transform — it reads a transcript and a `MAP.json`
+(`default` label → name plus verbatim-text `exceptions`), merges consecutive
+same-speaker turns, preserves each utterance's words (whitespace is normalized),
+and reports unmapped labels on stderr. It touches no Drive and spends nothing.
+
+Use `doctor` first when setting up a new agent or machine: it reports `DATA_DIR`,
+credentials/token presence, the `FOLDER_IDS` count, and `STT_PROVIDER` without
+validating provider secrets. Add `--drive` only when you want it to authenticate
+and list the configured folders. Use `--dry-run` on `run-once`, `latest`, or folder
+`process` to preview pending work without downloads, uploads, or STT calls.
+`--max-size` is off unless you pass it. Use it as an optional manual safety limit
+before processing folders, for example `--max-size 50MB`; files larger than the
+limit are skipped unless you also pass `--confirm-large`.
+
+`run` has no preview mode and is intentionally the least safe operator entrypoint:
+it keeps polling and can continue spending STT credits until you stop it. Use it
+only after the single-file or `run-once --dry-run` path already matches expectations.
+
+### Runtime reliability and summaries
+
+The runtime treats incomplete output as failure instead of silently uploading it:
+
+- Empty provider transcripts raise an STT error; a blank `.txt` is not written.
+- Transient Drive metadata lookups, folder-state listings, and downloads retry with
+  bounded backoff. Uploads are not retried automatically.
+- Downloads are checked against Drive metadata size; mismatched partial temp files
+  are removed before retry or recovery.
+- `FOLDER_IDS` containing only commas or whitespace fails configuration loading
+  instead of producing a misleading no-op run.
+
+`run-once` logs one process summary per worked file, one folder summary per folder,
+and one cycle summary. The cycle summary includes pending, processed, failed,
+`retry_total`, skipped-by-size, folder-error, and duration fields. Each process
+summary also records the Deepgram request cost (USD, when the usage API has
+recorded it) and the OpenAI keypoints token usage.
+
+After `process` and `latest`, the CLI prints a short **spend summary** for the
+worked files: the Deepgram cost (or `pending` when the usage API has not recorded
+it yet) and, when keypoints ran, the OpenAI token counts. `transcribe` prints the
+Deepgram cost after a local-file run.
+
+### Agent-facing documentation
+
+Shared repository instructions live in [`AGENTS.md`](AGENTS.md). The operator
+skill is a single file, [`skills/gdstt-cli/SKILL.md`](skills/gdstt-cli/SKILL.md);
+copy it into your agent's skills directory to use it. The skill also documents an
+optional, fill-in-the-blanks Vault integration layer (wikilinks, vault output
+paths, and a sensitive-fragment redaction step); the default output stays plain.
 
 ## Tests
 
@@ -322,8 +407,8 @@ uv run pytest
 uv run ruff check
 ```
 
-Deepgram has a gated live smoke test that can spend a small amount of credit. It is skipped
-unless explicitly enabled:
+Deepgram has a gated live smoke test that can spend a small amount of credit. It is
+skipped unless explicitly enabled:
 
 ```bash
 RUN_DEEPGRAM_LIVE_TESTS=1 \
@@ -332,9 +417,9 @@ DEEPGRAM_LIVE_AUDIO_PATH=/path/to/short-audio-or-video.mp4 \
 uv run pytest tests/test_stt_deepgram_live.py -s
 ```
 
-For MP4/MOV/M4V inputs, the live test extracts only the first 30 seconds to a temporary MP3.
-It prints the transcript preview, Deepgram request id, duration, and best-effort USD cost
-when Deepgram's usage API has recorded it.
+For MP4/MOV/M4V inputs, the live test extracts only the first 30 seconds to a
+temporary MP3. It prints the transcript preview, Deepgram request id, duration, and
+best-effort USD cost when Deepgram's usage API has recorded it.
 
 ## Docker deployment
 
@@ -344,7 +429,8 @@ Build and run with the bundled Compose file:
 docker compose up -d --build
 ```
 
-The container mounts `./data` for persistent token storage. Logs are JSON-file with a 10 MB / 3-file rotation. Restart policy is `unless-stopped`.
+The container mounts `./data` for persistent token storage. Logs are JSON-file with
+a 10 MB / 3-file rotation. Restart policy is `unless-stopped`.
 
 For a fresh VPS:
 
@@ -359,20 +445,20 @@ src/
   auth.py        OAuth flow + Drive service builder
   config.py      Env var loading
   drive.py       List / download / upload helpers
-  extractor.py   ffmpeg MP4 → MP3 wrapper
+  extractor.py   ffmpeg MP4 → MP3/M4A wrappers
   notify.py      Telegram error notifier
   main.py        Polling loop + on-demand process_target entry points
   cli.py         gdstt operator CLI (argparse subcommands)
+  output.py      Output destination layer (Drive sibling or local folder)
   postprocess.py Local transcript cleanup + speaker-name mapping
-  openai_pipeline.py OpenAI Responses LLM transcript refinement (sync + batch)
+  openai_pipeline.py OpenAI Responses keypoints generation (sync + batch)
+  relabel_transcript.py Deterministic speaker relabeling from a MAP.json
   stt/
-    base.py            STTProvider ABC (transcribe_chunk + transcribe_full hook)
-    chunker.py         ffmpeg MP3 splitter (used by chunked providers)
-    transcribe.py      Dispatch: full-file path or chunked path
-    openai_provider.py OpenAI Whisper API client
-    asr_provider.py    Self-hosted whisper-asr-webservice client
-    google_provider.py Speech-to-Text v2 BatchRecognize + diarization
+    __init__.py        get_provider() dispatch (Deepgram-only)
+    base.py            STTProvider ABC (transcribe_full hook)
+    transcribe.py      Full-file transcription call + cost logging
     deepgram_provider.py Deepgram Nova-3 + diarization
+    deepgram_usage.py  Best-effort Deepgram usage/cost lookup
 tests/           Unit tests (mock external services)
 data/            Tokens, credentials, gitignored
 ```

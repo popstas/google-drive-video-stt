@@ -189,8 +189,24 @@ def map_speakers(text: str, names: list[str], *, expected: int | None = None) ->
 
     first_seen = {num: idx for idx, num in enumerate(distinct)}
     real_count = min(expected, len(distinct))
+    # Pick the real interlocutors by actual prominence rather than by trusting
+    # the numeric labels diarization happens to emit. Diarization may skip or
+    # reorder numbers (e.g. emit Speaker 3 for the dominant talker in a
+    # two-party call); keying off labels 1..expected would then treat the main
+    # speaker as a stray and merge their turns into the wrong name.
+    #
+    # Turn count is the primary signal because a genuine interlocutor takes
+    # turns throughout the conversation, whereas a diarization stray is usually
+    # an isolated turn (high word count but only one turn). First appearance is
+    # the final tie-breaker so the result is deterministic and stable, and so
+    # the earliest-speaking participants win ties (preserving canonical
+    # ordering when labels are well-behaved).
+    turn_counts: dict[int, int] = {}
+    for num in sequence:
+        turn_counts[num] = turn_counts.get(num, 0) + 1
     real = sorted(
-        distinct, key=lambda n: (-word_counts.get(n, 0), first_seen[n])
+        distinct,
+        key=lambda n: (-turn_counts.get(n, 0), first_seen[n]),
     )[:real_count]
     extras = [num for num in distinct if num not in real]
 
@@ -216,9 +232,12 @@ def map_speakers(text: str, names: list[str], *, expected: int | None = None) ->
 
 
 def postprocess_transcript(
-    text: str, file_name: str, *, expected_speakers: int | None = None
+    text: str,
+    file_name: str,
+    *,
+    speaker_names: list[str] | None = None,
 ) -> str:
     """Clean a raw STT transcript and map diarized speakers to interlocutor names."""
     cleaned = clean_transcript(text)
-    names = extract_interlocutor_names(file_name)
-    return map_speakers(cleaned, names, expected=expected_speakers)
+    names = speaker_names if speaker_names is not None else extract_interlocutor_names(file_name)
+    return map_speakers(cleaned, names)
