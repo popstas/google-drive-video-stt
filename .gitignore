@@ -219,3 +219,6 @@ __marimo__/
 
 # Local mutable data (token.json, temp files)
 data/
+.data/
+.agents/skills/
+.claude/skills/

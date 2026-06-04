@@ -45,6 +45,8 @@ def extract_mp3(mp4_path: Path, bitrate: str = "96k") -> Path:
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             timeout=FFMPEG_TIMEOUT_SECONDS,
         )
@@ -94,6 +96,8 @@ def extract_m4a_copy(mp4_path: Path) -> Path:
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             timeout=FFMPEG_TIMEOUT_SECONDS,
         )

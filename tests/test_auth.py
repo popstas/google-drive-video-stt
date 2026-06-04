@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import stat
@@ -139,7 +140,7 @@ def test_load_credentials_missing_scope_raises(tmp_path, mocker):
             "client_id": "cid",
             "client_secret": "csec",
             "token_uri": "https://oauth2.googleapis.com/token",
-            "scopes": ["https://www.googleapis.com/auth/drive"],
+            "scopes": ["https://www.googleapis.com/auth/userinfo.email"],
         },
     )
 
@@ -240,9 +241,9 @@ def test_load_credentials_scopes_with_non_string_members_raises(tmp_path):
         auth.load_credentials(tmp_path)
 
 
-def test_scopes_includes_cloud_platform():
-    assert "https://www.googleapis.com/auth/cloud-platform" in auth.SCOPES
+def test_scopes_are_drive_only():
     assert "https://www.googleapis.com/auth/drive" in auth.SCOPES
+    assert "https://www.googleapis.com/auth/cloud-platform" not in auth.SCOPES
 
 
 def test_build_drive_service_uses_credentials(tmp_path, mocker):
@@ -261,14 +262,28 @@ def test_build_drive_service_uses_credentials(tmp_path, mocker):
 def test_build_drive_service_uses_config_when_no_dir(mocker, tmp_path):
     fake_cfg = MagicMock()
     fake_cfg.data_dir = tmp_path
-    mocker.patch("src.auth.load_config", return_value=fake_cfg)
+    load_config_mock = mocker.patch("src.auth.load_config", return_value=fake_cfg)
     fake_creds = MagicMock()
     load_mock = mocker.patch("src.auth.load_credentials", return_value=fake_creds)
     mocker.patch("src.auth.build", return_value="service")
 
     auth.build_drive_service()
 
+    load_config_mock.assert_called_once_with(validate_providers=False)
     load_mock.assert_called_once_with(tmp_path)
+
+
+def test_auth_main_uses_drive_only_config(mocker, tmp_path):
+    fake_cfg = MagicMock()
+    fake_cfg.data_dir = tmp_path
+    load_config_mock = mocker.patch("src.auth.load_config", return_value=fake_cfg)
+    flow_mock = mocker.patch("src.auth.run_interactive_flow")
+    mocker.patch("src.auth.argparse.ArgumentParser.parse_args", return_value=argparse.Namespace(manual=False, response_url=None))
+
+    auth.main()
+
+    load_config_mock.assert_called_once_with(validate_providers=False)
+    flow_mock.assert_called_once_with(tmp_path, manual=False, response_url=None)
 
 
 def test_run_interactive_flow_missing_credentials(tmp_path):
@@ -278,7 +293,7 @@ def test_run_interactive_flow_missing_credentials(tmp_path):
 
 def test_run_interactive_flow_writes_token(tmp_path, mocker):
     creds_file = tmp_path / "credentials.json"
-    creds_file.write_text("{}")
+    creds_file.write_text(json.dumps({"installed": {"client_id": "cid"}}))
 
     fake_creds = MagicMock()
     fake_creds.to_json.return_value = '{"new": "token"}'
@@ -286,16 +301,96 @@ def test_run_interactive_flow_writes_token(tmp_path, mocker):
     flow = MagicMock()
     flow.run_local_server.return_value = fake_creds
     flow_cls = mocker.patch(
-        "src.auth.InstalledAppFlow.from_client_secrets_file", return_value=flow
+        "src.auth.InstalledAppFlow.from_client_config", return_value=flow
     )
 
     auth.run_interactive_flow(tmp_path)
 
-    flow_cls.assert_called_once_with(str(creds_file), auth.SCOPES)
-    flow.run_local_server.assert_called_once_with(port=0, open_browser=False)
+    flow_cls.assert_called_once_with({"installed": {"client_id": "cid"}}, auth.SCOPES)
+    flow.run_local_server.assert_called_once_with(port=0, open_browser=True)
     token_file = tmp_path / "token.json"
     assert token_file.read_text() == '{"new": "token"}'
     _assert_secure_token_mode(token_file)
+
+
+def test_run_interactive_flow_accepts_credentials_json_with_utf8_bom(tmp_path, mocker):
+    creds_file = tmp_path / "credentials.json"
+    client_config = {
+        "installed": {
+            "client_id": "cid.apps.googleusercontent.com",
+            "client_secret": "csec",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": ["http://localhost"],
+        }
+    }
+    creds_file.write_text(json.dumps(client_config), encoding="utf-8-sig")
+
+    fake_creds = MagicMock()
+    fake_creds.to_json.return_value = '{"new": "token"}'
+    run_local_server = mocker.patch(
+        "src.auth.InstalledAppFlow.run_local_server", return_value=fake_creds
+    )
+
+    auth.run_interactive_flow(tmp_path)
+
+    run_local_server.assert_called_once_with(port=0, open_browser=True)
+    assert (tmp_path / "token.json").read_text() == '{"new": "token"}'
+
+
+def test_run_interactive_flow_manual_prints_url_and_exits(tmp_path, mocker, capsys):
+    creds_file = tmp_path / "credentials.json"
+    creds_file.write_text(json.dumps({"installed": {"client_id": "cid"}}))
+
+    flow = MagicMock()
+    flow.authorization_url.return_value = ("https://accounts.example/auth", "state-1")
+    mocker.patch("src.auth.InstalledAppFlow.from_client_config", return_value=flow)
+
+    with pytest.raises(SystemExit) as excinfo:
+        auth.run_interactive_flow(tmp_path, manual=True)
+
+    assert excinfo.value.code == 0
+    assert flow.redirect_uri == "http://localhost"
+    flow.authorization_url.assert_called_once_with(access_type="offline", prompt="consent")
+    out = capsys.readouterr().out
+    assert "https://accounts.example/auth" in out
+
+
+def test_run_interactive_flow_manual_accepts_localhost_callback_response_url(
+    tmp_path,
+    mocker,
+    monkeypatch,
+):
+    creds_file = tmp_path / "credentials.json"
+    creds_file.write_text(json.dumps({"installed": {"client_id": "cid"}}))
+
+    fake_creds = MagicMock()
+    fake_creds.to_json.return_value = '{"new": "token"}'
+
+    flow = MagicMock()
+    flow.credentials = fake_creds
+    monkeypatch.delenv("OAUTHLIB_INSECURE_TRANSPORT", raising=False)
+
+    def assert_loopback_transport_enabled(**kwargs):
+        assert kwargs == {
+            "authorization_response": "http://localhost/?state=state-1&code=abc"
+        }
+        assert os.environ["OAUTHLIB_INSECURE_TRANSPORT"] == "1"
+
+    flow.fetch_token.side_effect = assert_loopback_transport_enabled
+    mocker.patch("src.auth.InstalledAppFlow.from_client_config", return_value=flow)
+
+    auth.run_interactive_flow(
+        tmp_path,
+        response_url="http://localhost/?state=state-1&code=abc",
+    )
+
+    assert flow.redirect_uri == "http://localhost"
+    flow.fetch_token.assert_called_once_with(
+        authorization_response="http://localhost/?state=state-1&code=abc"
+    )
+    assert "OAUTHLIB_INSECURE_TRANSPORT" not in os.environ
+    assert (tmp_path / "token.json").read_text() == '{"new": "token"}'
 
 
 def test_load_credentials_refresh_writes_token_with_secure_mode(tmp_path, mocker):

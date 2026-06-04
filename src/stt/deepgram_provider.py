@@ -60,9 +60,6 @@ class DeepgramProvider(STTProvider):
     def last_duration_seconds(self) -> float | None:
         return self._last_duration_seconds
 
-    def transcribe_chunk(self, audio_path: Path) -> str:
-        return self.transcribe_full(audio_path)
-
     def transcribe_full(self, audio_path: Path) -> str:
         audio_path = Path(audio_path)
         if not audio_path.exists():

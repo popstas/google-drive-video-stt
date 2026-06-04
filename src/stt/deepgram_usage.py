@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 DEEPGRAM_API_BASE_URL = "https://api.deepgram.com/v1"
@@ -15,42 +18,75 @@ def fetch_request_cost_usd(
     *,
     proxy_url: str = "",
 ) -> float | None:
-    projects = _request_json(
-        api_key,
-        f"{DEEPGRAM_API_BASE_URL}/projects",
-        proxy_url=proxy_url,
-    ).get("projects", [])
+    """Best-effort lookup of a request's USD cost via the Deepgram usage API.
+
+    A Deepgram API key can be scoped to several projects, so we never assume the
+    first project owns the request. Instead we ask each project for the request
+    by id; the owning project returns a payload with the cost, while the others
+    return a 404 (or an empty body) that we skip over. The whole thing is purely
+    informational: any failure returns ``None`` and must never break the caller.
+    """
+    try:
+        listing = _request_json(
+            api_key,
+            f"{DEEPGRAM_API_BASE_URL}/projects",
+            proxy_url=proxy_url,
+        )
+    except (requests.RequestException, ValueError) as exc:
+        logger.debug("Deepgram cost lookup could not list projects: %s", exc)
+        return None
+    projects = listing.get("projects", [])
     if not isinstance(projects, list) or not projects:
         return None
 
-    project = projects[0]
-    if not isinstance(project, dict):
-        return None
-    project_id = project.get("project_id")
-    if not project_id:
+    project_ids = [
+        project["project_id"]
+        for project in projects
+        if isinstance(project, dict) and project.get("project_id")
+    ]
+    if not project_ids:
         return None
 
-    detail = _request_json(
-        api_key,
-        f"{DEEPGRAM_API_BASE_URL}/projects/{project_id}/requests/{request_id}",
-        proxy_url=proxy_url,
-    )
-    direct_cost = _usd_from_request_payload(detail.get("request", {}))
-    if direct_cost is not None:
-        return direct_cost
-
-    recent = _request_json(
-        api_key,
-        f"{DEEPGRAM_API_BASE_URL}/projects/{project_id}/requests?limit=100&status=succeeded",
-        proxy_url=proxy_url,
-    )
-    requests_payload = recent.get("requests", [])
-    if not isinstance(requests_payload, list):
-        return None
-    for item in requests_payload:
-        if isinstance(item, dict) and item.get("request_id") == request_id:
-            return _usd_from_request_payload(item)
+    for project_id in project_ids:
+        cost = _request_cost_in_project(
+            api_key,
+            project_id,
+            request_id,
+            proxy_url=proxy_url,
+        )
+        if cost is not None:
+            return cost
     return None
+
+
+def _request_cost_in_project(
+    api_key: str,
+    project_id: str,
+    request_id: str,
+    *,
+    proxy_url: str = "",
+) -> float | None:
+    """Return the request cost if ``request_id`` belongs to ``project_id``.
+
+    Projects that do not own the request typically answer with a 404; we treat
+    that (and any other per-project error) as "not here" and let the caller try
+    the next project, so a multi-project key still resolves the right cost.
+    """
+    try:
+        detail = _request_json(
+            api_key,
+            f"{DEEPGRAM_API_BASE_URL}/projects/{project_id}/requests/{request_id}",
+            proxy_url=proxy_url,
+        )
+    except requests.RequestException as exc:
+        logger.debug(
+            "Deepgram cost lookup skipped project %s for request %s: %s",
+            project_id,
+            request_id,
+            exc,
+        )
+        return None
+    return _usd_from_request_payload(detail.get("request", {}))
 
 
 def _request_json(api_key: str, url: str, *, proxy_url: str = "") -> dict[str, Any]:
@@ -78,4 +114,9 @@ def _usd_from_request_payload(request_payload: object) -> float | None:
     if not isinstance(details, dict):
         return None
     usd = details.get("usd")
-    return float(usd) if usd is not None else None
+    if usd is None:
+        return None
+    try:
+        return float(usd)
+    except (TypeError, ValueError):
+        return None

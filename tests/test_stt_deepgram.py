@@ -260,19 +260,6 @@ def test_transcribe_full_uses_proxy(mocker, tmp_path):
     }
 
 
-def test_transcribe_chunk_routes_to_full(mocker, tmp_path):
-    audio = tmp_path / "audio.mp3"
-    audio.write_bytes(b"id3")
-    mocker.patch(
-        "src.stt.deepgram_provider.requests.post",
-        return_value=_response(_payload_with_utterances()),
-    )
-
-    provider = DeepgramProvider(api_key="dg-key", language="ru")
-
-    assert provider.transcribe_chunk(audio).startswith("[00:00:00] Speaker 1:")
-
-
 def test_transcribe_full_falls_back_to_word_grouping(mocker, tmp_path):
     audio = tmp_path / "audio.mp3"
     audio.write_bytes(b"id3")
