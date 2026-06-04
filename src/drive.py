@@ -151,7 +151,6 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
             "has_txt": txt is not None,
             "mp3_id": mp3["id"] if mp3 else None,
             "mp3_name": mp3["name"] if mp3 else None,
-            "mp3_size": mp3.get("size") if mp3 else None,
             "txt_id": txt["id"] if txt else None,
             "keypoints_id": keypoints["id"] if keypoints else None,
         })

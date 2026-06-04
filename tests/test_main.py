@@ -114,7 +114,7 @@ def test_process_item_temp_dir_is_cleaned_up(mocker):
     service = MagicMock()
     captured = {}
 
-    def fake_download(service_arg, file_id, dest_dir, name):
+    def fake_download(service_arg, file_id, dest_dir, name, *, expected_size_bytes=None):
         captured["dest_dir"] = dest_dir
         path = dest_dir / name
         path.write_bytes(b"data")
@@ -183,7 +183,7 @@ def test_process_item_does_not_upload_blank_txt_when_transcript_is_empty(mocker,
 def test_process_item_only_stt_when_mp3_already_exists(mocker, tmp_path):
     service = MagicMock()
 
-    def fake_download(svc, file_id, dest_dir, name):
+    def fake_download(svc, file_id, dest_dir, name, *, expected_size_bytes=None):
         path = dest_dir / name
         path.write_bytes(b"x")
         return path
@@ -286,7 +286,7 @@ def test_process_item_deepgram_m4a_downloads_mp4_even_when_mp3_exists(
 ):
     service = MagicMock()
 
-    def fake_download(svc, file_id, dest_dir, name):
+    def fake_download(svc, file_id, dest_dir, name, *, expected_size_bytes=None):
         path = dest_dir / name
         path.write_bytes(b"x")
         return path
@@ -380,7 +380,7 @@ def test_process_item_deepgram_m4a_uploads_mp3_when_artifact_enabled(
 def test_process_item_deepgram_mp3_96k_extracts_mp4_for_stt(mocker, tmp_path):
     service = MagicMock()
 
-    def fake_download(svc, file_id, dest_dir, name):
+    def fake_download(svc, file_id, dest_dir, name, *, expected_size_bytes=None):
         path = dest_dir / name
         path.write_bytes(b"x")
         return path
@@ -416,7 +416,7 @@ def test_process_item_deepgram_mp3_96k_extracts_mp4_for_stt(mocker, tmp_path):
 def test_process_item_deepgram_mp3_192k_extracts_mp4_for_stt(mocker, tmp_path):
     service = MagicMock()
 
-    def fake_download(svc, file_id, dest_dir, name):
+    def fake_download(svc, file_id, dest_dir, name, *, expected_size_bytes=None):
         path = dest_dir / name
         path.write_bytes(b"x")
         return path
@@ -1310,7 +1310,7 @@ def test_process_item_preserves_slash_name_on_upload(mocker, tmp_path):
 
     captured = {}
 
-    def fake_download(svc, file_id, dest_dir, name):
+    def fake_download(svc, file_id, dest_dir, name, *, expected_size_bytes=None):
         # Drive name with "/" must become a filesystem-safe local temp file.
         path = dest_dir / main.drive.safe_local_name(name)
         path.write_bytes(b"x")

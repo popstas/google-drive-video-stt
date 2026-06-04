@@ -236,9 +236,8 @@ def postprocess_transcript(
     file_name: str,
     *,
     speaker_names: list[str] | None = None,
-    expected_speakers: int | None = None,
 ) -> str:
     """Clean a raw STT transcript and map diarized speakers to interlocutor names."""
     cleaned = clean_transcript(text)
     names = speaker_names if speaker_names is not None else extract_interlocutor_names(file_name)
-    return map_speakers(cleaned, names, expected=expected_speakers)
+    return map_speakers(cleaned, names)

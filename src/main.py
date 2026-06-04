@@ -202,25 +202,6 @@ def _coerce_size_bytes(raw: Any) -> int | None:
         return None
 
 
-def _download_from_drive(
-    service: Any,
-    file_id: str,
-    dest_dir: Path,
-    file_name: str,
-    *,
-    expected_size_bytes: int | None,
-) -> Path:
-    if expected_size_bytes is None:
-        return drive.download(service, file_id, dest_dir, file_name)
-    return drive.download(
-        service,
-        file_id,
-        dest_dir,
-        file_name,
-        expected_size_bytes=expected_size_bytes,
-    )
-
-
 def _processing_provider(config: Config, *, needs_txt: bool) -> str:
     if needs_txt and config.stt_provider:
         return config.stt_provider
@@ -307,7 +288,7 @@ def process_item(
 
             if needs_mp3:
                 mp4_path = _call_with_transient_retries(
-                    lambda: _download_from_drive(
+                    lambda: drive.download(
                         service,
                         file_id,
                         tmp_dir,
@@ -336,7 +317,7 @@ def process_item(
             if needs_txt:
                 if mp4_path is None:
                     mp4_path = _call_with_transient_retries(
-                        lambda: _download_from_drive(
+                        lambda: drive.download(
                             service,
                             file_id,
                             tmp_dir,
