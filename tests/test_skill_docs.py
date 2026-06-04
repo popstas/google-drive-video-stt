@@ -130,7 +130,7 @@ def test_documented_commands_match_registered_subcommands():
 def test_skill_documents_keypoints_workflow():
     text = SKILL_PATH.read_text(encoding="utf-8")
 
-    assert "## Agent Keypoints Workflow" in text
+    assert "## Рабочий процесс Keypoints (агент)" in text
     assert "## Задачи" in text
     assert "## Тезисы" in text
     assert "## Открытые вопросы" in text

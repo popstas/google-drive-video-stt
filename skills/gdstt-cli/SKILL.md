@@ -2,151 +2,157 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.1.0
+version: 2.2.0
 last_updated: 2026-06-04
 ---
 
 # gdstt CLI
 
-Operator guide for the Deepgram-only Google Drive video STT service. The tool has
-one job: turn a recording into a speaker-named transcript plus a Keypoints
-document, written either to Google Drive or to a local folder. Prefer safe,
-single-target commands, never print secrets, and ask before any action that
-changes Drive, local auth files, or spends Deepgram/OpenAI credits.
+Операторская инструкция для Deepgram-only сервиса Google Drive video STT. У
+инструмента одна задача: превратить запись в транскрипт с именами спикеров плюс
+документ Keypoints, записав их либо в Google Drive, либо в локальную папку.
+Предпочитай безопасные команды по одному файлу, никогда не печатай секреты и
+спрашивай перед любым действием, которое меняет Drive, локальные auth-файлы или
+тратит кредиты Deepgram/OpenAI.
 
-Respond and write artifacts (transcript, Keypoints, status) in the
-interlocutor's language - match whatever language the user writes in, do not
-default to a fixed one. Section headings inside the Keypoints document stay as
-the template names (Задачи / Тезисы / Открытые вопросы).
+Отвечай и пиши артефакты (транскрипт, Keypoints, статус) **на языке
+собеседника** - подстраивайся под язык, на котором пишет пользователь, не
+фиксируйся на одном. Заголовки разделов внутри документа Keypoints остаются как в
+шаблоне (Задачи / Тезисы / Открытые вопросы).
 
-Google Drive setup (OAuth, scopes, folder-id discovery) lives in the repo
-[README.md](../../README.md), not here.
+Настройка Google Drive (OAuth, scopes, поиск folder-id) описана в
+[README.md](../../README.md) репозитория, не здесь.
 
-## Start Here
+## Быстрый старт
 
-Use the smallest path that fits the task:
+Бери самый короткий путь под задачу:
 
-1. "сделай расшифровку последнего созвона" -> `gdstt latest --dry-run` ->
-   `gdstt latest` -> reason speakers -> confirm mapping -> `gdstt relabel` ->
-   write `<base>.keypoints.md` -> place in destination.
-2. OAuth refresh or headless recovery: `gdstt auth` or `gdstt auth --manual`.
-3. Single Drive file: `gdstt process <file-id> --dry-run` ->
+1. «сделай расшифровку последнего созвона» -> `gdstt latest --dry-run` ->
+   `gdstt latest` -> разобрать спикеров -> подтвердить маппинг -> `gdstt relabel`
+   -> записать `<base>.keypoints.md` -> положить в назначение.
+2. Обновление OAuth или headless-восстановление: `gdstt auth` или
+   `gdstt auth --manual`.
+3. Один файл с Drive: `gdstt process <file-id> --dry-run` ->
    `gdstt process <file-id>`.
-4. Local audio only (no Drive): `gdstt transcribe <audio> -o out.txt`.
-5. Folder-wide work: preview first with `gdstt run-once --dry-run`.
-6. Inspect state without spending credits: `gdstt list` and `gdstt doctor`.
+4. Только локальное аудио (без Drive): `gdstt transcribe <audio> -o out.txt`.
+5. Работа по всей папке: сначала превью через `gdstt run-once --dry-run`.
+6. Посмотреть состояние без трат: `gdstt list` и `gdstt doctor`.
 
-## Invocation
+## Запуск
 
 ```bash
 gdstt <command> [args]
 uv run python -m src.cli <command> [args]
 ```
 
-On Windows local checkouts:
+На Windows в локальном чекауте:
 
 ```powershell
 .\.venv\Scripts\gdstt.exe <command> [args]
 uv run python -m src.cli <command> [args]
 ```
 
-Use `PYTHONIOENCODING=utf-8` or the installed `gdstt.exe` wrapper when printing
-Cyrillic names from ad-hoc Python or PowerShell scripts.
+Используй `PYTHONIOENCODING=utf-8` или установленный `gdstt.exe`, когда печатаешь
+кириллические имена из ad-hoc Python/PowerShell-скриптов.
 
-## Command Boundaries
+## Границы команд
 
-Drive-only and bootstrap commands use `load_config(validate_providers=False)` and
-do not spend credits: `auth`, `doctor`, `list` / `status`, `speakers set`.
+Drive-only и bootstrap-команды используют `load_config(validate_providers=False)`
+и не тратят кредиты: `auth`, `doctor`, `list` / `status`, `speakers set`.
 
-Processing commands validate provider config and can spend Deepgram (and, when
-`OPENAI_KEYPOINTS=true`, OpenAI) credits: `run`, `run-once`, `process`,
+Обрабатывающие команды валидируют конфиг провайдера и могут тратить кредиты
+Deepgram (и, при `OPENAI_KEYPOINTS=true`, OpenAI): `run`, `run-once`, `process`,
 `latest`, `transcribe`.
 
-`relabel` is a local file transform - it touches no Drive and spends nothing.
+`relabel` - локальное преобразование файла: Drive не трогает и ничего не тратит.
 
-## Commands
+## Команды
 
 ### `auth [--manual] [response_url]`
 
-Create or refresh local OAuth credentials. Normal mode opens a localhost browser
-flow. `--manual` prints the authorization URL; passing `response_url` completes
-that manual exchange.
+Создать или обновить локальные OAuth-креденшелы. Обычный режим открывает
+браузерный flow на localhost. `--manual` печатает URL авторизации; переданный
+`response_url` завершает ручной обмен.
 
 ### `latest [--folder ID] [--dry-run]`
 
-Process the newest mp4 in a folder (the first of `FOLDER_IDS` unless `--folder`
-is given). Use `--dry-run` first to confirm which file would be processed. Logs
-clearly when the folder has no mp4.
+Обработать самый свежий mp4 в папке (первой из `FOLDER_IDS`, если не задан
+`--folder`). Сначала `--dry-run`, чтобы подтвердить, какой файл будет обработан.
+Понятно логирует, если mp4 в папке нет.
 
 ### `process <target> [--folder] [--reprocess-txt] [--dry-run] [--max-size SIZE] [--confirm-large]`
 
-Process one Drive file or folder. Prefer a single file id and `--dry-run` first.
-Ask before `--reprocess-txt` (reruns STT and overwrites the linked TXT), folder
-execution, or `--confirm-large`.
+Обработать один файл или папку Drive. Предпочитай один file-id и сначала
+`--dry-run`. Спрашивай перед `--reprocess-txt` (повторный STT и перезапись
+привязанного TXT), обработкой папки или `--confirm-large`.
 
 ### `transcribe <audio> [-o PATH]`
 
-Transcribe a local audio file with Deepgram without touching Drive. Writes to
-`PATH` with `-o`, otherwise prints to stdout.
+Расшифровать локальный аудиофайл через Deepgram, не трогая Drive. С `-o` пишет в
+`PATH`, иначе печатает в stdout.
 
 ### `relabel --in SRC --out OUT --map MAP.json [--no-header]`
 
-Deterministically rename transcript speakers from a MAP.json (`default` label ->
-name, with verbatim-text `exceptions`) and merge consecutive same-speaker turns.
-Each utterance's words are preserved (whitespace is normalized). Unmapped labels
-are reported on stderr - add them to `default`. `--no-header` skips the MAP.json header.
+Детерминированно переименовать спикеров по MAP.json (`default` метка -> имя, с
+точечными `exceptions` по дословному тексту) и склеить подряд идущие реплики
+одного спикера. Слова реплик сохраняются (пробелы нормализуются). Неотображённые
+метки печатаются в stderr - добавь их в `default`. `--no-header` пропускает шапку
+из MAP.json.
 
 ### `list` / `status`
 
-Read sibling MP3/TXT state for the configured `FOLDER_IDS` (or `--folder`)
-without processing files.
+Показать состояние соседних MP3/TXT для настроенных `FOLDER_IDS` (или `--folder`)
+без обработки файлов.
 
 ### `run`
 
-Run the continuous polling loop. Ask before use: it can repeatedly spend credits
-across every pending configured folder. It has no preview mode.
+Запустить непрерывный цикл опроса. Спрашивай перед использованием: он может
+многократно тратить кредиты по всем настроенным папкам. Превью-режима нет.
 
 ### `run-once`
 
-Run one polling cycle across the configured folders. Prefer `--dry-run` first;
-add `--max-size` only as an optional manual limit for larger folder runs.
+Один цикл опроса по настроенным папкам. Предпочитай сначала `--dry-run`;
+`--max-size` добавляй только как опциональный ручной лимит для больших папок.
 
 ### `speakers set <file-id> <name...>`
 
-Store explicit speaker names on the source MP4 for future post-processing.
-Reprocessing is separate and can spend credits.
+Сохранить явные имена спикеров на исходном MP4 для будущей пост-обработки.
+Повторная обработка - отдельно и может тратить кредиты.
 
 ### `doctor [--drive]`
 
-Report `DATA_DIR`, credentials/token presence, `FOLDER_IDS` count, and
-`STT_PROVIDER`. Add `--drive` to also authenticate and list configured folders.
+Показать `DATA_DIR`, наличие credentials/token, число `FOLDER_IDS` и
+`STT_PROVIDER`. С `--drive` дополнительно аутентифицируется и перечисляет
+настроенные папки.
 
-## Agent Keypoints Workflow
+## Рабочий процесс Keypoints (агент)
 
-This is the primary, model-driven path. The CLI produces a raw transcript; the
-agent corrects speakers and writes the Keypoints document. The deterministic
-`relabel` command keeps each utterance's words intact (whitespace normalized).
+Это основной, модель-управляемый путь. CLI делает сырой транскрипт; агент
+исправляет спикеров и пишет документ Keypoints. Детерминированная команда
+`relabel` сохраняет слова каждой реплики (пробелы нормализуются).
 
-1. **Get the raw diarized transcript.** The relabel map keys are `Speaker N`
-   labels, so the input must still carry them. `gdstt transcribe <audio>` emits
-   raw `Speaker N` output (no post-processing). `gdstt latest` / `gdstt process
-   <file-id>` only keep `Speaker N` when `STT_POSTPROCESS=false`; under the
-   default `STT_POSTPROCESS=true` they already map labels to interlocutor names
-   in `<base>.txt`, so a `Speaker N` map matches nothing. Note the `base` name
-   (the source file stem) - the artifacts are `<base>.txt` and later
-   `<base>.keypoints.md`.
-2. **Reason about speakers.** Diarization usually emits more labels than people
-   (e.g. `Speaker 1/2/3` for two participants). Map each label to a person by
-   content: role and lexicon, who is addressed by name in a line (a line saying
-   "Я тебе объясняю, Андрей" is *not* Andrey), who initiates the call. If labels
-   outnumber people, decide which extra label merges into whom (the diarizer
-   usually splits one person), and record per-line `exceptions` by verbatim text
-   for the few lines that belong to someone else (greeting, a direct question).
-3. **Confirm the mapping with the user** via `AskUserQuestion` before writing
-   anything: `Speaker N -> Name`, which label merged into whom and why, and the
-   exception list. Skip this only if the user explicitly said "не спрашивай".
-   Wrong attribution corrupts both documents.
-4. **Build MAP.json** from the confirmed decision:
+1. **Получи сырой диаризованный транскрипт.** Ключи relabel-маппинга - метки
+   `Speaker N`, поэтому на входе они должны сохраниться. `gdstt transcribe
+   <audio>` выдаёт сырой `Speaker N` (без пост-обработки). `gdstt latest` /
+   `gdstt process <file-id>` сохраняют `Speaker N` только при
+   `STT_POSTPROCESS=false`; при дефолтном `STT_POSTPROCESS=true` они уже
+   подставили имена собеседников в `<base>.txt`, и `Speaker N`-маппинг ни с чем не
+   совпадёт. Запомни `base` (стем исходного файла) - артефакты это `<base>.txt` и
+   далее `<base>.keypoints.md`.
+2. **Разбери спикеров.** Диаризация обычно даёт больше меток, чем людей (напр.
+   `Speaker 1/2/3` на двух участников). Сопоставь каждую метку с человеком по
+   содержанию: роль и лексика, к кому обращаются по имени в реплике (строка «Я
+   тебе объясняю, Андрей» - это *не* Андрей), кто инициирует звонок. Если меток
+   больше, чем людей, реши, какую лишнюю метку к кому склеить (диаризатор обычно
+   режет одного человека), и зафиксируй построчные `exceptions` по дословному
+   тексту для тех немногих реплик, что принадлежат другому (приветствие, прямой
+   вопрос). Для `exceptions` бери **уникальные** фразы, а не однословные обрывки -
+   короткий текст может совпасть не с той строкой.
+3. **Подтверди маппинг у пользователя** через `AskUserQuestion` до записи чего-
+   либо: `Speaker N -> Имя`, какую метку к кому склеил и почему, список
+   исключений. Пропусти только если пользователь явно сказал «не спрашивай».
+   Неверная атрибуция портит оба документа.
+4. **Собери MAP.json** из подтверждённого решения:
 
    ```json
    {
@@ -156,26 +162,35 @@ agent corrects speakers and writes the Keypoints document. The deterministic
    }
    ```
 
-   `default` maps each transcript label to a plain name; `exceptions` override by
-   verbatim line text. Use plain names by default; in Vault mode map to
-   `[[<Имя Фамилия>]]` per the optional Vault integration section below.
-5. **Run relabel:** `gdstt relabel --in <base>.txt --out <base>.transcript.md
-   --map MAP.json`. Check stderr for `unmapped labels` and extend `default` until
-   none remain. Confirm no `Speaker N` label survives in the output body.
-6. **Write `<base>.keypoints.md`** from the corrected transcript using the
-   template below.
-7. **Place artifacts in the destination.** When working through Drive, the TXT is
-   already a sibling; upload the Keypoints file next to it. When `OUTPUT_TARGET=
-   folder`, write both into `OUTPUT_DIR`.
-8. **Final status:** files created, the speaker mapping (who merged into whom),
-   and any unmapped labels.
+   `default` сопоставляет каждую метку транскрипта с плоским именем; `exceptions`
+   переопределяют по дословному тексту строки. По умолчанию используй плоские
+   имена; в vault-режиме сопоставляй с `[[<Имя Фамилия>]]` по разделу
+   «Vault-интеграция» ниже.
+5. **Запусти relabel:** `gdstt relabel --in <base>.txt --out <base>.transcript.md
+   --map MAP.json`. Проверь stderr на `unmapped labels` и дополняй `default`, пока
+   их не останется. Убедись, что в теле вывода не осталось `Speaker N`.
+6. **Запиши `<base>.keypoints.md`** из исправленного транскрипта по шаблону ниже.
+   **Косметику правь на месте, не перегенерируя через OpenAI** - длинные тире,
+   ёлочки и лишние пробелы это детерминированная замена:
 
-### Keypoints Template
+   ```bash
+   sed -i 's/—/-/g; s/[«»]/"/g' "<base>.keypoints.md"
+   ```
 
-Build `<base>.keypoints.md` from the corrected transcript. Plain text by default
-(no wikilinks); see the optional Vault integration section below to override with
-vault wikilinks and paths. Do not invent facts - take decisions and tasks from
-the transcript only.
+   Повторно вызывай OpenAI **только при содержательном провале** (пустая
+   обязательная секция, выдуманные факты, не та тема), а не ради пунктуации или
+   формата. Это убирает лишние генерации.
+7. **Положи артефакты в назначение.** При работе через Drive TXT уже сосед;
+   загрузи Keypoints рядом. При `OUTPUT_TARGET=folder` пиши оба в `OUTPUT_DIR`.
+8. **Финальный статус:** какие файлы созданы, маппинг спикеров (кого с кем
+   склеил), остались ли неотображённые метки.
+
+### Шаблон Keypoints
+
+Собери `<base>.keypoints.md` из исправленного транскрипта. По умолчанию плоский
+текст (без wikilinks); см. опциональный раздел «Vault-интеграция» ниже, чтобы
+переопределить на vault-wikilinks и пути. Факты не выдумывай - бери решения и
+задачи только из транскрипта.
 
 ```md
 # Keypoints: <Имя1> × <Имя2>
@@ -193,13 +208,14 @@ the transcript only.
 - <что осталось без ответа>
 ```
 
-- Group `## Задачи` by `### Ответственный` (plain name); do not repeat the name
-  inside the item. Unknown owner -> `### Без ответственного`.
-- `## Тезисы` and `## Открытые вопросы` use `-` bullets.
-- No filler, no marketing.
+- Группируй `## Задачи` по `### Ответственный` (плоское имя); имя в самом пункте
+  не повторяй. Непонятен ответственный -> `### Без ответственного`.
+- `## Тезисы` и `## Открытые вопросы` - маркеры `-`.
+- Без воды и маркетинга.
+- Пунктуацию и стиль **не перегенерируй** - правь sed-ом (см. шаг 6).
 
-For the unattended auto path, set `OPENAI_KEYPOINTS=true` and the service writes
-`<base>.keypoints.md` via the OpenAI Responses API without agent involvement.
+Для автоматического пути без агента выстави `OPENAI_KEYPOINTS=true`, и сервис сам
+пишет `<base>.keypoints.md` через OpenAI Responses API одним вызовом.
 
 ## Vault-интеграция (опционально)
 
@@ -244,29 +260,32 @@ For the unattended auto path, set `OPENAI_KEYPOINTS=true` and the service writes
 `<!-- redacted: по просьбе участника -->`. Маркеров нет - отметь это одной строкой
 в финальном статусе.
 
-## Safety Rules
+## Правила безопасности
 
-- Ask before commands that mutate Drive, local auth files, or spend
-  Deepgram/OpenAI credits.
-- Prefer one file before one folder; prefer one `--dry-run` before one real run.
-- Confirm the speaker mapping with the user before writing transcript or
-  Keypoints files (unless explicitly told not to ask).
-- `--max-size` is optional and disabled by default. Do not invent a global
-  threshold. Add `--confirm-large` only after explicit human approval.
-- `--reprocess-txt` reruns STT and intentionally overwrites the linked TXT.
-- `run` has no preview mode. Use it only after controlled checks match
-  expectations.
-- Empty transcripts fail intentionally; never accept a blank TXT as success.
-- Never print API keys, OAuth tokens, `credentials.json`, or `token.json`.
+- Спрашивай перед командами, которые меняют Drive, локальные auth-файлы или
+  тратят кредиты Deepgram/OpenAI.
+- Один файл лучше папки; один `--dry-run` лучше одного реального запуска.
+- Подтверждай маппинг спикеров у пользователя до записи транскрипта или Keypoints
+  (если явно не сказано не спрашивать).
+- `--max-size` опционален и по умолчанию выключен. Не выдумывай глобальный порог.
+  `--confirm-large` добавляй только после явного одобрения человеком.
+- `--reprocess-txt` повторно гоняет STT и намеренно перезаписывает привязанный TXT.
+- У `run` нет превью-режима. Используй только после того, как контролируемые
+  проверки совпали с ожиданиями.
+- Пустые транскрипты падают намеренно; никогда не принимай пустой TXT за успех.
+- Никогда не печатай API-ключи, OAuth-токены, `credentials.json`, `token.json`.
 
-## Core Notes
+## Ключевые заметки
 
-- Deepgram is the only STT provider; `STT_PROVIDER=""` keeps MP3-only mode.
-- Idempotency uses `appProperties.source_video_id` and sibling stem matching as a
-  legacy fallback; existing siblings are updated in place, not duplicated.
-- Transient Drive metadata, folder-state, and download reads retry before a cycle
-  gives up. Uploads are not retried automatically.
-- `process_item` logs provider, outcome, retry count, and duration; `run-once`
-  logs per-folder and one cycle summary (pending/processed/failed counts).
-- `OUTPUT_TARGET=drive` writes artifacts as Drive siblings; `OUTPUT_TARGET=
-  folder` writes them into `OUTPUT_DIR`.
+- Deepgram - единственный STT-провайдер; `STT_PROVIDER=""` оставляет режим
+  только-MP3.
+- Идемпотентность - через `appProperties.source_video_id` и совпадение по стему
+  как legacy-fallback; существующие соседние файлы обновляются на месте, не
+  дублируются.
+- Транзиентные чтения метаданных Drive, состояния папки и загрузки повторяются до
+  отказа цикла. Загрузки автоматически не повторяются.
+- `process_item` логирует провайдера, исход, число повторов и длительность;
+  `run-once` логирует сводку по папке и одну сводку цикла
+  (pending/processed/failed).
+- `OUTPUT_TARGET=drive` пишет артефакты как соседние файлы Drive;
+  `OUTPUT_TARGET=folder` пишет их в `OUTPUT_DIR`.
