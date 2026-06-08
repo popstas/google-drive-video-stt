@@ -139,6 +139,89 @@ def test_model_and_batch_fallback():
     assert by_model["gpt-special"].use_batch is True
 
 
+@pytest.mark.parametrize(
+    "preset_batch, openai_batch, expected",
+    [
+        (True, True, True),
+        (True, False, True),
+        (False, True, False),
+        (False, False, False),
+        (None, True, True),
+        (None, False, False),
+    ],
+)
+def test_batch_override_matrix(preset_batch, openai_batch, expected):
+    # preset.batch wins when set; otherwise the global openai.batch applies.
+    presets = {"a": _preset("a", batch=preset_batch)}
+    run_presets("t", "f.mp4", _config(openai_batch=openai_batch), presets)
+    assert FakePipeline.instances[0].use_batch is expected
+
+
+def test_batch_wait_default_true_runs():
+    # batch_wait unset on the preset and the global default (true) lets the DAG run.
+    presets = {"a": _preset("a")}
+    results = run_presets("t", "f.mp4", _config(), presets)
+    assert results["a"].ok
+
+
+def test_resolved_batch_wait_false_raises_not_implemented():
+    # A batch preset that resolves batch_wait=false (per-preset or via the global
+    # openai.batch_wait) is rejected: only the synchronous wait path is implemented.
+    # batch_wait only governs batch submissions, so the preset must be in batch mode.
+    preset = _preset("a", batch=True, batch_wait=False)
+    with pytest.raises(NotImplementedError, match="batch_wait"):
+        preset_pipeline._run_one(
+            preset,
+            transcript="t",
+            file_name="f.mp4",
+            config=_config(),
+            speaker_names=None,
+            dep_results={},
+        )
+
+
+def test_global_batch_wait_false_raises_not_implemented():
+    preset = _preset("a", batch=True)
+    with pytest.raises(NotImplementedError, match="batch_wait"):
+        preset_pipeline._run_one(
+            preset,
+            transcript="t",
+            file_name="f.mp4",
+            config=_config(openai_batch_wait=False),
+            speaker_names=None,
+            dep_results={},
+        )
+
+
+def test_non_batch_preset_ignores_batch_wait_false():
+    # A synchronous (non-batch) preset is already inline, so a resolved
+    # batch_wait=false must be a no-op rather than raising.
+    preset = _preset("a", batch=False, batch_wait=False)
+    res = preset_pipeline._run_one(
+        preset,
+        transcript="t",
+        file_name="f.mp4",
+        config=_config(openai_batch_wait=False),
+        speaker_names=None,
+        dep_results={},
+    )
+    assert res.ok
+
+
+def test_preset_batch_wait_true_overrides_global_false():
+    # An explicit per-preset batch_wait=true beats a global openai.batch_wait=false.
+    preset = _preset("a", batch_wait=True)
+    res = preset_pipeline._run_one(
+        preset,
+        transcript="t",
+        file_name="f.mp4",
+        config=_config(openai_batch_wait=False),
+        speaker_names=None,
+        dep_results={},
+    )
+    assert res.ok
+
+
 def test_only_runs_closure():
     presets = {
         "cleanup": _preset("cleanup"),
