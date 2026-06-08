@@ -92,7 +92,7 @@ def test_auth_dispatch(mocker, tmp_path):
 
     cli.main(["auth"])
 
-    flow_mock.assert_called_once_with(tmp_path, manual=False, response_url=None)
+    flow_mock.assert_called_once_with(config=cfg, manual=False, response_url=None)
 
 
 def test_auth_skips_provider_validation(mocker, tmp_path):
@@ -113,7 +113,7 @@ def test_auth_passes_response_url(mocker, tmp_path):
     cli.main(["auth", "http://localhost/?code=abc"])
 
     flow_mock.assert_called_once_with(
-        tmp_path,
+        config=cfg,
         manual=False,
         response_url="http://localhost/?code=abc",
     )
@@ -126,7 +126,66 @@ def test_auth_manual_dispatch(mocker, tmp_path):
 
     cli.main(["auth", "--manual"])
 
-    flow_mock.assert_called_once_with(tmp_path, manual=True, response_url=None)
+    flow_mock.assert_called_once_with(config=cfg, manual=True, response_url=None)
+
+
+def test_auth_import_credentials_dispatch(mocker, tmp_path):
+    import_mock = mocker.patch(
+        "src.cli.import_google_credentials", return_value=tmp_path / "config.yml"
+    )
+
+    cli.main(["auth", "import-credentials", "/some/creds.json"])
+
+    import_mock.assert_called_once_with("/some/creds.json")
+
+
+def test_auth_use_files_dispatch(mocker, tmp_path):
+    use_mock = mocker.patch(
+        "src.cli.use_google_files", return_value=tmp_path / "config.yml"
+    )
+
+    cli.main(
+        [
+            "auth",
+            "use-files",
+            "--credentials-file",
+            "/c/creds.json",
+            "--token-file",
+            "/c/tok.json",
+        ]
+    )
+
+    use_mock.assert_called_once_with("/c/creds.json", token_file="/c/tok.json")
+
+
+def test_auth_use_files_defaults_token_file(mocker, tmp_path):
+    use_mock = mocker.patch(
+        "src.cli.use_google_files", return_value=tmp_path / "config.yml"
+    )
+
+    cli.main(["auth", "use-files", "--credentials-file", "/c/creds.json"])
+
+    use_mock.assert_called_once_with("/c/creds.json", token_file=None)
+
+
+def test_doctor_reports_google_source_without_secrets(mocker, capsys, tmp_path):
+    from dataclasses import replace
+
+    cfg = replace(
+        make_config(folder_ids=["f1"], data_dir=tmp_path),
+        google_credentials={"installed": {"client_secret": "sup3rsecret"}},
+        google_token={"refresh_token": "rt-secret"},
+    )
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service")
+
+    cli.main(["doctor"])
+
+    out = capsys.readouterr().out
+    assert "Google credentials: inline" in out
+    assert "Google token: inline" in out
+    assert "sup3rsecret" not in out
+    assert "rt-secret" not in out
 
 
 def test_doctor_uses_drive_only_config_and_skips_auth_by_default(
@@ -233,7 +292,7 @@ def test_run_once_dispatch(mocker, tmp_path):
     cli.main(["run-once"])
 
     load_mock.assert_called_once_with()
-    build_mock.assert_called_once_with(data_dir=tmp_path)
+    build_mock.assert_called_once_with(config=cfg)
     run_once_mock.assert_called_once_with(
         service,
         cfg,
@@ -358,7 +417,7 @@ def test_latest_dispatch_uses_first_folder(mocker, tmp_path):
     cli.main(["latest"])
 
     load_mock.assert_called_once_with()
-    build_mock.assert_called_once_with(data_dir=tmp_path)
+    build_mock.assert_called_once_with(config=cfg)
     find_mock.assert_called_once_with(service, "folderA")
     target_mock.assert_called_once_with(
         service,
@@ -863,3 +922,210 @@ def test_doctor_reports_no_presets_when_none_enabled(mocker, capsys, tmp_path, m
 
     out = capsys.readouterr().out
     assert "Presets: none enabled" in out
+
+
+def test_config_init_command_dispatch(mocker, capsys, tmp_path):
+    config_file = tmp_path / "config.yml"
+    init = mocker.patch("src.cli.init_config", return_value=config_file)
+
+    cli.main(["config", "init"])
+
+    init.assert_called_once_with(
+        local=False,
+        data_dir=None,
+        output_dir=None,
+        prompt_dir=None,
+        force=False,
+    )
+    out = capsys.readouterr().out
+    assert str(config_file) in out
+
+
+def test_config_init_command_passes_flags(mocker, tmp_path):
+    config_file = tmp_path / "config.yml"
+    init = mocker.patch("src.cli.init_config", return_value=config_file)
+
+    cli.main(
+        [
+            "config",
+            "init",
+            "--local",
+            "--data-dir",
+            "store",
+            "--output-dir",
+            "out",
+            "--prompt-dir",
+            "pr",
+            "--force",
+        ]
+    )
+
+    init.assert_called_once_with(
+        local=True,
+        data_dir="store",
+        output_dir="out",
+        prompt_dir="pr",
+        force=True,
+    )
+
+
+def test_config_init_command_reports_error(mocker):
+    mocker.patch("src.cli.init_config", side_effect=ValueError("already exists"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["config", "init"])
+
+    assert excinfo.value.code == 1
+
+
+def test_config_init_creates_real_config_without_secrets(monkeypatch, capsys, tmp_path):
+    config_file = tmp_path / "config.yml"
+    monkeypatch.setenv(cli.CONFIG_PATH_ENV_VAR, str(config_file))
+
+    cli.main(["config", "init"])
+
+    assert config_file.is_file()
+    assert (tmp_path / "prompts" / "keypoints.md").is_file()
+    out = capsys.readouterr().out
+    assert str(config_file) in out
+
+
+def test_config_path_prints_resolved_without_secrets(monkeypatch, capsys, tmp_path):
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
+        "folder_ids: [x]\nstt:\n  provider: deepgram\n", encoding="utf-8"
+    )
+    monkeypatch.setenv(cli.CONFIG_PATH_ENV_VAR, str(config_file))
+
+    cli.main(["config", "path"])
+
+    out = capsys.readouterr().out.strip()
+    assert out == str(config_file)
+
+
+def test_config_path_reports_pointer_both_ends(monkeypatch, capsys, tmp_path):
+    real = tmp_path / "real" / "config.yml"
+    real.parent.mkdir()
+    real.write_text("folder_ids: [x]\n", encoding="utf-8")
+    pointer = tmp_path / "pointer.yml"
+    pointer.write_text(f"config_file: {real}\n", encoding="utf-8")
+    monkeypatch.setenv(cli.CONFIG_PATH_ENV_VAR, str(pointer))
+
+    cli.main(["config", "path"])
+
+    out = capsys.readouterr().out
+    assert f"bootstrap: {pointer}" in out
+    assert f"effective: {real}" in out
+
+
+def test_config_link_command_dispatch(mocker, capsys, tmp_path):
+    dest = tmp_path / "linked" / "config.yml"
+    link = mocker.patch("src.cli.link_config", return_value=dest)
+
+    cli.main(["config", "link", str(tmp_path / "linked")])
+
+    link.assert_called_once_with(
+        str(tmp_path / "linked"),
+        copy_prompts=False,
+        force=False,
+    )
+    out = capsys.readouterr().out
+    assert str(dest) in out
+
+
+def test_config_link_command_passes_flags(mocker, tmp_path):
+    dest = tmp_path / "linked" / "config.yml"
+    link = mocker.patch("src.cli.link_config", return_value=dest)
+
+    cli.main(
+        ["config", "link", str(tmp_path / "linked"), "--copy-prompts", "--force"]
+    )
+
+    link.assert_called_once_with(
+        str(tmp_path / "linked"),
+        copy_prompts=True,
+        force=True,
+    )
+
+
+def test_config_link_command_reports_error(mocker, tmp_path):
+    mocker.patch("src.cli.link_config", side_effect=ValueError("already exists"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["config", "link", str(tmp_path / "linked")])
+
+    assert excinfo.value.code == 1
+
+
+def test_config_get_command_dispatch(mocker, capsys):
+    get = mocker.patch("src.cli.config_get", return_value="model: gpt")
+
+    cli.main(["config", "get"])
+
+    get.assert_called_once_with(None, show_secrets=False)
+    assert "model: gpt" in capsys.readouterr().out
+
+
+def test_config_get_command_passes_key(mocker, capsys):
+    get = mocker.patch("src.cli.config_get", return_value="gpt-5.4")
+
+    cli.main(["config", "get", "openai.model"])
+
+    get.assert_called_once_with("openai.model", show_secrets=False)
+    assert "gpt-5.4" in capsys.readouterr().out
+
+
+def test_config_get_command_show_secrets(mocker, capsys):
+    get = mocker.patch("src.cli.config_get", return_value="sk-secret")
+
+    cli.main(["config", "get", "openai.api_key", "--show-secrets"])
+
+    get.assert_called_once_with("openai.api_key", show_secrets=True)
+    assert "sk-secret" in capsys.readouterr().out
+
+
+def test_config_get_command_reports_error(mocker):
+    mocker.patch("src.cli.config_get", side_effect=ValueError("not set"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["config", "get", "nope"])
+
+    assert excinfo.value.code == 1
+
+
+def test_config_set_command_dispatch(mocker, capsys, tmp_path):
+    config_file = tmp_path / "config.yml"
+    setter = mocker.patch("src.cli.config_set", return_value=config_file)
+
+    cli.main(["config", "set", "openai.model", "gpt-5.4"])
+
+    setter.assert_called_once_with("openai.model", "gpt-5.4")
+    assert "Set openai.model" in capsys.readouterr().out
+
+
+def test_config_set_command_reports_error(mocker):
+    mocker.patch("src.cli.config_set", side_effect=ValueError("bad"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["config", "set", "output.target", "s3"])
+
+    assert excinfo.value.code == 1
+
+
+def test_config_unset_command_dispatch(mocker, capsys, tmp_path):
+    config_file = tmp_path / "config.yml"
+    unset = mocker.patch("src.cli.config_unset", return_value=config_file)
+
+    cli.main(["config", "unset", "proxy_url"])
+
+    unset.assert_called_once_with("proxy_url")
+    assert "Unset proxy_url" in capsys.readouterr().out
+
+
+def test_config_unset_command_reports_error(mocker):
+    mocker.patch("src.cli.config_unset", side_effect=ValueError("not set"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["config", "unset", "nope"])
+
+    assert excinfo.value.code == 1
