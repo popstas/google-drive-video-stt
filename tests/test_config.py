@@ -15,9 +15,11 @@ from src.config import (
     copy_prompt_assets,
     import_google_credentials,
     init_config,
+    is_run_enabled,
     link_config,
     load_config,
     migrate_config,
+    set_run_enabled,
     resolve_config_file_path,
     resolve_effective_config_path,
     use_google_files,
@@ -1473,15 +1475,30 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     assert data["presets"]["keypoints"]["enabled"] is True
     assert data["presets"]["keypoints"]["prompt_file"] == "prompts/keypoints.md"
-    # Only keypoints is enabled by default (the default transcript -> keypoints chain).
-    assert [name for name, p in data["presets"].items() if p["enabled"]] == ["keypoints"]
-    # The packaged prompt assets are copied beside the config so extra presets
-    # (transcript-cleanup, action-items) are one edit away.
+    # The full default chain is enabled out of the box, with transcript-cleanup
+    # written above keypoints and both downstream presets depending on it.
+    assert list(data["presets"]) == ["transcript-cleanup", "keypoints", "action-items"]
+    assert [name for name, p in data["presets"].items() if p["enabled"]] == [
+        "transcript-cleanup",
+        "keypoints",
+        "action-items",
+    ]
+    assert data["presets"]["keypoints"]["depends_on"] == ["transcript-cleanup"]
+    assert data["presets"]["action-items"]["depends_on"] == ["transcript-cleanup"]
+    # Batch and the run flag are on by default in a generated config.
+    assert data["openai"]["batch"] is True
+    assert data["run"]["enabled"] is True
+    # The packaged prompt assets are copied beside the config.
     assert (tmp_path / "prompts" / "keypoints.md").is_file()
     assert (tmp_path / "prompts" / "transcript-cleanup.md").is_file()
+    assert (tmp_path / "prompts" / "action-items.md").is_file()
     # The generated config loads back without provider secrets and yields the chain.
     cfg = load_config(config_path=config_file, validate_providers=False)
-    assert {p.name for p in cfg.presets} == {"keypoints"}
+    assert {p.name for p in cfg.presets} == {
+        "transcript-cleanup",
+        "keypoints",
+        "action-items",
+    }
 
 
 def test_init_local_writes_under_cwd_data(monkeypatch, tmp_path):
@@ -2151,3 +2168,79 @@ def test_generated_config_prefers_inline_and_omits_file_keys(tmp_path):
     assert "google" in data
     assert "credentials_file" not in data["google"]
     assert "token_file" not in data["google"]
+
+
+# --- run.enabled (gdstt run/stop) -------------------------------------------
+
+def test_run_enabled_defaults_true_and_round_trips(tmp_path):
+    config_file = tmp_path / "config.yml"
+    init_config(config_path=config_file)
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.run_enabled is True
+    assert is_run_enabled(config_path=config_file) is True
+    # Serialization keeps the flag.
+    assert _config_to_yaml_dict(cfg, config_file)["run"]["enabled"] is True
+
+
+def test_set_run_enabled_false_is_observed(tmp_path):
+    config_file = tmp_path / "config.yml"
+    init_config(config_path=config_file)
+
+    path = set_run_enabled(False, config_path=config_file)
+    assert path == config_file
+    assert is_run_enabled(config_path=config_file) is False
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.run_enabled is False
+
+    set_run_enabled(True, config_path=config_file)
+    assert is_run_enabled(config_path=config_file) is True
+
+
+def test_is_run_enabled_missing_file_defaults_true(tmp_path):
+    # No config file at all -> default True (never stop a healthy loop on a hiccup).
+    assert is_run_enabled(config_path=tmp_path / "absent.yml") is True
+
+
+# --- field-test regression fixes --------------------------------------------
+
+def test_run_migration_runs_before_run_enabled_keeps_env(monkeypatch, tmp_path):
+    """`gdstt run` migrates .env first; flipping run.enabled must not clobber it.
+
+    Reproduces the field bug where set_run_enabled wrote a minimal
+    `{run: {enabled: true}}` before the .env->YAML migration, losing FOLDER_IDS.
+    Here we run the fixed order (load_config migrates, THEN set_run_enabled).
+    """
+    config_file = tmp_path / "config.yml"  # missing -> auto-migration
+    monkeypatch.setenv("GDSTT_CONFIG", str(config_file))
+    monkeypatch.setenv("FOLDER_IDS", "f1,f2")
+    monkeypatch.setenv("STT_PROVIDER", "disabled")
+
+    load_config()  # migrate
+    set_run_enabled(False)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["folder_ids"] == ["f1", "f2"]  # env preserved, not clobbered
+    assert data["run"]["enabled"] is False
+
+
+def test_config_prompt_file_overrides_builtin_keypoints_instructions(tmp_path):
+    """An explicit prompt_file on the keypoints preset must win over the built-in
+    inline instructions (field bug: edits to prompts/keypoints.md were ignored)."""
+    config_file = tmp_path / "config.yml"
+    init_config(config_path=config_file)
+    custom = "CUSTOM KEYPOINTS PROMPT BODY (field edit)"
+    (tmp_path / "prompts" / "keypoints.md").write_text(custom, encoding="utf-8")
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    kp = next(p for p in cfg.presets if p.name == "keypoints")
+    assert kp.instructions.strip() == custom
+
+
+def test_fresh_config_is_owner_only(tmp_path):
+    import stat
+
+    config_file = tmp_path / "config.yml"
+    init_config(config_path=config_file)  # brand-new file
+    mode = stat.S_IMODE(config_file.stat().st_mode)
+    assert mode == 0o600

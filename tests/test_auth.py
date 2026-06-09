@@ -559,3 +559,26 @@ def test_run_interactive_flow_file_mode_writes_token_file(tmp_path, mocker):
 
     assert token_file.read_text() == '{"new": "token"}'
     _assert_secure_token_mode(token_file)
+
+
+def test_run_interactive_flow_inline_credentials_file_token_writes_file(tmp_path, mocker):
+    """Inline client credentials + a token FILE: the refreshed token must be written
+    to the file, never persisted inline (else google.token AND google.token_file
+    would both be set and the next load would fail)."""
+    token_file = tmp_path / "tok" / "token.json"
+    config = _make_config(
+        tmp_path,
+        google_credentials={"installed": {"client_id": "cid"}},
+        google_token_file=token_file,
+    )
+    fake_creds = MagicMock()
+    fake_creds.to_json.return_value = '{"new": "tok"}'
+    flow = MagicMock()
+    flow.run_local_server.return_value = fake_creds
+    mocker.patch("src.auth.InstalledAppFlow.from_client_config", return_value=flow)
+    persist = mocker.patch("src.auth._persist_inline_token")
+
+    auth.run_interactive_flow(config=config)
+
+    assert token_file.read_text() == '{"new": "tok"}'
+    persist.assert_not_called()

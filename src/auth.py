@@ -327,18 +327,16 @@ def run_interactive_flow(
     else:
         creds = flow.run_local_server(port=0, open_browser=True)
 
-    # Persist the new token to whichever sink the config selects: an inline token
-    # config writes back into google.token; otherwise the token file (config-owned
-    # token_file or the data_dir fallback).
-    if config is not None and (
-        config.google_token is not None or config.google_credentials is not None
-    ):
-        _persist_inline_token(config, creds.to_json())
-    else:
-        _, token_file = _resolve_token_source(config, data_dir)
-        assert token_file is not None
+    # Persist the new token to its configured sink, decided by the TOKEN source
+    # (not the credentials mode). Deciding by credentials mode would write inline
+    # google.token even when the token lives in google.token_file, leaving BOTH set
+    # so the next load fails ("google.token and google.token_file are both set").
+    _, token_file = _resolve_token_source(config, data_dir)
+    if token_file is not None:
         token_file.parent.mkdir(parents=True, exist_ok=True)
         _write_token(token_file, creds.to_json())
+    else:
+        _persist_inline_token(config, creds.to_json())
     return creds
 
 

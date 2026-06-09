@@ -57,8 +57,8 @@ uv sync --extra dev
 ```
 
 Configuration lives in a single `config.yml`. For a fresh global install, generate
-one from the packaged defaults (the default `transcript -> keypoints` preset chain
-works out of the box):
+one from the packaged defaults — the full chain `transcript-cleanup -> keypoints +
+action-items` is enabled out of the box with `openai.batch: true`:
 
 ```bash
 gdstt config init      # writes config.yml + prompts/ to the resolved target (see below)
@@ -256,7 +256,7 @@ presets:
     batch: false                                 # keep an upstream stage off batch (see below)
   keypoints:
     depends_on: [transcript-cleanup]   # overrides the built-in keypoints preset
-  expertizeme-managers:
+  action-items:
     depends_on: [transcript-cleanup]
     instructions: "Extract per-manager action items..."   # inline prompt instead of a file
 ```
@@ -395,11 +395,12 @@ back to the `openai` defaults.
 
 A built-in `keypoints` preset ships with the code and produces a `<base>.keypoints.md`
 document containing `## Задачи` (grouped by `### Ответственный`), `## Тезисы`, and
-`## Открытые вопросы` in plain text. The default chain `transcript -> keypoints`
-works out of the box. Config presets override built-ins field-by-field, add new
-presets, and disable a built-in with `enabled: false`. Running any enabled preset
-requires `openai.api_key` and honors `proxy_url`. The canonical example chain is
-`transcript-cleanup -> keypoints + expertizeme-managers`.
+`## Открытые вопросы` in plain text. A generated config enables the full chain
+`transcript-cleanup -> keypoints + action-items` out of the box (with
+`openai.batch: true`); `transcript-cleanup` is written above `keypoints`. Config
+presets override built-ins field-by-field, add new presets, and disable a built-in
+with `enabled: false`. Running any enabled preset requires `openai.api_key` and
+honors `proxy_url`.
 
 **Prompt source priority.** Each preset's instructions are resolved as
 `instructions` (inline text in the YAML) > `prompt_file` > error. A `prompt_file`
@@ -478,8 +479,11 @@ gdstt auth use-files --credentials-file PATH [--token-file PATH]   # switch to f
 gdstt doctor [--drive]      # check Drive/OAuth configuration without changing it
 gdstt latest [--folder ID] [--dry-run] [--max-size SIZE] [--confirm-large]   # process the newest mp4 in a folder
 gdstt run                   # continuous polling; can spend STT credits across all pending configured folders
+gdstt stop                  # pause the loop (sets run.enabled=false; stays paused across restarts, no auto-resume)
+gdstt start                 # resume a paused loop (sets run.enabled=true)
 gdstt run-once [--dry-run] [--max-size SIZE] [--confirm-large]   # single cycle; use --dry-run first
 gdstt process <id> [--folder] [--reprocess-txt] [--dry-run] [--max-size SIZE] [--confirm-large]   # single target or folder; use --dry-run first
+gdstt reprocess <id> [STAGES] [--folder] [--dry-run] [--max-size SIZE] [--confirm-large]   # force-rerun chain stages by number (0=transcript, 1..N=presets; see doctor)
 gdstt speakers set <file-id> "Alice" "Bob"   # store explicit speaker names on an MP4
 gdstt transcribe <audio> [-o out.txt]   # STT-only on a local file; prints to stdout by default
 gdstt relabel --in SRC --out OUT --map MAP.json [--no-header]   # deterministic local speaker relabeling
@@ -502,6 +506,48 @@ defaults to the configured `FOLDER_IDS` when `--folder` is omitted.
 the linked `.txt` when one exists. `speakers set` affects future local
 post-processing; combine it with `process <file-id> --reprocess-txt` when an
 already-uploaded transcript needs to be regenerated with corrected names.
+
+**Reprocessing chain stages (`reprocess`).** Each enabled preset is a numbered
+chain stage; `gdstt doctor` prints the numbering, with `0` reserved for the
+transcript itself:
+
+```text
+$ gdstt doctor
+...
+Presets: 3 enabled (reprocess stages)
+  0. transcript (Deepgram base)
+  1. transcript-cleanup <- transcript
+  2. keypoints <- transcript-cleanup
+  3. action-items <- transcript-cleanup
+```
+
+`gdstt reprocess <id> [STAGES]` force-reruns those stages even when the artifact
+already exists. `STAGES` is a single number, a range (`lo-hi`), or a comma list over
+`0..N`; omit it (or pass `all`) to rerun every preset:
+
+```bash
+gdstt reprocess <id>           # rerun every preset (1..N) from the existing transcript
+gdstt reprocess <id> 2         # rerun only stage 2 (keypoints)
+gdstt reprocess <id> 1-2       # rerun stages 1 and 2 (transcript-cleanup + keypoints)
+gdstt reprocess <id> 2,3       # rerun stages 2 and 3 (keypoints + action-items)
+gdstt reprocess <id> 0         # re-transcribe (stage 0) and regenerate the whole chain
+gdstt reprocess <id> 2-3 --dry-run   # preview which stages would run, spend nothing
+```
+
+Stage `0` re-runs Deepgram (spends STT credits) and, since every preset feeds on the
+transcript, regenerates the entire chain. Stages `1..N` re-run only those presets
+(spending OpenAI); each one's dependency outputs are reused from the existing
+artifacts, so a partial reprocess never re-bills the upstream stages — and a missing
+dependency artifact is regenerated as needed. Add `--folder` to reprocess every
+transcribed file in a folder, and always `--dry-run` first.
+
+`run` starts the continuous loop (and explicitly resumes by clearing any sticky
+stop flag). `stop` sets `run.enabled: false` in the config; the loop re-reads it
+each cycle and **pauses** — it goes idle (sleeps and re-checks) instead of exiting,
+so the container stays up. The pause is sticky: `main()` never auto-enables the flag
+at startup, so under Docker's `restart: unless-stopped` the stop survives a restart
+and processing does **not** auto-resume. Resume explicitly with `gdstt start` (or
+`gdstt run`); to halt the container entirely use `docker compose stop`.
 
 `relabel` is a local file transform — it reads a transcript and a `MAP.json`
 (`default` label → name plus verbatim-text `exceptions`), merges consecutive
@@ -615,7 +661,10 @@ resolver keeps **all mutable state inside the volume**: `config.yml`, the first-
 `./data` and survive restarts. The Compose file also sets `DATA_DIR=/app/data`
 explicitly for clarity, and a bare `docker run` is correct by default thanks to the
 image `ENV`. Logs are JSON-file with a 10 MB / 3-file rotation. Restart policy is
-`unless-stopped`.
+`unless-stopped`. Because `gdstt stop` is sticky (it pauses the loop without exiting
+and `main()` never auto-enables on boot), the stop survives this restart policy:
+`docker compose exec <svc> gdstt stop` pauses processing and `gdstt start` resumes it;
+`docker compose stop` halts the container itself.
 
 The prompt assets ship **inside the `src` package** (`src/assets/prompts/*.md`), so
 the `COPY src ./src` in the `Dockerfile` carries them automatically — there is no

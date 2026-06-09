@@ -1997,3 +1997,103 @@ def test_pending_items_includes_drive_txt_with_missing_preset():
     pending = main._pending_items([done, missing, folder_local], cfg)
 
     assert [item["file"]["id"] for item in pending] == ["v2"]
+
+
+# --- run loop stop flag (gdstt stop) ----------------------------------------
+
+class _LoopStop(Exception):
+    """Sentinel raised from a patched time.sleep to break the polling loop."""
+
+
+def test_main_loop_idles_while_run_disabled_without_running(mocker):
+    # `gdstt stop` keeps the loop alive but idle: run_once is never called while
+    # run.enabled is false. The container stays up (no break/exit) so a Docker
+    # `restart: unless-stopped` policy does not auto-resume processing.
+    cfg = make_config(folder_ids=["f1"], poll_interval=7)
+    mocker.patch("src.main.load_config", return_value=cfg)
+    mocker.patch("src.main.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.main.is_run_enabled", return_value=False)
+    once = mocker.patch("src.main.run_once")
+    # Break the otherwise-infinite idle loop after a couple of sleeps.
+    sleep = mocker.patch("src.main.time.sleep", side_effect=[None, _LoopStop()])
+
+    with pytest.raises(_LoopStop):
+        main.main()
+
+    once.assert_not_called()
+    assert sleep.call_args_list == [mocker.call(7), mocker.call(7)]
+
+
+def test_main_loop_runs_while_enabled_and_idles_when_disabled(mocker):
+    # Enabled twice (two cycles), then disabled (idle). run_once is called only
+    # while enabled; once disabled the loop idles instead of exiting.
+    cfg = make_config(folder_ids=["f1"], poll_interval=5)
+    mocker.patch("src.main.load_config", return_value=cfg)
+    mocker.patch("src.main.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.main.is_run_enabled", side_effect=[True, True, False])
+    once = mocker.patch("src.main.run_once")
+    sleep = mocker.patch("src.main.time.sleep", side_effect=[None, None, _LoopStop()])
+
+    with pytest.raises(_LoopStop):
+        main.main()
+
+    assert once.call_count == 2
+    assert sleep.call_count == 3
+
+
+def test_main_does_not_enable_run_on_startup(mocker):
+    # main() must not auto-enable run.enabled, so a sticky `gdstt stop` survives a
+    # container restart instead of resuming on the next boot.
+    import dataclasses
+
+    cfg = dataclasses.replace(make_config(folder_ids=["f1"]), run_enabled=False)
+    mocker.patch("src.main.load_config", return_value=cfg)
+    mocker.patch("src.main.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.main.is_run_enabled", return_value=False)
+    mocker.patch("src.main.run_once")
+    mocker.patch("src.main.time.sleep", side_effect=_LoopStop())
+    set_enabled = mocker.patch(
+        "src.config.set_run_enabled", side_effect=AssertionError("must not be called")
+    )
+
+    with pytest.raises(_LoopStop):
+        main.main()
+
+    set_enabled.assert_not_called()
+
+
+def test_run_preset_stage_forces_only_selected(mocker):
+    presets = (
+        Preset(name="transcript-cleanup", instructions="c"),
+        Preset(name="keypoints", instructions="k", depends_on=("transcript-cleanup",)),
+        Preset(name="action-items", instructions="a", depends_on=("transcript-cleanup",)),
+    )
+    cfg = make_config(presets=presets)
+    run_presets = mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "action-items": PresetResult(name="action-items", text="out"),
+        },
+    )
+    mocker.patch("src.main._save_and_upload_preset")
+    # transcript-cleanup artifact already exists -> reused as a precomputed dependency.
+    mocker.patch("src.main._call_with_transient_retries", return_value="cleanup text")
+
+    main._run_preset_stage(
+        MagicMock(),
+        "file-1",
+        "Alice and Bob.mp4",
+        "Speaker 1: hi",
+        "folderA",
+        Path("/tmp"),
+        cfg,
+        speaker_names=None,
+        artifact_ids={"transcript-cleanup": "tc-id"},
+        reprocess=False,
+        only_presets=["action-items"],
+        usage={},
+    )
+
+    kwargs = run_presets.call_args.kwargs
+    assert kwargs["only"] == ["action-items"]
+    assert kwargs["precomputed"] == {"transcript-cleanup": "cleanup text"}

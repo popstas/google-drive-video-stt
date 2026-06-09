@@ -15,7 +15,7 @@ import requests
 
 from src import drive, notify, output, postprocess, preset_pipeline
 from src.auth import AuthError, build_drive_service
-from src.config import Config, load_config
+from src.config import Config, is_run_enabled, load_config
 from src.extractor import extract_m4a_copy, extract_mp3
 from src.presets import Preset
 from src.stt.transcribe import transcribe_file
@@ -157,6 +157,7 @@ def _run_preset_stage(
     speaker_names: list[str] | None,
     artifact_ids: dict[str, str],
     reprocess: bool,
+    only_presets: list[str] | None = None,
     usage: dict[str, dict[str, int]],
 ) -> None:
     """Run the enabled preset DAG over a transcript and persist each new artifact.
@@ -172,7 +173,11 @@ def _run_preset_stage(
     preset_by_name = {preset.name: preset for preset in config.presets}
     if not preset_by_name:
         return
-    if reprocess:
+    if only_presets is not None:
+        # Force-rerun an explicit set of stages (``gdstt reprocess``); their
+        # dependencies are reused from existing artifacts below rather than re-run.
+        missing = [name for name in only_presets if name in preset_by_name]
+    elif reprocess:
         missing = list(preset_by_name)
     else:
         missing = [name for name in preset_by_name if name not in artifact_ids]
@@ -355,6 +360,7 @@ def process_item(
     config: Config,
     *,
     reprocess_txt: bool = False,
+    reprocess_presets: list[str] | None = None,
 ) -> _ProcessTelemetry | None:
     file_info = item["file"]
     file_id = file_info["id"]
@@ -367,6 +373,10 @@ def process_item(
     needs_mp3 = _should_make_mp3_artifact(config) and not has_mp3
     needs_txt = stt_enabled and (reprocess_txt or not has_txt)
     needs_presets = _needs_preset_reprocess(item, config, needs_txt=needs_txt)
+    # `gdstt reprocess <stages>` force-reruns explicit presets from an existing
+    # transcript even when their artifacts already exist.
+    if reprocess_presets and not needs_txt and item.get("txt_id") is not None:
+        needs_presets = True
 
     if not needs_mp3 and not needs_txt and not needs_presets:
         return
@@ -462,6 +472,7 @@ def process_item(
                     speaker_names=speaker_names,
                     artifact_ids=item.get("artifact_ids") or {},
                     reprocess=reprocess_txt,
+                    only_presets=reprocess_presets,
                     usage=usage,
                 )
             elif needs_presets:
@@ -485,6 +496,7 @@ def process_item(
                     speaker_names=speaker_names,
                     artifact_ids=item.get("artifact_ids") or {},
                     reprocess=False,
+                    only_presets=reprocess_presets,
                     usage=usage,
                 )
     except Exception as exc:
@@ -577,30 +589,49 @@ def _items_allowed_by_size(
     return allowed
 
 
-def _dry_run_preset_names(item: dict, config: Config, *, needs_txt: bool, reprocess_txt: bool) -> list[str]:
+def _dry_run_preset_names(
+    item: dict,
+    config: Config,
+    *,
+    needs_txt: bool,
+    reprocess_txt: bool,
+    reprocess_presets: list[str] | None = None,
+) -> list[str]:
     """Preset artifacts a real run would generate for this item.
 
     Mirrors :func:`_run_preset_stage`: ``--reprocess-txt`` regenerates every
-    enabled preset, a fresh or reprocessable transcript generates the presets
-    still missing an artifact, and otherwise no preset work happens.
+    enabled preset, an explicit ``reprocess_presets`` set force-reruns those stages
+    from an existing transcript, a fresh or reprocessable transcript generates the
+    presets still missing an artifact, and otherwise no preset work happens.
     """
     if not config.presets:
         return []
     if reprocess_txt:
         return [preset.name for preset in config.presets]
+    enabled = {preset.name for preset in config.presets}
+    if reprocess_presets and not needs_txt and item.get("txt_id") is not None:
+        return [name for name in reprocess_presets if name in enabled]
     if needs_txt or _needs_preset_reprocess(item, config, needs_txt=needs_txt):
         return _missing_preset_names(item, config)
     return []
 
 
-def _log_dry_run(folder_id: str, item: dict, config: Config, *, reprocess_txt: bool) -> None:
+def _log_dry_run(
+    folder_id: str,
+    item: dict,
+    config: Config,
+    *,
+    reprocess_txt: bool,
+    reprocess_presets: list[str] | None = None,
+) -> None:
     file_info = item["file"]
     has_mp3 = item.get("has_mp3", False)
     has_txt = item.get("has_txt", False)
     needs_mp3 = _should_make_mp3_artifact(config) and not has_mp3
     needs_txt = bool(config.stt_provider) and (reprocess_txt or not has_txt)
     preset_names = _dry_run_preset_names(
-        item, config, needs_txt=needs_txt, reprocess_txt=reprocess_txt
+        item, config, needs_txt=needs_txt, reprocess_txt=reprocess_txt,
+        reprocess_presets=reprocess_presets,
     )
     logger.info(
         "DRY RUN: would process %s (id=%s) in folder %s [mp3=%s, txt=%s, presets=%s]",
@@ -620,6 +651,7 @@ def process_target(
     *,
     is_folder: bool | None = None,
     reprocess_txt: bool = False,
+    reprocess_presets: list[str] | None = None,
     dry_run: bool = False,
     max_size_bytes: int | None = None,
     confirm_large: bool = False,
@@ -639,7 +671,9 @@ def process_target(
             description=f"list folder state for {target_id}",
         )
         _apply_local_output_state(items, config)
-        pending = items if reprocess_txt else _pending_items(items, config)
+        pending = (
+            items if (reprocess_txt or reprocess_presets) else _pending_items(items, config)
+        )
         pending = _items_allowed_by_size(
             pending,
             max_size_bytes=max_size_bytes,
@@ -648,7 +682,11 @@ def process_target(
         logger.info("Folder %s: %d pending file(s)", target_id, len(pending))
         if dry_run:
             for item in pending:
-                _log_dry_run(target_id, item, config, reprocess_txt=reprocess_txt)
+                _log_dry_run(
+                    target_id, item, config,
+                    reprocess_txt=reprocess_txt,
+                    reprocess_presets=reprocess_presets,
+                )
             return telemetry
         for item in pending:
             result = process_item(
@@ -657,6 +695,7 @@ def process_target(
                 target_id,
                 config,
                 reprocess_txt=reprocess_txt,
+                reprocess_presets=reprocess_presets,
             )
             if result is not None:
                 telemetry.append(result)
@@ -686,9 +725,17 @@ def process_target(
     if not allowed:
         return []
     if dry_run:
-        _log_dry_run(folder_id, match, config, reprocess_txt=reprocess_txt)
+        _log_dry_run(
+            folder_id, match, config,
+            reprocess_txt=reprocess_txt,
+            reprocess_presets=reprocess_presets,
+        )
         return []
-    result = process_item(service, match, folder_id, config, reprocess_txt=reprocess_txt)
+    result = process_item(
+        service, match, folder_id, config,
+        reprocess_txt=reprocess_txt,
+        reprocess_presets=reprocess_presets,
+    )
     return [result] if result is not None else []
 
 
@@ -814,7 +861,21 @@ def main() -> None:
         )
         raise SystemExit(1) from exc
 
+    paused_logged = False
     while True:
+        if not is_run_enabled():
+            # `gdstt stop` sets run.enabled=false. Stay up but idle so a Docker
+            # `restart: unless-stopped` policy does not crash-loop and the stop
+            # survives restarts without auto-resuming. Resume with `gdstt start`.
+            if not paused_logged:
+                logger.info(
+                    "run.enabled is false (gdstt stop); polling loop paused "
+                    "(resume with `gdstt start` or `gdstt run`)"
+                )
+                paused_logged = True
+            time.sleep(config.poll_interval)
+            continue
+        paused_logged = False
         try:
             run_once(service, config)
         except (RefreshError, AuthError) as exc:

@@ -88,6 +88,38 @@ def dependency_names(
     return _closure(preset_map, names) - set(names)
 
 
+def topological_order(
+    presets: Mapping[str, Preset] | Iterable[Preset],
+) -> list[str]:
+    """Return preset names in dependency order (dependencies before dependents).
+
+    Independent presets keep their input order, so a config-declared chain like
+    ``transcript-cleanup -> {keypoints, action-items}`` yields
+    ``[transcript-cleanup, keypoints, action-items]``. This is the order the CLI
+    numbers chain stages with (stage 1 = first preset). Assumes a valid DAG
+    (validated by :func:`~src.presets.validate_dag`); a residual cycle falls back to
+    appending the unresolved names in input order rather than raising.
+    """
+    preset_map = _as_preset_map(presets)
+    ordered: list[str] = []
+    placed: set[str] = set()
+
+    def visit(name: str, stack: set[str]) -> None:
+        if name in placed or name not in preset_map or name in stack:
+            return
+        stack.add(name)
+        for dep in preset_map[name].depends_on:
+            visit(dep, stack)
+        stack.discard(name)
+        if name not in placed:
+            placed.add(name)
+            ordered.append(name)
+
+    for name in preset_map:
+        visit(name, set())
+    return ordered
+
+
 def _dependency_input(preset: Preset, results: Mapping[str, PresetResult]) -> str:
     """Concatenate dependency outputs with a labeled separator per dependency."""
     sections: list[str] = []

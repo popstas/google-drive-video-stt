@@ -70,6 +70,31 @@ def _preset(name, instructions=None, **over) -> Preset:
     return Preset(name=name, instructions=instructions or f"INSTR_{name}", **over)
 
 
+def test_topological_order_puts_dependencies_first():
+    presets = (
+        _preset("transcript-cleanup"),
+        _preset("keypoints", depends_on=("transcript-cleanup",)),
+        _preset("action-items", depends_on=("transcript-cleanup",)),
+    )
+    order = preset_pipeline.topological_order(presets)
+    assert order == ["transcript-cleanup", "keypoints", "action-items"]
+
+
+def test_topological_order_independent_keeps_input_order():
+    presets = (_preset("a"), _preset("b"), _preset("c"))
+    assert preset_pipeline.topological_order(presets) == ["a", "b", "c"]
+
+
+def test_topological_order_multi_level_chain():
+    presets = (
+        _preset("c", depends_on=("b",)),
+        _preset("b", depends_on=("a",)),
+        _preset("a"),
+    )
+    order = preset_pipeline.topological_order(presets)
+    assert order.index("a") < order.index("b") < order.index("c")
+
+
 def test_no_dep_preset_gets_transcript_prompt():
     presets = {"keypoints": _preset("keypoints")}
     results = run_presets(

@@ -11,7 +11,7 @@ from typing import TextIO
 
 from src import auth, drive
 from src import main as main_module
-from src import relabel_transcript
+from src import preset_pipeline, relabel_transcript
 from src.config import (
     CONFIG_PATH_ENV_VAR,
     config_get,
@@ -24,6 +24,7 @@ from src.config import (
     migrate_config,
     resolve_config_file_path,
     resolve_effective_config_path,
+    set_run_enabled,
     use_google_files,
 )
 from src.stt.transcribe import transcribe_file
@@ -120,7 +121,8 @@ def _print_spend_summary(telemetry: list, *, dry_run: bool = False) -> None:
         if isinstance(cost, (int, float)):
             total_cost += float(cost)
             have_any_cost = True
-        lines.append(f"  file {index}: Deepgram cost {_format_deepgram_cost(cost_usd)}")
+        if "deepgram" in cost_usd:
+            lines.append(f"  file {index}: Deepgram cost {_format_deepgram_cost(cost_usd)}")
         for preset_line in _format_preset_usage_lines(usage):
             lines.append(f"    {preset_line}")
     if len(telemetry) > 1 and have_any_cost:
@@ -174,7 +176,27 @@ def cmd_auth_use_files(args: argparse.Namespace) -> None:
 
 
 def cmd_run(args: argparse.Namespace) -> None:
+    # Migrate `.env` -> config.yml first (when the config is missing/empty) so a
+    # fresh deploy is not clobbered: `set_run_enabled` writes the effective config,
+    # and on an empty file that would persist a minimal `{run: {enabled: true}}` and
+    # skip the env migration, losing FOLDER_IDS/provider settings.
+    load_config()
+    # Explicitly resume: clear any sticky `gdstt stop` flag so an operator's
+    # `gdstt run` always starts the polling loop.
+    set_run_enabled(True)
     main_module.main()
+
+
+def cmd_start(args: argparse.Namespace) -> None:
+    try:
+        path = set_run_enabled(True)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from exc
+    print(
+        f"Set run.enabled=true in {path}. A paused `gdstt run` loop resumes "
+        f"processing on its next cycle."
+    )
 
 
 def cmd_run_once(args: argparse.Namespace) -> None:
@@ -235,18 +257,119 @@ def cmd_latest(args: argparse.Namespace) -> None:
     _print_spend_summary(telemetry, dry_run=args.dry_run)
 
 
+def _stage_names(config) -> list[str]:
+    """Enabled presets in chain (topological) order, used as reprocess stages 1..N."""
+    return preset_pipeline.topological_order(config.presets)
+
+
 def _print_preset_dag(config) -> None:
-    """Report the resolved preset DAG (names, dependencies, enabled state)."""
-    presets = config.presets
+    """Report the resolved preset DAG with reprocess stage numbers.
+
+    Stage 0 is the transcript (Deepgram base); 1..N are the enabled presets in chain
+    order. These numbers are what ``gdstt reprocess <target> <stages>`` accepts.
+    """
+    presets = {preset.name: preset for preset in config.presets}
     if not presets:
-        print("Presets: none enabled")
+        print("Presets: none enabled (stage 0 = transcript only)")
         return
     # config.presets only ever holds enabled presets (merge_presets drops disabled
     # ones), so there is no per-preset enabled/disabled state to annotate here.
-    print(f"Presets: {len(presets)} enabled")
-    for preset in presets:
-        deps = ", ".join(preset.depends_on) if preset.depends_on else "transcript"
-        print(f"  {preset.name} <- {deps}")
+    print(f"Presets: {len(presets)} enabled (reprocess stages)")
+    print("  0. transcript (Deepgram base)")
+    for index, name in enumerate(_stage_names(config), start=1):
+        deps = presets[name].depends_on
+        src = ", ".join(deps) if deps else "transcript"
+        print(f"  {index}. {name} <- {src}")
+
+
+def _parse_stage_spec(spec: str | None, stage_names: list[str]) -> tuple[bool, list[str]]:
+    """Resolve a reprocess stage spec into (reprocess_transcript, preset_names).
+
+    ``spec`` accepts numbers, ranges, and lists over stages 0..N where 0 is the
+    transcript and 1..N are the enabled presets in chain order: ``"3"``, ``"2-3"``,
+    ``"1,3"``, ``"0"`` (transcript + everything downstream), or empty/``"all"`` for
+    every preset (transcript kept). Raises ``ValueError`` with the valid range on a
+    bad token. Returns ``(True, [])`` when the transcript is included (a full
+    re-transcribe regenerates all presets), else ``(False, selected names)``.
+    """
+    text = (spec or "").strip().lower()
+    if text in ("", "all"):
+        return False, list(stage_names)
+    numbers: set[int] = set()
+    for token in text.replace(" ", "").split(","):
+        if not token:
+            continue
+        if "-" in token:
+            lo_s, _, hi_s = token.partition("-")
+            try:
+                lo, hi = int(lo_s), int(hi_s)
+            except ValueError as exc:
+                raise ValueError(f"invalid stage range: {token!r}") from exc
+            if lo > hi:
+                lo, hi = hi, lo
+            numbers.update(range(lo, hi + 1))
+        else:
+            try:
+                numbers.add(int(token))
+            except ValueError as exc:
+                raise ValueError(f"invalid stage number: {token!r}") from exc
+    max_stage = len(stage_names)
+    for n in numbers:
+        if n < 0 or n > max_stage:
+            raise ValueError(
+                f"stage {n} out of range; valid stages are 0..{max_stage} "
+                f"(0=transcript, 1..{max_stage}=presets)"
+            )
+    if 0 in numbers:
+        # Re-transcribing regenerates every downstream preset, so the explicit
+        # preset selection collapses to a full reprocess.
+        return True, []
+    return False, [stage_names[n - 1] for n in sorted(numbers)]
+
+
+def cmd_reprocess(args: argparse.Namespace) -> None:
+    config = load_config()
+    stage_names = _stage_names(config)
+    try:
+        reprocess_txt, preset_names = _parse_stage_spec(args.stages, stage_names)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        print("Stages: 0=transcript" + "".join(
+            f", {i}={name}" for i, name in enumerate(stage_names, start=1)
+        ))
+        raise SystemExit(1) from exc
+    if not reprocess_txt and not preset_names:
+        logger.error("No presets enabled to reprocess; stage 0 (transcript) only.")
+        raise SystemExit(1)
+    plan = "transcript + all presets" if reprocess_txt else ", ".join(preset_names)
+    print(f"Reprocess plan for {args.target}: {plan}")
+    service = auth.build_drive_service(config=config)
+    is_folder = True if args.folder else None
+    telemetry = main_module.process_target(
+        service,
+        args.target,
+        config,
+        is_folder=is_folder,
+        reprocess_txt=reprocess_txt,
+        reprocess_presets=preset_names or None,
+        dry_run=args.dry_run,
+        max_size_bytes=args.max_size,
+        confirm_large=args.confirm_large,
+    )
+    _print_spend_summary(telemetry, dry_run=args.dry_run)
+
+
+def cmd_stop(args: argparse.Namespace) -> None:
+    try:
+        path = set_run_enabled(False)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from exc
+    print(
+        f"Set run.enabled=false in {path}. A running `gdstt run` loop pauses "
+        f"(goes idle) after its current cycle and stays paused across restarts; "
+        f"resume with `gdstt start` (or `gdstt run`)."
+    )
 
 
 def _describe_google_credentials(config) -> str:
@@ -590,6 +713,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_processing_safety_args(p_process)
     p_process.set_defaults(func=cmd_process)
+
+    p_reprocess = sub.add_parser(
+        "reprocess",
+        help="Re-run specific chain stages (0=transcript, 1..N=presets) for a target",
+    )
+    _set_parser_safety_description(
+        p_reprocess,
+        summary="Force-rerun chain stages by number for a Drive file or folder.",
+        safety_note=(
+            "stages are 0=transcript (Deepgram base, re-spends STT), 1..N=presets in "
+            "chain order (re-spends OpenAI). See `gdstt doctor` for the numbering. Use "
+            "--dry-run first; omit STAGES or pass 'all' to rerun every preset."
+        ),
+    )
+    p_reprocess.add_argument("target", help="Drive file ID or folder ID")
+    p_reprocess.add_argument(
+        "stages",
+        nargs="?",
+        default=None,
+        metavar="STAGES",
+        help="Stage spec: '3', '2-3', '1,3', '0' (transcript+all), or 'all'/omit",
+    )
+    p_reprocess.add_argument(
+        "--folder",
+        action="store_true",
+        help="Treat the target as a folder ID (default: auto-detect)",
+    )
+    _add_processing_safety_args(p_reprocess)
+    p_reprocess.set_defaults(func=cmd_reprocess)
+
+    p_stop = sub.add_parser(
+        "stop",
+        help="Pause the `gdstt run` loop (run.enabled=false); stays paused across restarts",
+    )
+    p_stop.set_defaults(func=cmd_stop)
+
+    p_start = sub.add_parser(
+        "start",
+        help="Resume a paused `gdstt run` loop by setting run.enabled=true",
+    )
+    p_start.set_defaults(func=cmd_start)
 
     p_latest = sub.add_parser(
         "latest",

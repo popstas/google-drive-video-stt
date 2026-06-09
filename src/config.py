@@ -63,6 +63,9 @@ class Config:
     stt_language: str
     stt_postprocess: bool = True
     drive_mp3_artifact: bool = True
+    # Runtime control flag for the polling loop. ``gdstt stop`` sets ``run.enabled``
+    # to false in the config; the loop re-reads it each cycle and exits cleanly.
+    run_enabled: bool = True
     output_target: str = "drive"
     output_dir: Path | None = None
     openai_keypoints: bool = False
@@ -428,6 +431,7 @@ def _config_from_env(*, validate_providers: bool = True) -> Config:
     openai_batch_wait = _parse_bool(
         os.environ.get("OPENAI_BATCH_WAIT", ""), default=True
     )
+    run_enabled = _parse_bool(os.environ.get("RUN_ENABLED", ""), default=True)
     openai_max_parallel = _parse_max_parallel(
         os.environ.get("OPENAI_MAX_PARALLEL", ""), default=4
     )
@@ -495,6 +499,7 @@ def _config_from_env(*, validate_providers: bool = True) -> Config:
         stt_language=stt_language,
         stt_postprocess=stt_postprocess,
         drive_mp3_artifact=drive_mp3_artifact,
+        run_enabled=run_enabled,
         output_target=output_target,
         output_dir=output_dir,
         openai_keypoints=openai_keypoints,
@@ -718,7 +723,10 @@ def _config_from_yaml(
     deepgram = _as_mapping(stt.get("deepgram"), "stt.deepgram")
     openai = _as_mapping(raw.get("openai"), "openai")
     google = _as_mapping(raw.get("google"), "google")
+    run = _as_mapping(raw.get("run"), "run")
     config_presets = _as_mapping(raw.get("presets"), "presets")
+
+    run_enabled = _yaml_bool(run.get("enabled"), default=True)
 
     (
         google_credentials,
@@ -856,6 +864,7 @@ def _config_from_yaml(
         stt_language=stt_language,
         stt_postprocess=stt_postprocess,
         drive_mp3_artifact=drive_mp3_artifact,
+        run_enabled=run_enabled,
         output_target=output_target,
         output_dir=output_dir,
         openai_keypoints=openai_keypoints,
@@ -981,12 +990,25 @@ def _default_config_dict(
             return f"{prompt_dir.rstrip('/')}/{name}.md"
         return _default_prompt_file(name)
 
-    presets: dict[str, dict] = {}
-    for builtin in BUILTIN_PRESETS:
-        presets[builtin.name] = {
-            "enabled": builtin.name == "keypoints",
-            "prompt_file": prompt_path(builtin.name),
-        }
+    # Default chain (all enabled out of the box): transcript-cleanup runs first and
+    # both keypoints and action-items depend on it. Order matters in the generated
+    # YAML, so transcript-cleanup is written above keypoints.
+    presets: dict[str, dict] = {
+        "transcript-cleanup": {
+            "enabled": True,
+            "prompt_file": prompt_path("transcript-cleanup"),
+        },
+        "keypoints": {
+            "enabled": True,
+            "depends_on": ["transcript-cleanup"],
+            "prompt_file": prompt_path("keypoints"),
+        },
+        "action-items": {
+            "enabled": True,
+            "depends_on": ["transcript-cleanup"],
+            "prompt_file": prompt_path("action-items"),
+        },
+    }
 
     config: dict[str, object] = {
         "folder_ids": [],
@@ -1015,9 +1037,10 @@ def _default_config_dict(
         "openai": {
             "api_key": "",
             "model": "gpt-5.4-mini",
-            "batch": False,
+            "batch": True,
             "max_parallel": 4,
         },
+        "run": {"enabled": True},
         # Google auth is inline-first and config-owned. The generated config ships an
         # empty block (no *_file pointers) so the data_dir fallback applies until the
         # operator runs `gdstt auth import-credentials` / `auth use-files`.
@@ -1117,6 +1140,7 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "max_parallel": config.openai_max_parallel,
             "keypoints": config.openai_keypoints,
         },
+        "run": {"enabled": config.run_enabled},
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
         # the prompt text stays owned by the .md assets; disabled built-ins (e.g.
@@ -1140,9 +1164,16 @@ def _write_config_text(path: Path, text: str) -> None:
     host would otherwise leave secrets group/world-readable. ``chmod`` is best-effort
     (a no-op on platforms that do not support POSIX modes).
     """
-    path.write_text(text, encoding="utf-8")
+    # Open with owner-only perms so a freshly created config never has a
+    # world-readable window before chmod. O_CREAT's mode applies only on creation
+    # (subject to umask); the chmod afterwards tightens an already-existing file.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        path.chmod(0o600)
+        os.write(fd, text.encode("utf-8"))
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(path, 0o600)
     except OSError:
         pass
 
@@ -1607,6 +1638,31 @@ def config_unset(key: str, *, config_path: str | Path | None = None) -> Path:
         raise ValueError(f"config key {key!r} is not set")
     _atomic_write_validated(effective, data, config_path=config_path)
     return effective
+
+
+def is_run_enabled(config_path: str | Path | None = None) -> bool:
+    """Read ``run.enabled`` from the effective config (default true).
+
+    Used by the polling loop to detect a ``gdstt stop`` between cycles. The read is
+    deliberately light (no full validation) and defensive: any read/parse error
+    returns ``True`` so a transient hiccup never stops a healthy loop.
+    """
+    try:
+        _, data = _load_effective_yaml_dict(config_path)
+    except (OSError, ValueError):
+        return True
+    run = data.get("run")
+    if not isinstance(run, dict) or "enabled" not in run:
+        return True
+    try:
+        return _yaml_bool(run.get("enabled"), default=True)
+    except ValueError:
+        return True
+
+
+def set_run_enabled(enabled: bool, *, config_path: str | Path | None = None) -> Path:
+    """Set ``run.enabled`` in the effective config (used by ``gdstt run``/``stop``)."""
+    return config_set("run.enabled", "true" if enabled else "false", config_path=config_path)
 
 
 # --- google auth config helpers ---------------------------------------------

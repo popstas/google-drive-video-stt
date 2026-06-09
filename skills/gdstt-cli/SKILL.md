@@ -2,23 +2,21 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.4.1
-last_updated: 2026-06-05
+version: 2.5.0
+last_updated: 2026-06-09
 ---
 
 # gdstt CLI
 
-Операторская инструкция для Deepgram-only сервиса Google Drive video STT. У
-инструмента одна задача: превратить запись в транскрипт с именами спикеров плюс
-документ Keypoints, записав их либо в Google Drive, либо в локальную папку.
-Предпочитай безопасные команды по одному файлу, никогда не печатай секреты и
-спрашивай перед любым действием, которое меняет Drive, локальные auth-файлы или
+Операторская инструкция для Deepgram-only сервиса Google Drive video STT: превратить
+запись в транскрипт с именами спикеров плюс документ Keypoints, записав их в Google
+Drive или локальную папку. Предпочитай безопасные команды по одному файлу, не печатай
+секреты и спрашивай перед действием, которое меняет Drive, локальные auth-файлы или
 тратит кредиты Deepgram/OpenAI.
 
-Отвечай и пиши артефакты (транскрипт, Keypoints, статус) **на языке
-собеседника** - подстраивайся под язык, на котором пишет пользователь, не
-фиксируйся на одном. Заголовки разделов внутри документа Keypoints остаются как в
-шаблоне (Задачи / Тезисы / Открытые вопросы).
+Отвечай и пиши артефакты (транскрипт, Keypoints, статус) **на языке собеседника**,
+не фиксируясь на одном. Заголовки разделов Keypoints остаются как в шаблоне
+(Задачи / Тезисы / Открытые вопросы).
 
 Настройка Google Drive (OAuth, scopes, поиск folder-id) описана в
 [README.md](../../README.md) репозитория, не здесь.
@@ -110,56 +108,68 @@ OAuth client (Desktop app) JSON и записать inline под `google.creden
 `--dry-run`. Спрашивай перед `--reprocess-txt` (повторный STT и перезапись
 привязанного TXT), обработкой папки или `--confirm-large`.
 
+### `reprocess <target> [STAGES] [--folder] [--dry-run] [--max-size SIZE] [--confirm-large]`
+
+Форс-перепрогон стадий по номерам (см. `doctor`): `0`=транскрипт (Deepgram, тратит
+STT), `1..N`=пресеты в порядке цепочки (тратит OpenAI). STAGES: `3`, `2-3`, `1,3`,
+`0` (транскрипт+всё ниже), пусто/`all`=все пресеты. Сначала `--dry-run`.
+
 ### `transcribe <audio> [-o PATH]`
 
-Расшифровать локальный аудиофайл через Deepgram, не трогая Drive. С `-o` пишет в
-`PATH`, иначе печатает в stdout.
+Расшифровать локальный аудиофайл через Deepgram, не трогая Drive. С `-o` пишет в `PATH`, иначе в stdout.
 
 ### `relabel --in SRC --out OUT --map MAP.json [--no-header]`
 
-Детерминированно переименовать спикеров по MAP.json (`default` метка -> имя, с
-точечными `exceptions` по дословному тексту) и склеить подряд идущие реплики
-одного спикера. Слова реплик сохраняются (пробелы нормализуются). Неотображённые
-метки печатаются в stderr - добавь их в `default`. `--no-header` пропускает шапку
-из MAP.json.
+Детерминированно переименовать спикеров по MAP.json (`default` метка -> имя, точечные
+`exceptions` по дословному тексту) и склеить подряд идущие реплики одного спикера; слова
+сохраняются. Неотображённые метки идут в stderr. `--no-header` пропускает шапку MAP.json.
 
 ### `list` / `status`
 
-Показать состояние соседних MP3/TXT для настроенных `FOLDER_IDS` (или `--folder`)
-без обработки файлов.
+Показать состояние соседних MP3/TXT для `FOLDER_IDS` (или `--folder`) без обработки.
 
 ### `run`
 
-Запустить непрерывный цикл опроса. Спрашивай перед использованием: он может
-многократно тратить кредиты по всем настроенным папкам. Превью-режима нет.
+Запустить непрерывный цикл опроса. Спрашивай перед использованием: он может многократно
+тратить кредиты по всем папкам. Превью-режима нет. При старте явно ставит
+`run.enabled=true` (снимает sticky-стоп).
+
+### `stop`
+
+Поставить `run.enabled=false`: цикл **встаёт на паузу** (простаивает, не выходит),
+контейнер живёт. Стоп sticky - `main()` не включает флаг при старте, поэтому пауза
+переживает Docker `restart: unless-stopped` и сама не возобновляется. Возобновить -
+`gdstt start`/`gdstt run`; полностью остановить контейнер - `docker compose stop`.
+
+### `start`
+
+Поставить `run.enabled=true`: приостановленный `gdstt run` возобновляет обработку на
+следующем проходе. Симметрично `stop`, напр. `docker compose exec <svc> gdstt start`.
 
 ### `run-once`
 
-Один цикл опроса по настроенным папкам. Предпочитай сначала `--dry-run`;
-`--max-size` добавляй только как опциональный ручной лимит для больших папок.
+Один цикл опроса по папкам. Предпочитай сначала `--dry-run`; `--max-size` - опциональный
+ручной лимит для больших папок.
 
 ### `speakers set <file-id> <name...>`
 
-Сохранить явные имена спикеров на исходном MP4 для будущей пост-обработки.
-Повторная обработка - отдельно и может тратить кредиты.
+Сохранить явные имена спикеров на исходном MP4 для будущей пост-обработки. Повторная
+обработка - отдельно и может тратить кредиты.
 
 ### `doctor [--drive]`
 
-Показать путь к активному `config.yml`, `DATA_DIR`, наличие credentials/token,
-источник Google-auth (inline/файл/data_dir, без секретов), число `FOLDER_IDS`,
-`STT_PROVIDER` и разрешённый DAG пресетов (имена, зависимости, число включённых). С
-`--drive` дополнительно аутентифицируется и перечисляет папки.
+Показать путь к `config.yml`, `DATA_DIR`, наличие credentials/token, источник Google-auth
+(без секретов), `FOLDER_IDS`, `STT_PROVIDER` и DAG пресетов с номерами стадий для
+`reprocess` (0=транскрипт, 1..N=пресеты). `--drive` ещё проверяет папки.
 
 ### `config migrate [--force]`
 
-Управление конфигом. Активный `config.yml` всегда один; путь печатает
-`gdstt config path`. OS-дефолт (если не заданы `--config`, `GDSTT_CONFIG` или
-явный `DATA_DIR`): Linux `${XDG_CONFIG_HOME:-~/.config}/gdstt/config.yml`, macOS
-`~/Library/Application Support/gdstt/config.yml`, Windows
-`%APPDATA%\gdstt\config.yml`. Рядом в `<config_dir>/prompts/` лежат скопированные
-prompt-ассеты (`keypoints.md`, `transcript-cleanup.md`, `action-items.md`), на
-которые ссылаются `prompt_file` пресетов; их кладут туда `config init`/`link` и
-авто-миграция. Цель без флагов = как у рантайма: `--config`/`GDSTT_CONFIG` > `<DATA_DIR>/config.yml` (если задан; важно под Docker) > OS-дефолт.
+Управление конфигом. Активный `config.yml` один; путь печатает `config path`.
+OS-дефолт (без `--config`/`GDSTT_CONFIG`/`DATA_DIR`): Linux
+`${XDG_CONFIG_HOME:-~/.config}/gdstt/config.yml`, macOS `~/Library/Application
+Support/gdstt/...`, Windows `%APPDATA%\gdstt\...`; рядом `<config_dir>/prompts/` с
+ассетами. Цель без флагов = как рантайм: `--config`/`GDSTT_CONFIG` >
+`<DATA_DIR>/config.yml` (если задан; важно под Docker) > OS-дефолт.
 
 Подкоманды `config`:
 
@@ -167,10 +177,10 @@ prompt-ассеты (`keypoints.md`, `transcript-cleanup.md`, `action-items.md`)
   `.env`/окружения (с `presets`). Авто-мигрируется при первом запуске, если файл
   отсутствует/пуст; это явная регенерация.
 - `config init [--local] [--data-dir DIR] [--output-dir DIR] [--prompt-dir DIR]
-  [--force]` - свежий полный конфиг из дефолтов (цепочка `transcript -> keypoints`,
-  включён только `keypoints`) + копия промптов рядом. `--local` пишет
-  `./data/config.yml`; `--output-dir` ставит `output.target=folder`+`output.dir`;
-  `--prompt-dir` копирует промпты туда и направляет на них `prompt_file`.
+  [--force]` - свежий полный конфиг из дефолтов: вся цепочка `transcript-cleanup ->
+  keypoints + action-items` включена, `openai.batch: true`, + копия промптов рядом.
+  `--local` -> `./data/config.yml`; `--output-dir` -> `output.target=folder`+`dir`;
+  `--prompt-dir` копирует промпты туда и направляет `prompt_file`.
 - `config path` - путь к активному конфигу без валидации секретов; при указателе
   (`config_file:`) печатает обе точки (bootstrap и effective).
 - `config link DIR [--copy-prompts] [--force]` - перенести/создать полный конфиг
@@ -180,16 +190,13 @@ prompt-ассеты (`keypoints.md`, `transcript-cleanup.md`, `action-items.md`)
 - `config get [KEY] [--show-secrets]` / `config set KEY VALUE` / `config unset KEY` -
   прочитать (секреты замаскированы, `--show-secrets` их раскрывает), записать+провалидировать или удалить точечный ключ.
 
-**Двухслойная shared-folder раскладка.** Общий синхронизируемый `config.yml` +
-`prompts/` кладут в общую папку, а на каждой машине OS-дефолтный путь несёт лишь
-указатель `config_file: <общий config.yml>` (путь на разных ОС разный) - делается
-через `gdstt config link <общая-папка> --copy-prompts`, загрузчик идёт по цепочке
-указателей до реального файла. Секреты (`openai.api_key`, `stt.deepgram.api_key`,
-inline `google.token`/`credentials`) в общем конфиге не храни. Папки заметок -
-обычные пути: артефакты в свою (в т.ч. синхронизируемую) папку шли через
-`output.dir`+`output.target=folder`, конфиг/промпты выбирай через `--config`,
-`GDSTT_CONFIG`, `config init --prompt-dir`; vault-wikilinks - опциональный слой
-агента (см. «Vault-интеграция»).
+**Двухслойная shared-folder раскладка.** Общий `config.yml` + `prompts/` - в общей
+папке, а на каждой машине OS-дефолтный путь несёт лишь указатель
+`config_file: <общий config.yml>` (делается через `gdstt config link <папка>
+--copy-prompts`; загрузчик идёт по цепочке указателей). Секреты (`openai.api_key`,
+`stt.deepgram.api_key`, inline `google.token`/`credentials`) в общем конфиге не
+храни. Артефакты в свою папку - `output.dir`+`output.target=folder`; конфиг/промпты
+- через `--config`, `GDSTT_CONFIG`, `config init --prompt-dir`.
 
 ## Рабочий процесс Keypoints (агент)
 
@@ -198,13 +205,10 @@ inline `google.token`/`credentials`) в общем конфиге не хран�
 `relabel` сохраняет слова каждой реплики (пробелы нормализуются).
 
 1. **Получи сырой диаризованный транскрипт.** Ключи relabel-маппинга - метки
-   `Speaker N`, поэтому на входе они должны сохраниться. `gdstt transcribe
-   <audio>` выдаёт сырой `Speaker N` (без пост-обработки). `gdstt latest` /
-   `gdstt process <file-id>` сохраняют `Speaker N` только при
-   `STT_POSTPROCESS=false`; при дефолтном `STT_POSTPROCESS=true` они уже
-   подставили имена собеседников в `<base>.txt`, и `Speaker N`-маппинг ни с чем не
-   совпадёт. Запомни `base` (стем исходного файла) - артефакты это `<base>.txt` и
-   далее `<base>.keypoints.md`.
+   `Speaker N`, поэтому на входе их надо сохранить. `gdstt transcribe <audio>` даёт
+   сырой `Speaker N`; `gdstt latest` / `process` сохраняют его лишь при
+   `STT_POSTPROCESS=false` (при дефолтном `true` имена уже подставлены, и маппинг не
+   совпадёт). Запомни `base` (стем файла): артефакты `<base>.txt` -> `<base>.keypoints.md`.
 2. **Разбери спикеров.** Диаризация обычно даёт больше меток, чем людей (напр.
    `Speaker 1/2/3` на двух участников). Сопоставь каждую метку с человеком по
    содержанию: роль и лексика, к кому обращаются по имени в реплике (строка «Я
@@ -288,7 +292,7 @@ inline `google.token`/`credentials`) в общем конфиге не хран�
 параллельно. Конфиг-пресеты переопределяют встроенные по полям, добавляют новые и
 отключают встроенный через `enabled: false`. Дефолтная цепочка
 `transcript -> keypoints` работает из коробки; канонический расширенный пример:
-`transcript-cleanup -> keypoints + expertizeme-managers`. Идемпотентность - по
+`transcript-cleanup -> keypoints + action-items`. Идемпотентность - по
 пресетам: повторный прогон делает только недостающие артефакты.
 
 **Откуда берётся промпт пресета (приоритет).** `instructions` (inline в YAML) >
@@ -375,26 +379,22 @@ presets:
   (если явно не сказано не спрашивать).
 - `--max-size` опционален и по умолчанию выключен. Не выдумывай глобальный порог.
   `--confirm-large` добавляй только после явного одобрения человеком.
-- `--reprocess-txt` повторно гоняет STT и намеренно перезаписывает привязанный TXT.
-- У `run` нет превью-режима. Используй только после того, как контролируемые
-  проверки совпали с ожиданиями.
+- `--reprocess-txt` и `reprocess` тратят кредиты: stage `0` повторно гоняет STT и
+  перезаписывает TXT, stage `1..N` — повторный OpenAI по выбранным пресетам.
+  Сначала `--dry-run`; номера стадий бери из `gdstt doctor`.
+- У `run` нет превью-режима — используй после контролируемых проверок. Пауза -
+  `gdstt stop` (sticky, переживает рестарт), возобновление - `gdstt start`/`gdstt run`.
 - Пустые транскрипты падают намеренно; никогда не принимай пустой TXT за успех.
 - Никогда не печатай API-ключи, OAuth-токены, `credentials.json`, `token.json`.
 
 ## Ключевые заметки
 
-- Deepgram - единственный STT-провайдер; `stt.provider=""` оставляет режим
-  только-MP3.
+- Deepgram - единственный STT-провайдер; `stt.provider=""` оставляет режим только-MP3.
 - Идемпотентность - через `appProperties.source_video_id`, пер-артефактный
-  `appProperties.artifact_type` (каждый пресет детектится отдельно через
-  `artifact_ids` в `list_folder_state`) и совпадение по стему как legacy-fallback;
-  существующие соседние файлы обновляются на месте, не дублируются. Существующие
-  `.keypoints.md` несут `artifact_type=keypoints` и ложатся на пресет `keypoints`
-  без миграции.
+  `appProperties.artifact_type` (каждый пресет детектится отдельно через `artifact_ids`
+  в `list_folder_state`) и совпадение по стему (legacy); соседние файлы обновляются на месте.
 - Транзиентные чтения метаданных Drive, состояния папки и загрузки повторяются до
   отказа цикла. Загрузки автоматически не повторяются.
-- `process_item` логирует провайдера, исход, число повторов и длительность;
-  `run-once` логирует сводку по папке и одну сводку цикла
-  (pending/processed/failed).
-- `output.target=drive` пишет артефакты как соседние файлы Drive;
-  `output.target=folder` пишет их в `output.dir`.
+- `process_item` логирует провайдера, исход, повторы и длительность; `run-once` -
+  сводку по папке и сводку цикла (pending/processed/failed).
+- `output.target=drive` пишет артефакты как соседние файлы Drive; `output.target=folder` - в `output.dir`.

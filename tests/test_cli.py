@@ -235,12 +235,17 @@ def test_doctor_reports_stt_provider_without_pipeline_readiness(mocker, capsys, 
     assert "STT_PROVIDER: deepgram" in out
 
 
-def test_run_dispatch_calls_main(mocker):
-    main_mock = mocker.patch("src.cli.main_module.main")
+def test_run_dispatch_migrates_then_enables_then_calls_main(mocker):
+    calls = []
+    mocker.patch("src.cli.load_config", side_effect=lambda *a, **k: calls.append("load"))
+    mocker.patch("src.cli.set_run_enabled", side_effect=lambda *a, **k: calls.append("set"))
+    mocker.patch("src.cli.main_module.main", side_effect=lambda *a, **k: calls.append("main"))
 
     cli.main(["run"])
 
-    main_mock.assert_called_once_with()
+    # `gdstt run` must migrate (load_config) BEFORE touching run.enabled, otherwise a
+    # fresh .env deploy gets a minimal config and the env migration is skipped.
+    assert calls == ["load", "set", "main"]
 
 
 def test_top_level_help_recommends_safe_operator_flow(capsys):
@@ -774,6 +779,43 @@ def test_process_spend_summary_reports_pending_cost(mocker, capsys, tmp_path):
     assert "OpenAI keypoints tokens" not in out
 
 
+def test_process_spend_summary_omits_deepgram_when_stt_not_run(mocker, capsys, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    telemetry = [
+        _Telemetry(cost_usd={}, usage={"openai_keypoints": {"total_tokens": 42}}),
+    ]
+    mocker.patch("src.cli.main_module.process_target", return_value=telemetry)
+
+    cli.main(["process", "file123"])
+
+    out = capsys.readouterr().out
+    assert "pending" not in out
+    assert "Deepgram cost" not in out
+    assert "OpenAI keypoints tokens: total=42" in out
+
+
+def test_process_spend_summary_mixed_deepgram_presence(mocker, capsys, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    telemetry = [
+        _Telemetry(cost_usd={}),
+        _Telemetry(cost_usd={"deepgram": None}),
+        _Telemetry(cost_usd={"deepgram": 0.1234}),
+    ]
+    mocker.patch("src.cli.main_module.process_target", return_value=telemetry)
+
+    cli.main(["process", "folder123", "--folder"])
+
+    out = capsys.readouterr().out
+    assert "file 1: Deepgram cost" not in out
+    assert "file 2: Deepgram cost pending" in out
+    assert "file 3: Deepgram cost $0.1234" in out
+    assert "combined Deepgram cost: $0.1234" in out
+
+
 def test_process_spend_summary_combined_total(mocker, capsys, tmp_path):
     cfg = make_config(data_dir=tmp_path)
     mocker.patch("src.cli.load_config", return_value=cfg)
@@ -1129,3 +1171,99 @@ def test_config_unset_command_reports_error(mocker):
         cli.main(["config", "unset", "nope"])
 
     assert excinfo.value.code == 1
+
+
+# --- reprocess stage spec + dispatch ----------------------------------------
+
+_STAGES = ["transcript-cleanup", "keypoints", "action-items"]
+
+
+def test_parse_stage_spec_all_and_empty():
+    assert cli._parse_stage_spec(None, _STAGES) == (False, _STAGES)
+    assert cli._parse_stage_spec("all", _STAGES) == (False, _STAGES)
+
+
+def test_parse_stage_spec_single_and_range():
+    assert cli._parse_stage_spec("2", _STAGES) == (False, ["keypoints"])
+    assert cli._parse_stage_spec("2-3", _STAGES) == (False, ["keypoints", "action-items"])
+    assert cli._parse_stage_spec("1,3", _STAGES) == (
+        False,
+        ["transcript-cleanup", "action-items"],
+    )
+
+
+def test_parse_stage_spec_zero_means_full_reprocess():
+    assert cli._parse_stage_spec("0", _STAGES) == (True, [])
+    # 0 with others still collapses to a full transcript reprocess.
+    assert cli._parse_stage_spec("0,2", _STAGES) == (True, [])
+
+
+def test_parse_stage_spec_out_of_range_raises():
+    with pytest.raises(ValueError, match="out of range"):
+        cli._parse_stage_spec("4", _STAGES)
+
+
+def test_parse_stage_spec_bad_token_raises():
+    with pytest.raises(ValueError):
+        cli._parse_stage_spec("x", _STAGES)
+
+
+def _chain_config():
+    presets = (
+        Preset(name="transcript-cleanup", instructions="c"),
+        Preset(name="keypoints", instructions="k", depends_on=("transcript-cleanup",)),
+        Preset(name="action-items", instructions="a", depends_on=("transcript-cleanup",)),
+    )
+    return make_config(presets=presets)
+
+
+def test_reprocess_command_passes_selected_presets(mocker, capsys):
+    mocker.patch("src.cli.load_config", return_value=_chain_config())
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    proc = mocker.patch("src.cli.main_module.process_target", return_value=[])
+
+    cli.main(["reprocess", "file-1", "2-3"])
+
+    kwargs = proc.call_args.kwargs
+    assert kwargs["reprocess_presets"] == ["keypoints", "action-items"]
+    assert kwargs["reprocess_txt"] is False
+
+
+def test_reprocess_command_stage_zero_is_full(mocker):
+    mocker.patch("src.cli.load_config", return_value=_chain_config())
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    proc = mocker.patch("src.cli.main_module.process_target", return_value=[])
+
+    cli.main(["reprocess", "file-1", "0"])
+
+    kwargs = proc.call_args.kwargs
+    assert kwargs["reprocess_txt"] is True
+    assert kwargs["reprocess_presets"] is None
+
+
+def test_reprocess_command_bad_spec_exits(mocker):
+    mocker.patch("src.cli.load_config", return_value=_chain_config())
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["reprocess", "file-1", "9"])
+    assert excinfo.value.code == 1
+
+
+def test_stop_command_sets_run_disabled(mocker, capsys, tmp_path):
+    setter = mocker.patch("src.cli.set_run_enabled", return_value=tmp_path / "config.yml")
+
+    cli.main(["stop"])
+
+    setter.assert_called_once_with(False)
+    out = capsys.readouterr().out
+    assert "run.enabled=false" in out
+    assert "stays paused across restarts" in out
+
+
+def test_start_command_sets_run_enabled(mocker, capsys, tmp_path):
+    setter = mocker.patch("src.cli.set_run_enabled", return_value=tmp_path / "config.yml")
+
+    cli.main(["start"])
+
+    setter.assert_called_once_with(True)
+    assert "run.enabled=true" in capsys.readouterr().out

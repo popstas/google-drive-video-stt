@@ -37,7 +37,10 @@ uv run ruff check            # lint (line-length 100, target py311)
 gdstt auth [--manual]        # OAuth refresh or recovery flow
 uv run python -m src.auth    # module entry for the same OAuth flow
 uv run python -m src.main    # run the polling loop locally
-gdstt <auth|doctor|latest|run|run-once|process|transcribe|relabel|speakers|list|config>  # operator CLI (src/cli.py)
+gdstt <auth|doctor|latest|run|start|stop|run-once|process|reprocess|transcribe|relabel|speakers|list|config>  # operator CLI (src/cli.py)
+gdstt reprocess <id> [STAGES]   # force-rerun chain stages by number (0=transcript, 1..N=presets; see `gdstt doctor`)
+gdstt stop                      # set run.enabled=false so a running `gdstt run` loop pauses (idles) and stays paused across restarts
+gdstt start                     # set run.enabled=true so a paused `gdstt run` loop resumes processing
 gdstt config migrate [--force]  # (re)write data/config.yml from the current .env/environment
 gdstt --config PATH <command>   # point at a non-default config.yml (or set GDSTT_CONFIG)
 docker compose up -d --build # containerized deployment (mounts ./data, DATA_DIR=/app/data)
@@ -163,8 +166,20 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
 - Bootstrap and Drive-only commands use `load_config(validate_providers=False)`:
   `auth`, `doctor`, `list` / `status`, `speakers set`, and `config migrate`.
 - Processing commands validate provider configuration and can spend credits:
-  `run`, `run-once`, `process`, `latest`, and `transcribe`.
+  `run`, `run-once`, `process`, `reprocess`, `latest`, and `transcribe`.
 - `relabel` is a local file transform that touches no Drive and spends nothing.
+- `reprocess <id> [STAGES]` force-reruns chain stages by number: `0` = transcript
+  (re-runs STT + everything downstream), `1..N` = enabled presets in
+  `preset_pipeline.topological_order`. It threads `reprocess_presets` through
+  `process_target` -> `process_item` -> `_run_preset_stage(only_presets=...)`,
+  reusing dependency artifacts as `precomputed`. `gdstt doctor` prints the numbers.
+- `run.enabled` (config flag, default true) controls the polling loop: `gdstt stop`
+  sets it false and the loop **pauses** — `main()` re-reads it each cycle via
+  `is_run_enabled()` and idles (sleeps then re-checks) instead of exiting, so the
+  container stays up. The stop is sticky: `main()` never auto-enables the flag at
+  startup, so it survives Docker `restart: unless-stopped` without auto-resuming.
+  Resume with `gdstt start`/`gdstt run` (both set it true); `docker compose stop`
+  halts the container itself.
 - Configuration is `data/config.yml` (grouped `output`, `stt.deepgram`, `openai`,
   and a top-level `presets` map). `.env` is auto-migrated into YAML on first run;
   `gdstt config migrate [--force]` regenerates it explicitly. Resolve a non-default

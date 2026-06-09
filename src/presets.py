@@ -187,7 +187,13 @@ def _build_preset(name: str, raw: Mapping, base: Preset | None) -> Preset:
     if "instructions" in raw:
         overrides["instructions"] = _as_str(raw.get("instructions"))
     if "prompt_file" in raw:
-        overrides["prompt_file"] = _opt_str(raw.get("prompt_file"))
+        prompt_file_value = _opt_str(raw.get("prompt_file"))
+        overrides["prompt_file"] = prompt_file_value
+        # An explicit prompt_file must win over an inherited built-in `instructions`
+        # (otherwise the instructions > prompt_file priority would silently ignore
+        # the user's file). Clear the inherited text so config.py resolves the file.
+        if prompt_file_value is not None and "instructions" not in raw:
+            overrides["instructions"] = ""
     if "depends_on" in raw:
         overrides["depends_on"] = _depends_on(raw.get("depends_on"))
     if "model" in raw:
