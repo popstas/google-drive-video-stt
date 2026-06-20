@@ -226,7 +226,7 @@ def cmd_latest(args: argparse.Namespace) -> None:
     config = load_config(config_path=args.config)
     folder_id = args.folder or (config.folder_ids[0] if config.folder_ids else None)
     if not folder_id:
-        logger.error("No folder to inspect; set FOLDER_IDS or pass --folder")
+        logger.error("No folder to inspect; configure folder_ids or pass --folder")
         raise SystemExit(1)
     if not args.folder and len(config.folder_ids) > 1:
         logger.info(
@@ -410,8 +410,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     # token / refresh_token stay masked; only the source kind/location is shown).
     print(f"Google credentials: {_describe_google_credentials(config)}")
     print(f"Google token: {_describe_google_token(config)}")
-    print(f"FOLDER_IDS: {len(config.folder_ids)} configured")
-    print(f"STT_PROVIDER: {config.stt_provider or 'not configured'}")
+    print(f"folder_ids: {len(config.folder_ids)} configured")
+    print(f"stt.provider: {config.stt_provider or 'not configured'}")
     _print_preset_dag(config)
 
     if not args.drive:
@@ -518,7 +518,7 @@ def cmd_list(args: argparse.Namespace) -> None:
     config = load_config(validate_providers=False, config_path=args.config)
     folder_ids = [args.folder] if args.folder else config.folder_ids
     if not folder_ids:
-        logger.error("No folders to inspect; set FOLDER_IDS or pass --folder")
+        logger.error("No folders to inspect; configure folder_ids or pass --folder")
         raise SystemExit(1)
     service = auth.build_drive_service(config=config)
     for folder_id in folder_ids:
@@ -739,7 +739,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_latest.add_argument(
         "--folder",
         default=None,
-        help="Folder ID to inspect (default: first of FOLDER_IDS)",
+        help="Folder ID to inspect (default: first configured folder_ids entry)",
     )
     p_latest.add_argument(
         "--dry-run",
@@ -773,7 +773,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_config = sub.add_parser(
         "config",
-        help="Manage gdstt configuration (data/config.yml)",
+        help="Manage gdstt configuration (active config.yml)",
     )
     config_sub = p_config.add_subparsers(dest="config_command", required=True)
 
@@ -898,7 +898,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_list.add_argument(
         "--folder",
         default=None,
-        help="Folder ID to inspect (default: configured FOLDER_IDS)",
+        help="Folder ID to inspect (default: configured folder_ids)",
     )
     p_list.set_defaults(func=cmd_list)
 

@@ -226,7 +226,7 @@ then edit it. Resolve a one-shot non-default file with `gdstt --config PATH ...`
 folder_ids: [abc, def]
 poll_interval: 600
 bitrate: 96k
-data_dir: data
+data_dir: .
 proxy_url: ""
 run:
   enabled: true          # gdstt stop/start toggle this; persists across restarts
@@ -271,45 +271,43 @@ presets:
 Presets define the OpenAI post-processing DAG (see
 [Preset DAG](#preset-dag-keypoints-and-beyond)). A preset's prompt comes from
 `instructions` (inline) **or** `prompt_file`; supplying neither is an error. Each
-setting below maps to a `config.yml` key; the names are the historical
-environment-variable labels, kept here as a quick reference for what each value
-controls (they are no longer read at runtime):
+setting below maps to a `config.yml` key; no `.env` file or legacy environment
+variable is read at runtime:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `FOLDER_IDS` | (required) | Comma-separated Google Drive folder IDs to monitor |
-| `POLL_INTERVAL` | `600` | Seconds between poll cycles |
-| `BITRATE` | `96k` | MP3 audio bitrate passed to ffmpeg |
-| `DRIVE_MP3_ARTIFACT` | auto | Upload an MP3 artifact to Drive. Defaults to `false` for `DEEPGRAM_AUDIO_SOURCE=m4a_copy`; `true` otherwise |
+| `folder_ids` | (required) | Google Drive folder IDs to monitor |
+| `poll_interval` | `600` | Seconds between poll cycles |
+| `bitrate` | `96k` | MP3 audio bitrate passed to ffmpeg |
+| `stt.drive_mp3_artifact` | auto | Upload an MP3 artifact to Drive. Defaults to `false` for `stt.deepgram.audio_source=m4a_copy`; `true` otherwise |
 | `notifications.telegram.bot_token` | (empty) | Read at runtime from `config.yml`. If set with chat ID, errors are posted to Telegram |
 | `notifications.telegram.chat_id` | (empty) | Read at runtime from `config.yml`. Telegram chat to receive error notifications |
-| `data_dir` | `data` | Base directory for credentials/token files and other instance state (config.yml key `data_dir`) |
-| `PROXY_URL` | (empty) | Optional `http`/`https`/`socks5` proxy for Telegram, Deepgram, and OpenAI |
-| `STT_PROVIDER` | `deepgram` | `deepgram` by default. Set `disabled` (or empty) to skip transcription and only manage MP3 artifacts |
-| `STT_LANGUAGE` | (empty) | Language hint. `deepgram`: empty defaults to `ru` |
-| `STT_POSTPROCESS` | `true` | Clean the transcript and map diarized `Speaker N` labels to the interlocutor names parsed from the file name, merging spurious extra speakers |
-| `OUTPUT_TARGET` | `drive` | Where artifacts are written: `drive` (sibling files) or `folder` (local `OUTPUT_DIR`) |
-| `OUTPUT_DIR` | — | Required when `OUTPUT_TARGET=folder`; local directory for transcript/keypoints files |
-| `OPENAI_KEYPOINTS` | `false` | Generate a `<base>.keypoints.md` Keypoints document via the OpenAI Responses API after transcription. Requires `OPENAI_API_KEY` |
-| `OPENAI_API_KEY` | — | Required when `OPENAI_KEYPOINTS=true` |
-| `OPENAI_MODEL` | `gpt-5.4-mini` | Global default model for presets |
-| `OPENAI_BATCH` | `false` | Global default batch mode. Batch API is ~50% cheaper but slower (not higher quality); batch on an upstream preset delays its downstream presets |
-| `OPENAI_BATCH_WAIT` | `true` | Wait synchronously for batch results (the async path is unsupported) |
-| `OPENAI_MAX_PARALLEL` | `4` | Max number of independent presets run concurrently (maps to `openai.max_parallel`) |
-| `DEEPGRAM_API_KEY` | — | Required when `STT_PROVIDER=deepgram` unless `DEEPGRAM_API_KEY_FILE` is set |
-| `DEEPGRAM_API_KEY_FILE` | — | Optional file containing a raw Deepgram token or JSON with `api_key`, `deepgram_api_key`, or `DEEPGRAM_API_KEY` |
-| `DEEPGRAM_MODEL` | `nova-3` | Deepgram model name |
-| `DEEPGRAM_DIARIZE_MODEL` | `latest` | Deepgram diarization model: `latest` or `v1` |
-| `DEEPGRAM_AUDIO_SOURCE` | `m4a_copy` | Audio sent to Deepgram: `m4a_copy`, `mp3_96k`, or `mp3_192k` |
-| `DEEPGRAM_TXT_FORMATTER` | `word_speaker` | Deepgram TXT formatter: `word_speaker` or `utterance` |
-| `DEEPGRAM_KEYTERMS_ENABLED` | `true` | Enables Nova-3 keyterm prompting |
-| `DEEPGRAM_KEYTERMS_FILE` | `config/deepgram-keyterms.txt` | Keyterms file, one term per line, max 100 |
+| `data_dir` | `.` | Base directory for credentials/token files and other instance state |
+| `proxy_url` | (empty) | Optional `http`/`https`/`socks5` proxy for Telegram, Deepgram, and OpenAI |
+| `stt.provider` | `deepgram` | `deepgram` by default. Set `disabled` (or empty) to skip transcription and only manage MP3 artifacts |
+| `stt.language` | (empty) | Language hint. `deepgram`: empty defaults to `ru` |
+| `stt.postprocess` | `true` | Clean the transcript and map diarized `Speaker N` labels to the interlocutor names parsed from the file name, merging spurious extra speakers |
+| `output.target` | `drive` | Where artifacts are written: `drive` (sibling files) or `folder` (local `output.dir`) |
+| `output.dir` | — | Required when `output.target=folder`; local directory for transcript/keypoints files |
+| `openai.api_key` | — | Required when any OpenAI preset is enabled |
+| `openai.model` | `gpt-5.4-mini` | Global default model for presets |
+| `openai.batch` | `false` | Global default batch mode. Batch API is ~50% cheaper but slower (not higher quality); batch on an upstream preset delays its downstream presets |
+| `openai.batch_wait` | `true` | Wait synchronously for batch results (the async path is unsupported) |
+| `openai.max_parallel` | `4` | Max number of independent presets run concurrently |
+| `stt.deepgram.api_key` | — | Required when `stt.provider=deepgram` unless `stt.deepgram.api_key_file` is set |
+| `stt.deepgram.api_key_file` | — | Optional file containing a raw Deepgram token or JSON with `api_key`, `deepgram_api_key`, or `DEEPGRAM_API_KEY` |
+| `stt.deepgram.model` | `nova-3` | Deepgram model name |
+| `stt.deepgram.diarize_model` | `latest` | Deepgram diarization model: `latest` or `v1` |
+| `stt.deepgram.audio_source` | `m4a_copy` | Audio sent to Deepgram: `m4a_copy`, `mp3_96k`, or `mp3_192k` |
+| `stt.deepgram.txt_formatter` | `word_speaker` | Deepgram TXT formatter: `word_speaker` or `utterance` |
+| `stt.deepgram.keyterms_enabled` | `true` | Enables Nova-3 keyterm prompting |
+| `stt.deepgram.keyterms_file` | `config/deepgram-keyterms.txt` | Keyterms file, one term per line, max 100 |
 
 ## Speech-to-text
 
-With `STT_PROVIDER=deepgram` (the default) each pending recording is transcribed
+With `stt.provider=deepgram` (the default) each pending recording is transcribed
 through Deepgram and a sibling `<basename>.txt` is written next to the MP4 (or into
-`OUTPUT_DIR` when `OUTPUT_TARGET=folder`). Set `STT_PROVIDER=disabled` to skip
+`output.dir` when `output.target=folder`). Set `stt.provider=disabled` to skip
 transcription entirely and only manage the optional MP3 artifact.
 
 ### Deepgram Nova-3 (diarization)
@@ -326,7 +324,7 @@ Setup:
 2. Set `stt.provider: deepgram` and either `stt.deepgram.api_key` or
    `stt.deepgram.api_key_file` in `config.yml`.
 
-`DEEPGRAM_API_KEY_FILE` may contain either the raw token or JSON with one of these
+`stt.deepgram.api_key_file` may contain either the raw token or JSON with one of these
 fields: `api_key`, `deepgram_api_key`, or `DEEPGRAM_API_KEY`. The API key is never
 logged. After each successful Deepgram transcription, the service logs the request
 id, duration, and best-effort request cost in USD when Deepgram's usage API has
@@ -335,29 +333,31 @@ recorded it.
 The production defaults are:
 
 ```
-DEEPGRAM_MODEL=nova-3
-STT_LANGUAGE=ru
-DEEPGRAM_DIARIZE_MODEL=latest
-DEEPGRAM_AUDIO_SOURCE=m4a_copy  # m4a_copy, mp3_96k, or mp3_192k
-DEEPGRAM_TXT_FORMATTER=word_speaker
-DEEPGRAM_KEYTERMS_ENABLED=true
-DEEPGRAM_KEYTERMS_FILE=config/deepgram-keyterms.txt
+stt:
+  language: ru
+  deepgram:
+    model: nova-3
+    diarize_model: latest
+    audio_source: m4a_copy  # m4a_copy, mp3_96k, or mp3_192k
+    txt_formatter: word_speaker
+    keyterms_enabled: true
+    keyterms_file: config/deepgram-keyterms.txt
 ```
 
 `m4a_copy` extracts a temporary AAC/M4A audio copy from the source MP4 for
 Deepgram without re-encoding. Use `mp3_96k` or `mp3_192k` to send a temporary MP3
 instead. With the Deepgram `m4a_copy` default, no extra Drive MP3 is uploaded
-unless `DRIVE_MP3_ARTIFACT=true` is set. If an MP3 already exists but TXT is
+unless `stt.drive_mp3_artifact=true` is set. If an MP3 already exists but TXT is
 missing, Deepgram downloads the MP4 again so it can use the selected high-quality
 audio source.
 
 `word_speaker` is a Deepgram-only TXT formatter. It uses `utterances` for readable
 timing, but splits a line when `words[].speaker` changes inside the utterance.
-Set `DEEPGRAM_TXT_FORMATTER=utterance` to use the older utterance-level formatter.
+Set `stt.deepgram.txt_formatter=utterance` to use the older utterance-level formatter.
 
-Keyterms are read from `DEEPGRAM_KEYTERMS_FILE`, one term per line. Blank lines and
+Keyterms are read from `stt.deepgram.keyterms_file`, one term per line. Blank lines and
 lines beginning with `#` are ignored. At most 100 keyterms are allowed, and they
-are sent only when `DEEPGRAM_MODEL=nova-3`.
+are sent only when `stt.deepgram.model=nova-3`.
 
 Sample output:
 
@@ -453,11 +453,11 @@ deterministically, and write the Keypoints document by hand), see
 
 ### Output destination
 
-`OUTPUT_TARGET` controls where the transcript and keypoints files land. With the
+`output.target` controls where the transcript and keypoints files land. With the
 default `drive`, they are written as siblings of the source MP4 and uploaded (or
 updated in place when one already exists). With `folder`, the service writes
-`<output_dir>/<base_name>.txt` (and `.keypoints.md`), creating `OUTPUT_DIR` if it
-is missing. `OUTPUT_DIR` is required when `OUTPUT_TARGET=folder`.
+`<output_dir>/<base_name>.txt` (and `.keypoints.md`), creating `output.dir` if it
+is missing. `output.dir` is required when `output.target=folder`.
 
 ## Usage
 
@@ -507,8 +507,8 @@ gdstt --config PATH <command>    # one-shot override against a non-default confi
 
 `process` auto-detects whether the ID is a file or a folder; pass `--folder` to
 force folder handling. `latest` resolves the folder from `--folder` or the first of
-`FOLDER_IDS` and processes the newest (most recently created) mp4. `list`/`status`
-defaults to the configured `FOLDER_IDS` when `--folder` is omitted.
+`folder_ids` and processes the newest (most recently created) mp4. `list`/`status`
+defaults to the configured `folder_ids` when `--folder` is omitted.
 `--reprocess-txt` intentionally spends STT provider credits again and overwrites
 the linked `.txt` when one exists. `speakers set` affects future local
 post-processing; combine it with `process <file-id> --reprocess-txt` when an
@@ -605,7 +605,7 @@ The runtime treats incomplete output as failure instead of silently uploading it
   bounded backoff. Uploads are not retried automatically.
 - Downloads are checked against Drive metadata size; mismatched partial temp files
   are removed before retry or recovery.
-- `FOLDER_IDS` containing only commas or whitespace fails configuration loading
+- `folder_ids` containing only commas or whitespace fails configuration loading
   instead of producing a misleading no-op run.
 
 `run-once` logs one process summary per worked file, one folder summary per folder,
@@ -700,7 +700,7 @@ with the bundled script (a manual/CI check, not a pytest; it spends nothing):
 
 ```bash
 scripts/docker-smoke.sh            # builds google-drive-video-stt:smoke, then runs doctor
-scripts/docker-smoke.sh my-image   # use an existing tag instead
+scripts/docker-smoke.sh my-image   # build and test the custom tag name
 ```
 
 Equivalently, by hand:

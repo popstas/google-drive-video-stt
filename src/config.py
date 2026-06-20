@@ -660,12 +660,12 @@ def _default_config_dict(
 ) -> dict:
     """Build a full default ``config.yml`` mapping for ``config init``/``link``.
 
-    The default preset chain is ``transcript -> keypoints`` with only ``keypoints``
-    enabled; every prompt_file uses ``/``-style relative paths so the generated YAML
-    is portable. ``prompt_dir`` (when given) is a ``/``-joined path the prompts were
-    copied to and that the prompt_file entries point at; otherwise the default
-    ``prompts/<name>.md`` layout is used. ``data_dir``/``output_*`` override the
-    matching fields.
+    The default preset chain is ``transcript-cleanup -> keypoints + action-items``
+    with all three presets enabled; every prompt_file uses ``/``-style relative
+    paths so the generated YAML is portable. ``prompt_dir`` (when given) is a
+    ``/``-joined path the prompts were copied to and that the prompt_file entries
+    point at; otherwise the default ``prompts/<name>.md`` layout is used.
+    ``data_dir``/``output_*`` override the matching fields.
     """
     def prompt_path(name: str) -> str:
         if prompt_dir:
@@ -867,8 +867,8 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
         # the prompt text stays owned by the .md assets; disabled built-ins (e.g.
-        # keypoints under OPENAI_KEYPOINTS=false) are still written with their
-        # prompt_file so the default chain is one edit away from re-enabled.
+        # keypoints disabled through the preset config are still written with their
+        # prompt_file so the default preset remains one edit away from re-enabled.
         "presets": _presets_to_yaml_dict(config),
     }
 
@@ -964,9 +964,10 @@ def init_config(
     the runtime reads: an explicit ``config_path`` wins; otherwise the active
     config is ``<GDSTT_HOME>/config.yml`` when ``GDSTT_HOME`` is set, falling back
     to ``./data/config.yml`` when it is unset. The default preset chain is
-    ``transcript -> keypoints`` with only ``keypoints`` enabled. Prompt assets are
-    always copied beside the config: into ``prompt_dir`` when given (and the
-    ``prompt_file`` entries point there), else into ``<config_dir>/prompts/``.
+    ``transcript-cleanup -> keypoints + action-items`` with all three presets
+    enabled. Prompt assets are always copied beside the config: into
+    ``prompt_dir`` when given (and the ``prompt_file`` entries point there), else
+    into ``<config_dir>/prompts/``.
     Refuses to overwrite a non-empty existing config unless ``force``.
     """
     if config_path is not None:

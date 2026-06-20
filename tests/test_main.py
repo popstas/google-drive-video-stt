@@ -32,8 +32,8 @@ def make_config(
     presets=None,
 ) -> Config:
     if presets is None:
-        # Mirror the env-migration default: the built-in keypoints pass is the only
-        # enabled preset when OPENAI_KEYPOINTS is on, and none otherwise.
+        # Mirror the legacy keypoints gate: the built-in keypoints pass is the only
+        # enabled preset when requested, and none otherwise.
         presets = BUILTIN_PRESETS if openai_keypoints else ()
     return Config(
         folder_ids=folder_ids if folder_ids is not None else ["folderA"],

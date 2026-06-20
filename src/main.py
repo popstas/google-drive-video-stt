@@ -305,9 +305,9 @@ def _needs_preset_reprocess(item: dict, config: Config, *, needs_txt: bool) -> b
 
 
 def _apply_local_output_state(items: list[dict], config: Config) -> list[dict]:
-    """Reflect local artifacts in sibling flags when OUTPUT_TARGET=folder.
+    """Reflect local artifacts in sibling flags when output.target=folder.
 
-    In folder mode the .txt is written to OUTPUT_DIR instead of as a Drive
+    In folder mode the .txt is written to output.dir instead of as a Drive
     sibling, so the Drive-derived ``has_txt`` flag never flips to True. Without
     this, the daemon would re-select the same source on every poll and re-run
     Deepgram (and OpenAI keypoints) indefinitely. Mark ``has_txt`` from the
@@ -921,7 +921,7 @@ def main(*, config_path: str | Path | None = None) -> None:
     )
     config = load_config(config_path=config_path)
     if not config.folder_ids:
-        logger.error("FOLDER_IDS is empty; set it in the environment to start polling")
+        logger.error("folder_ids is empty; configure it in config.yml to start polling")
         raise SystemExit(1)
 
     try:

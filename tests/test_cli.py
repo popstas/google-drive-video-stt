@@ -206,7 +206,7 @@ def test_doctor_uses_drive_only_config_and_skips_auth_by_default(
     out = capsys.readouterr().out
     assert "credentials.json: OK" in out
     assert "token.json: missing" in out
-    assert "FOLDER_IDS: 1 configured" in out
+    assert "folder_ids: 1 configured" in out
 
 
 def test_doctor_drive_check_lists_configured_folders(mocker, capsys, tmp_path):
@@ -233,7 +233,7 @@ def test_doctor_reports_stt_provider_without_pipeline_readiness(mocker, capsys, 
 
     build_mock.assert_not_called()
     out = capsys.readouterr().out
-    assert "STT_PROVIDER: deepgram" in out
+    assert "stt.provider: deepgram" in out
 
 
 def test_run_dispatch_validates_enables_then_calls_main(mocker):
@@ -256,6 +256,7 @@ def test_top_level_help_recommends_safe_operator_flow(capsys):
     out = _normalized_help(capsys.readouterr().out)
     assert "doctor -> list -> process <file-id> --dry-run -> process <file-id>" in out
     assert "run and folder-wide processing can spend STT credits across pending files" in out
+    assert "Manage gdstt configuration (active config.yml)" in out
 
 
 def test_run_help_warns_about_continuous_processing(capsys):

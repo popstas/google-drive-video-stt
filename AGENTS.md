@@ -71,8 +71,8 @@ The deployment is config-owned and persists everything in the mounted volume:
   fallback under `data_dir`. The generated `config.yml` is written `0600` on POSIX.
 - `scripts/docker-smoke.sh` is the manual/CI verification: it builds the image,
   initializes a clean `/app/data` volume via `gdstt config init`, runs `gdstt doctor`,
-  validates `run-once --dry-run`, and loads the packaged `keypoints` prompt inside
-  the container.
+  validates provider config, and loads the packaged `keypoints` prompt inside the
+  container.
 
 ## Architecture
 
@@ -99,7 +99,7 @@ it auto-detects file vs folder by `mimeType` (override with `is_folder`), then r
 without duplicating business logic.
 
 **`latest` command** (`src/cli.py` + `drive.find_newest_mp4`): resolves a folder
-(arg or first of `FOLDER_IDS`), finds the newest mp4 by `createdTime desc`, and
+(arg or first configured `folder_ids` entry), finds the newest mp4 by `createdTime desc`, and
 dispatches it through `process_target` (honoring `--dry-run`).
 
 **Post-processing** runs in `process_item` after `transcribe_file` and before the
@@ -123,9 +123,9 @@ independent branches still persist, then an aggregated error makes the file retr
 and re-run only the still-missing presets on a later cycle.
 
 **Output layer** (`src/output.py`): `write_artifact` writes each artifact either as
-a Drive sibling (`OUTPUT_TARGET=drive` — upload, or update an existing sibling in
+a Drive sibling (`output.target=drive` — upload, or update an existing sibling in
 place via `drive.update_file`, its id flowing through `list_folder_state`) or into a
-local `OUTPUT_DIR` (`OUTPUT_TARGET=folder`).
+local `output.dir` (`output.target=folder`).
 
 For deterministic, agent-driven speaker correction, `src/relabel_transcript.py`
 (and the `gdstt relabel` command) rewrite `Speaker N` labels from a `MAP.json`
@@ -141,7 +141,7 @@ folder and one cycle summary with provider, overall outcome, folder count,
 pending count, processed count, failed count, `retry_total`,
 skipped-by-size count, folder-error count, dry-run flag, and duration.
 
-**STT layer** (`src/stt/`): `get_provider(config)` dispatches on `STT_PROVIDER`,
+**STT layer** (`src/stt/`): `get_provider(config)` dispatches on `stt.provider`,
 which is Deepgram-only (`""`/`disabled` skips transcription). The base
 `STTProvider` exposes `transcribe_full()`; Deepgram does whole-file transcription
 and overrides it. `transcribe_file()` (`transcribe.py`) calls `transcribe_full` and
@@ -185,7 +185,7 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   auto-generation). Resolve a one-shot non-default file with `gdstt --config PATH ...`.
 - Enabled presets run after the transcript is produced and require `openai.api_key`;
   each writes a `<base><artifact_suffix>` document tagged `artifact_type=<name>`.
-  Having no enabled presets replaces the old `OPENAI_KEYPOINTS=false` gate.
+  Having no enabled presets replaces the old `openai.keypoints=false` gate.
 - `output.target` selects where artifacts land: `drive` (siblings) or `folder`
   (`output.dir`, required when `folder`).
 - Idempotency relies on `appProperties.source_video_id`, the per-artifact

@@ -139,15 +139,16 @@ def test_output_target_defaults_to_drive(tmp_path):
 
 
 def test_output_target_folder_with_output_dir(tmp_path):
+    output_dir = tmp_path / "transcripts"
     cfg = _load_config(
         tmp_path,
         {
             "stt": {"provider": "disabled"},
-            "output": {"target": "folder", "dir": "/var/lib/transcripts"},
+            "output": {"target": "folder", "dir": str(output_dir)},
         },
     )
     assert cfg.output_target == "folder"
-    assert cfg.output_dir == Path("/var/lib/transcripts")
+    assert cfg.output_dir == output_dir
 
 
 def test_parses_single_folder_id(tmp_path):
@@ -207,8 +208,9 @@ def test_blank_bitrate_uses_default(tmp_path):
 
 
 def test_custom_data_dir(tmp_path):
-    cfg = _load_config(tmp_path, {"data_dir": "/var/lib/stt", "stt": {"provider": "disabled"}})
-    assert cfg.data_dir == Path("/var/lib/stt")
+    data_dir = tmp_path / "stt"
+    cfg = _load_config(tmp_path, {"data_dir": str(data_dir), "stt": {"provider": "disabled"}})
+    assert cfg.data_dir == data_dir
 
 
 def test_blank_data_dir_uses_default(tmp_path):

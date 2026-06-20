@@ -28,7 +28,7 @@ def _cfg(provider="deepgram") -> Config:
 def test_transcribe_file_disabled_raises(tmp_path):
     mp3 = tmp_path / "a.mp3"
     mp3.write_bytes(b"x")
-    with pytest.raises(STTError, match="STT_PROVIDER"):
+    with pytest.raises(STTError, match="stt.provider"):
         transcribe_mod.transcribe_file(mp3, _cfg(provider=""))
 
 

@@ -27,7 +27,7 @@ def write_artifact(
 
     The two output targets have deliberately different overwrite semantics:
 
-    * ``OUTPUT_TARGET=folder`` keys each artifact by its *sanitized current
+    * ``output.target=folder`` keys each artifact by its *sanitized current
       stem*: the file is written to
       ``<output_dir>/<safe_local_name(base_name)><suffix>`` (creating
       ``output_dir`` if missing). Re-running with the same source name
@@ -37,7 +37,7 @@ def write_artifact(
       a new local file and leaves the old one orphaned (the previous stem is not
       tracked locally, so the stale file is not removed).
 
-    * ``OUTPUT_TARGET=drive`` writes the text to a temp file under ``tmp_dir``
+    * ``output.target=drive`` writes the text to a temp file under ``tmp_dir``
       and uploads it as a sibling in ``folder_id``. When ``existing_id`` is
       given, the existing Drive file's content is overwritten in place (no
       duplicate is created), which keeps the artifact correct across renames.
@@ -70,7 +70,7 @@ def _write_to_folder(base_name: str, suffix: str, text: str, config: Config) -> 
     """
     output_dir = config.output_dir
     if output_dir is None:
-        raise ValueError("OUTPUT_DIR is required when OUTPUT_TARGET=folder")
+        raise ValueError("output.dir is required when output.target=folder")
     output_dir.mkdir(parents=True, exist_ok=True)
     # Drive names may contain "/" (and other Windows-unsafe chars); sanitize so the
     # local filename stays valid and the path remains inside output_dir.

@@ -10,6 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILL_ID = "gdstt-cli"
 AGENTS_PATH = REPO_ROOT / "AGENTS.md"
 CLAUDE_PATH = REPO_ROOT / "CLAUDE.md"
+README_PATH = REPO_ROOT / "README.md"
 CANONICAL_SKILL_ROOT = REPO_ROOT / "skills" / SKILL_ID
 SKILL_PATH = CANONICAL_SKILL_ROOT / "SKILL.md"
 
@@ -170,6 +171,8 @@ def test_skill_documents_config_yml_and_preset_dag():
     # Preset DAG vocabulary the operator needs to author/inspect presets.
     assert "depends_on" in text
     assert "artifact_type" in text
+    assert "transcript-cleanup -> keypoints + action-items" in text
+    assert "transcript -> keypoints" not in text
 
 
 def test_skill_documents_config_owned_posture():
@@ -207,6 +210,29 @@ def test_agents_doc_documents_config_yml_and_preset_dag():
     assert "artifact_type" in text
     # The GDSTT_HOME directory bootstrap is the breaking change operators must know.
     assert "GDSTT_HOME" in text
+
+
+def test_docs_describe_config_keys_not_env_runtime_defaults():
+    readme = README_PATH.read_text(encoding="utf-8")
+    skill = SKILL_PATH.read_text(encoding="utf-8")
+    agents = AGENTS_PATH.read_text(encoding="utf-8")
+    combined = "\n".join([readme, skill, agents])
+
+    assert "data_dir: ." in readme
+    assert "data_dir: data" not in readme
+    assert "| `data_dir` | `.` |" in readme
+    assert "Manage gdstt configuration (data/config.yml)" not in combined
+    assert "scripts/docker-smoke.sh my-image   # use an existing tag instead" not in readme
+    assert "validates `run-once --dry-run`" not in agents
+
+    for stale in (
+        "`FOLDER_IDS`",
+        "`STT_PROVIDER`",
+        "`OUTPUT_TARGET`",
+        "`OUTPUT_DIR`",
+        "`OPENAI_KEYPOINTS`",
+    ):
+        assert stale not in readme
 
 
 def test_agents_doc_exists_with_source_of_truth_pointer():
