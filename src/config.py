@@ -4,8 +4,8 @@ import json
 import logging
 import os
 import re
-import sys
 from dataclasses import dataclass, replace
+from importlib.resources import files
 from pathlib import Path
 
 import yaml
@@ -20,25 +20,17 @@ from src.presets import (
     validate_dag,
 )
 
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    load_dotenv = None
-
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE_NAME = "config.yml"
-# Subdirectory (relative to a config file) where ``config init``/``link`` and
-# auto-migration copy the packaged prompt assets and where generated configs point
-# their ``prompt_file`` entries by default.
+# Subdirectory (relative to a config file) where ``config init`` copies the packaged
+# prompt assets and where generated configs point their ``prompt_file`` entries by
+# default.
 PROMPTS_DIR_NAME = "prompts"
-CONFIG_PATH_ENV_VAR = "GDSTT_CONFIG"
-DATA_DIR_ENV_VAR = "DATA_DIR"
-APP_DIR_NAME = "gdstt"
-# Keys a forwarding pointer file may carry alongside ``config_file``. A pointer is
-# meant to do one thing — redirect to the real config — so any runtime key (e.g.
-# ``folder_ids`` or ``stt``) appearing next to ``config_file`` is rejected.
-POINTER_KEY = "config_file"
+# Persistent bootstrap knob: ``GDSTT_HOME`` names the instance directory whose
+# ``config.yml`` is the active config. When unset, the default home is ``./data``.
+CONFIG_HOME_ENV_VAR = "GDSTT_HOME"
+DEFAULT_CONFIG_HOME = Path("data")
 
 SUPPORTED_STT_PROVIDERS = ("", "deepgram")
 OUTPUT_TARGETS = ("drive", "folder")
@@ -46,8 +38,8 @@ DEEPGRAM_DIARIZE_MODELS = ("latest", "v1")
 DEEPGRAM_AUDIO_SOURCES = ("m4a_copy", "mp3_96k", "mp3_192k")
 DEEPGRAM_TXT_FORMATTERS = ("word_speaker", "utterance")
 DEEPGRAM_DEFAULT_KEYTERMS_FILE = Path("config/deepgram-keyterms.txt")
+DEEPGRAM_KEYTERMS_ASSET = "deepgram-keyterms.txt"
 DEEPGRAM_MAX_KEYTERMS = 100
-CHECKOUT_ROOT = Path(__file__).resolve().parent.parent
 
 
 @dataclass(frozen=True)
@@ -80,6 +72,11 @@ class Config:
     deepgram_keyterms_enabled: bool = True
     deepgram_keyterms_file: Path = DEEPGRAM_DEFAULT_KEYTERMS_FILE
     deepgram_keyterms: tuple[str, ...] = ()
+    # Telegram error-notification credentials are config-owned (no env reads). When
+    # either is blank, ``notify_error`` skips sending. See ``notifications.telegram``
+    # in the generated config.yml.
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
     presets: tuple[Preset, ...] = ()
     # Google OAuth is config-owned and inline-first. ``google_credentials``/
     # ``google_token`` hold inline mappings (the OAuth client JSON and the saved
@@ -199,25 +196,6 @@ def _validate_unique_artifact_suffixes(presets: object) -> None:
         seen[preset.artifact_suffix] = preset.name
 
 
-def _dotenv_path() -> Path:
-    cwd_path = Path(".env")
-    if cwd_path.exists():
-        return cwd_path
-    checkout_path = CHECKOUT_ROOT / ".env"
-    return checkout_path if checkout_path.exists() else cwd_path
-
-
-def _resolve_relative_to_dotenv(raw: str, dotenv_path: Path) -> Path:
-    path = Path(raw)
-    if path.is_absolute() or dotenv_path == Path(".env"):
-        return path
-    return dotenv_path.parent / path
-
-
-def resolve_config_path(raw: str) -> Path:
-    return _resolve_relative_to_dotenv(raw, _dotenv_path())
-
-
 def _load_deepgram_api_key(api_key: str, api_key_file: str) -> str:
     api_key = api_key.strip()
     if api_key:
@@ -309,214 +287,6 @@ def _load_deepgram_keyterms(enabled: bool, keyterms_file: Path) -> tuple[str, ..
     return keyterms
 
 
-def _config_from_env(*, validate_providers: bool = True) -> Config:
-    """Build a Config from `.env`/environment variables (auto-migration source)."""
-    dotenv_path = _dotenv_path()
-    if load_dotenv is not None:
-        load_dotenv(dotenv_path=dotenv_path, override=False, encoding="utf-8-sig")
-    folder_ids_raw = os.environ.get("FOLDER_IDS", "")
-    folder_ids = _parse_folder_ids(folder_ids_raw)
-    if folder_ids_raw and not folder_ids:
-        raise ValueError(
-            "FOLDER_IDS was set but does not contain any non-empty folder ids"
-        )
-
-    poll_raw = os.environ.get("POLL_INTERVAL", "600").strip() or "600"
-    try:
-        poll_interval = int(poll_raw)
-    except ValueError as exc:
-        raise ValueError(f"POLL_INTERVAL must be an integer, got: {poll_raw!r}") from exc
-    if poll_interval <= 0:
-        raise ValueError(f"POLL_INTERVAL must be positive, got: {poll_interval}")
-
-    bitrate = os.environ.get("BITRATE", "96k").strip() or "96k"
-    data_dir = _resolve_relative_to_dotenv(
-        os.environ.get("DATA_DIR", "data").strip() or "data",
-        dotenv_path,
-    )
-    proxy_url = os.environ.get("PROXY_URL", "").strip()
-
-    stt_provider_raw = os.environ.get("STT_PROVIDER")
-    if stt_provider_raw is None:
-        stt_provider = "deepgram"
-    else:
-        stt_provider = stt_provider_raw.strip().lower()
-    if stt_provider == "disabled":
-        stt_provider = ""
-    if stt_provider not in SUPPORTED_STT_PROVIDERS:
-        raise ValueError(
-            f"STT_PROVIDER must be one of {SUPPORTED_STT_PROVIDERS!r}, got: {stt_provider!r}"
-        )
-    openai_api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    deepgram_api_key = ""
-    deepgram_model = "nova-3"
-    deepgram_diarize_model = "latest"
-    deepgram_audio_source = "m4a_copy"
-    deepgram_txt_formatter = "word_speaker"
-    deepgram_keyterms_enabled = True
-    deepgram_keyterms_file = DEEPGRAM_DEFAULT_KEYTERMS_FILE
-    deepgram_keyterms: tuple[str, ...] = ()
-    # Parse Deepgram settings whenever the provider is selected so auto-migration
-    # and `config migrate` serialize them faithfully into config.yml. Gating the
-    # parse on validate_providers (as before) made a validate_providers=False load
-    # — e.g. `gdstt doctor` / `gdstt config migrate` — persist empty/default
-    # Deepgram values, after which the next processing run failed from the
-    # migrated YAML. Validation (raising on missing/invalid values) stays gated on
-    # validate_providers below; for inspection-only loads (`gdstt auth`,
-    # `gdstt list`) a bad file or flag falls back to the default rather than
-    # blocking the command.
-    if stt_provider == "deepgram":
-        deepgram_model = os.environ.get("DEEPGRAM_MODEL", "nova-3").strip() or "nova-3"
-        deepgram_diarize_model = (
-            os.environ.get("DEEPGRAM_DIARIZE_MODEL", "latest").strip().lower()
-            or "latest"
-        )
-        deepgram_audio_source = (
-            os.environ.get("DEEPGRAM_AUDIO_SOURCE", "m4a_copy").strip().lower()
-            or "m4a_copy"
-        )
-        deepgram_txt_formatter = (
-            os.environ.get("DEEPGRAM_TXT_FORMATTER", "word_speaker").strip().lower()
-            or "word_speaker"
-        )
-        try:
-            deepgram_keyterms_enabled = _parse_bool(
-                os.environ.get("DEEPGRAM_KEYTERMS_ENABLED", ""),
-                default=True,
-            )
-        except ValueError:
-            if validate_providers:
-                raise
-            deepgram_keyterms_enabled = True
-        deepgram_keyterms_file = _resolve_relative_to_dotenv(
-            os.environ.get("DEEPGRAM_KEYTERMS_FILE", str(DEEPGRAM_DEFAULT_KEYTERMS_FILE))
-            .strip()
-            or str(DEEPGRAM_DEFAULT_KEYTERMS_FILE),
-            dotenv_path,
-        )
-        deepgram_api_key_file = os.environ.get("DEEPGRAM_API_KEY_FILE", "").strip()
-        try:
-            deepgram_api_key = _load_deepgram_api_key(
-                os.environ.get("DEEPGRAM_API_KEY", ""),
-                (
-                    str(_resolve_relative_to_dotenv(deepgram_api_key_file, dotenv_path))
-                    if deepgram_api_key_file
-                    else ""
-                ),
-            )
-        except ValueError:
-            if validate_providers:
-                raise
-            deepgram_api_key = ""
-    stt_language = os.environ.get("STT_LANGUAGE", "").strip()
-    if stt_provider == "deepgram" and not stt_language:
-        stt_language = "ru"
-
-    stt_postprocess = _parse_bool(
-        os.environ.get("STT_POSTPROCESS", ""), default=True
-    )
-    drive_mp3_artifact_raw = os.environ.get("DRIVE_MP3_ARTIFACT", "")
-    drive_mp3_artifact_default = not (
-        stt_provider == "deepgram" and deepgram_audio_source == "m4a_copy"
-    )
-    drive_mp3_artifact = _parse_bool(
-        drive_mp3_artifact_raw, default=drive_mp3_artifact_default
-    )
-
-    openai_model = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini").strip() or "gpt-5.4-mini"
-    openai_keypoints = _parse_bool(
-        os.environ.get("OPENAI_KEYPOINTS", ""), default=False
-    )
-    openai_batch = _parse_bool(os.environ.get("OPENAI_BATCH", ""), default=False)
-    openai_batch_wait = _parse_bool(
-        os.environ.get("OPENAI_BATCH_WAIT", ""), default=True
-    )
-    run_enabled = _parse_bool(os.environ.get("RUN_ENABLED", ""), default=True)
-    openai_max_parallel = _parse_max_parallel(
-        os.environ.get("OPENAI_MAX_PARALLEL", ""), default=4
-    )
-    # Env config has no presets map; the built-in keypoints pass is gated by the
-    # legacy OPENAI_KEYPOINTS flag so the migrated YAML stays behavior-compatible.
-    presets = _resolve_presets({"keypoints": {"enabled": openai_keypoints}}, None)
-
-    output_target = (
-        os.environ.get("OUTPUT_TARGET", "drive").strip().lower() or "drive"
-    )
-    if output_target not in OUTPUT_TARGETS:
-        raise ValueError(
-            f"OUTPUT_TARGET must be one of {OUTPUT_TARGETS!r}, got: {output_target!r}"
-        )
-    output_dir_raw = os.environ.get("OUTPUT_DIR", "").strip()
-    output_dir = (
-        _resolve_relative_to_dotenv(output_dir_raw, dotenv_path)
-        if output_dir_raw
-        else None
-    )
-    if output_target == "folder" and output_dir is None:
-        raise ValueError("OUTPUT_DIR is required when OUTPUT_TARGET=folder")
-
-    # Provider-secret validation is skipped for commands that only need Drive/
-    # data-dir settings (e.g. `gdstt auth`, `gdstt list`), so an unconfigured STT
-    # provider can't block bootstrap/inspection commands.
-    if validate_providers:
-        if presets and not openai_api_key:
-            raise ValueError("OPENAI_API_KEY is required when any OpenAI preset is enabled")
-        if stt_provider == "deepgram":
-            if not deepgram_api_key:
-                raise ValueError(
-                    "DEEPGRAM_API_KEY is required when STT_PROVIDER=deepgram. "
-                    "Add DEEPGRAM_API_KEY to your .env."
-                )
-            if deepgram_diarize_model not in DEEPGRAM_DIARIZE_MODELS:
-                raise ValueError(
-                    f"DEEPGRAM_DIARIZE_MODEL must be one of {DEEPGRAM_DIARIZE_MODELS!r}, "
-                    f"got: {deepgram_diarize_model!r}"
-                )
-            if deepgram_audio_source not in DEEPGRAM_AUDIO_SOURCES:
-                raise ValueError(
-                    f"DEEPGRAM_AUDIO_SOURCE must be one of {DEEPGRAM_AUDIO_SOURCES!r}, "
-                    f"got: {deepgram_audio_source!r}"
-                )
-            if deepgram_txt_formatter not in DEEPGRAM_TXT_FORMATTERS:
-                raise ValueError(
-                    f"DEEPGRAM_TXT_FORMATTER must be one of {DEEPGRAM_TXT_FORMATTERS!r}, "
-                    f"got: {deepgram_txt_formatter!r}"
-                )
-            deepgram_keyterms = _load_deepgram_keyterms(
-                deepgram_keyterms_enabled,
-                deepgram_keyterms_file,
-            )
-
-    return Config(
-        folder_ids=folder_ids,
-        poll_interval=poll_interval,
-        bitrate=bitrate,
-        data_dir=data_dir,
-        proxy_url=proxy_url,
-        stt_provider=stt_provider,
-        openai_api_key=openai_api_key,
-        deepgram_api_key=deepgram_api_key,
-        stt_language=stt_language,
-        stt_postprocess=stt_postprocess,
-        drive_mp3_artifact=drive_mp3_artifact,
-        run_enabled=run_enabled,
-        output_target=output_target,
-        output_dir=output_dir,
-        openai_keypoints=openai_keypoints,
-        openai_model=openai_model,
-        openai_batch=openai_batch,
-        openai_batch_wait=openai_batch_wait,
-        openai_max_parallel=openai_max_parallel,
-        deepgram_model=deepgram_model,
-        deepgram_diarize_model=deepgram_diarize_model,
-        deepgram_audio_source=deepgram_audio_source,
-        deepgram_txt_formatter=deepgram_txt_formatter,
-        deepgram_keyterms_enabled=deepgram_keyterms_enabled,
-        deepgram_keyterms_file=deepgram_keyterms_file,
-        deepgram_keyterms=deepgram_keyterms,
-        presets=presets,
-    )
-
 
 def _resolve_relative_to(raw: str, base: Path) -> Path:
     path = Path(raw)
@@ -566,124 +336,29 @@ def _resolve_google_auth(
     return credentials, token, credentials_file, token_file
 
 
-def _user_config_path() -> Path:
-    """Return the OS-specific per-user config path for a global install.
-
-    * Windows: ``%APPDATA%/gdstt/config.yml`` (falling back to
-      ``~/AppData/Roaming`` when ``%APPDATA%`` is unset).
-    * macOS: ``~/Library/Application Support/gdstt/config.yml``.
-    * Linux/other: ``${XDG_CONFIG_HOME:-~/.config}/gdstt/config.yml``.
-
-    Pure and testable by monkeypatching ``sys.platform`` and the relevant
-    environment variables; ``~`` is always expanded.
-    """
-    if sys.platform == "win32":
-        appdata = os.environ.get("APPDATA", "").strip()
-        base = Path(appdata) if appdata else Path("~/AppData/Roaming")
-    elif sys.platform == "darwin":
-        base = Path("~/Library/Application Support")
-    else:
-        xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
-        base = Path(xdg) if xdg else Path("~/.config")
-    return (base / APP_DIR_NAME / CONFIG_FILE_NAME).expanduser()
+def _expand_config_home(raw: str) -> Path:
+    expanded = os.path.expanduser(os.path.expandvars(raw.strip()))
+    return Path(expanded)
 
 
 def _resolve_config_file_path(config_path: str | Path | None = None) -> Path:
-    """Resolve the bootstrap config.yml path (before any pointer is followed).
+    """Resolve the active ``config.yml`` path from the directory-home model.
 
-    Priority: explicit ``--config`` arg > ``GDSTT_CONFIG`` env > ``<DATA_DIR>/
-    config.yml`` *only when* ``DATA_DIR`` is explicitly set > the per-user config
-    path (:func:`_user_config_path`). The current working directory's ``./data``
-    is no longer auto-selected: a global install must opt in via ``DATA_DIR`` or
-    ``GDSTT_CONFIG``.
+    Priority: an explicit ``--config`` file override wins; otherwise the active
+    config is ``<GDSTT_HOME>/config.yml`` when ``GDSTT_HOME`` is set (with ``~`` and
+    ``$VAR`` expansion), falling back to ``./data/config.yml`` when it is unset. No
+    ``.env`` is read and no OS-default user path is consulted.
     """
     if config_path:
         return Path(config_path)
-    env_path = os.environ.get(CONFIG_PATH_ENV_VAR, "").strip()
-    if env_path:
-        return Path(env_path)
-    data_dir_raw = os.environ.get(DATA_DIR_ENV_VAR)
-    if data_dir_raw is not None and data_dir_raw.strip():
-        data_dir = _resolve_relative_to_dotenv(data_dir_raw.strip(), _dotenv_path())
-        return data_dir / CONFIG_FILE_NAME
-    return _user_config_path()
-
-
-def _read_pointer_target(path: Path) -> str | None:
-    """Return the ``config_file`` target if ``path`` is a forwarding pointer.
-
-    A pointer file is a mapping whose *only* key is ``config_file``. If the file
-    is missing, empty, or not such a pointer, ``None`` is returned and the file is
-    treated as a normal config. A file that carries ``config_file`` alongside any
-    other key is rejected with ``ValueError``.
-    """
-    if not path.exists():
-        return None
-    text = _read_config_text(path)
-    if not text.strip():
-        return None
-    raw = _parse_config_yaml(text)
-    if not isinstance(raw, dict) or POINTER_KEY not in raw:
-        return None
-    extra = sorted(key for key in raw if key != POINTER_KEY)
-    if extra:
-        raise ValueError(
-            f"pointer config {path} may only contain {POINTER_KEY!r}; "
-            f"found extra keys: {', '.join(map(str, extra))}"
-        )
-    target = raw[POINTER_KEY]
-    if not isinstance(target, str) or not target.strip():
-        raise ValueError(
-            f"pointer config {path} {POINTER_KEY!r} must be a non-empty path string"
-        )
-    return target.strip()
-
-
-def _resolve_pointer_target(target: str, pointer_dir: Path) -> Path:
-    """Expand ``~``/``$VAR`` in a pointer target and anchor it to the pointer dir."""
-    expanded = os.path.expanduser(os.path.expandvars(target))
-    path = Path(expanded)
-    if not path.is_absolute():
-        path = pointer_dir / path
-    return path
-
-
-def resolve_effective_config_path(
-    config_path: str | Path | None = None,
-) -> tuple[Path, Path]:
-    """Resolve (bootstrap_path, effective_path), following forwarding pointers.
-
-    ``bootstrap_path`` is where lookup starts (CLI flag/env/DATA_DIR/user path).
-    A config file may instead contain only ``config_file: <path>``; the resolver
-    follows that chain (relative paths anchored to the pointer's directory, with
-    ``~``/``$VAR`` expansion) until it reaches a non-pointer file, which becomes
-    ``effective_path``. Pointer loops (including self-reference) are rejected.
-    """
-    bootstrap = _resolve_config_file_path(config_path)
-    effective = bootstrap
-    seen: list[Path] = []
-    while True:
-        try:
-            resolved_key = effective.resolve()
-        except OSError:
-            resolved_key = effective
-        if resolved_key in seen:
-            chain = " -> ".join(str(p) for p in [*seen, resolved_key])
-            raise ValueError(f"pointer config loop detected: {chain}")
-        seen.append(resolved_key)
-        target = _read_pointer_target(effective)
-        if target is None:
-            return bootstrap, effective
-        effective = _resolve_pointer_target(target, effective.parent)
+    home_raw = os.environ.get(CONFIG_HOME_ENV_VAR, "").strip()
+    home = _expand_config_home(home_raw) if home_raw else DEFAULT_CONFIG_HOME
+    return home / CONFIG_FILE_NAME
 
 
 def resolve_config_file_path(config_path: str | Path | None = None) -> Path:
-    """Public resolver for the effective config.yml path (CLI flag/env/user path).
-
-    Follows forwarding pointers so callers like the CLI's ``doctor`` report the
-    real file ``load_config`` reads, not an intermediate pointer.
-    """
-    return resolve_effective_config_path(config_path)[1]
+    """Public resolver for the active ``config.yml`` path (``--config`` or home)."""
+    return _resolve_config_file_path(config_path)
 
 
 def _as_mapping(value: object, label: str) -> dict:
@@ -724,9 +399,14 @@ def _config_from_yaml(
     openai = _as_mapping(raw.get("openai"), "openai")
     google = _as_mapping(raw.get("google"), "google")
     run = _as_mapping(raw.get("run"), "run")
+    notifications = _as_mapping(raw.get("notifications"), "notifications")
+    telegram = _as_mapping(notifications.get("telegram"), "notifications.telegram")
     config_presets = _as_mapping(raw.get("presets"), "presets")
 
     run_enabled = _yaml_bool(run.get("enabled"), default=True)
+
+    telegram_bot_token = _yaml_str(telegram.get("bot_token"))
+    telegram_chat_id = _yaml_str(telegram.get("chat_id"))
 
     (
         google_credentials,
@@ -753,7 +433,7 @@ def _config_from_yaml(
 
     bitrate = _yaml_str(raw.get("bitrate"), "96k") or "96k"
     data_dir = _resolve_relative_to(
-        _yaml_str(raw.get("data_dir"), "data") or "data", base
+        _yaml_str(raw.get("data_dir"), ".") or ".", base
     )
     proxy_url = _yaml_str(raw.get("proxy_url"))
 
@@ -879,6 +559,8 @@ def _config_from_yaml(
         deepgram_keyterms_enabled=deepgram_keyterms_enabled,
         deepgram_keyterms_file=deepgram_keyterms_file,
         deepgram_keyterms=deepgram_keyterms,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
         presets=presets,
         google_credentials=google_credentials,
         google_token=google_token,
@@ -1014,7 +696,7 @@ def _default_config_dict(
         "folder_ids": [],
         "poll_interval": 600,
         "bitrate": "96k",
-        "data_dir": data_dir or "data",
+        "data_dir": data_dir or ".",
         "proxy_url": "",
         "output": {
             "target": (output_target or "drive"),
@@ -1031,7 +713,7 @@ def _default_config_dict(
                 "audio_source": "m4a_copy",
                 "txt_formatter": "word_speaker",
                 "keyterms_enabled": True,
-                "keyterms_file": str(DEEPGRAM_DEFAULT_KEYTERMS_FILE),
+                "keyterms_file": DEEPGRAM_DEFAULT_KEYTERMS_FILE.as_posix(),
             },
         },
         "openai": {
@@ -1041,6 +723,12 @@ def _default_config_dict(
             "max_parallel": 4,
         },
         "run": {"enabled": True},
+        "notifications": {
+            "telegram": {
+                "bot_token": "",
+                "chat_id": "",
+            },
+        },
         # Google auth is inline-first and config-owned. The generated config ships an
         # empty block (no *_file pointers) so the data_dir fallback applies until the
         # operator runs `gdstt auth import-credentials` / `auth use-files`.
@@ -1066,6 +754,35 @@ def copy_prompt_assets(target_dir: Path, *, overwrite: bool = False) -> list[Pat
         dest.write_text(load_packaged_prompt(name), encoding="utf-8")
         written.append(dest)
     return written
+
+
+def load_packaged_keyterms() -> str:
+    """Read the packaged default Deepgram keyterms file."""
+    try:
+        text = (
+            files("src.assets")
+            .joinpath(DEEPGRAM_KEYTERMS_ASSET)
+            .read_text(encoding="utf-8-sig")
+        )
+    except (FileNotFoundError, ModuleNotFoundError) as exc:
+        raise ValueError(
+            f"packaged Deepgram keyterms asset {DEEPGRAM_KEYTERMS_ASSET!r} is missing"
+        ) from exc
+    if not text.strip():
+        raise ValueError(
+            f"packaged Deepgram keyterms asset {DEEPGRAM_KEYTERMS_ASSET!r} is empty"
+        )
+    return text
+
+
+def copy_deepgram_keyterms_asset(config_dir: Path, *, overwrite: bool = False) -> Path:
+    """Copy the packaged Deepgram keyterms file beside a generated config."""
+    dest = config_dir / DEEPGRAM_DEFAULT_KEYTERMS_FILE
+    if dest.exists() and not overwrite:
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(load_packaged_keyterms(), encoding="utf-8")
+    return dest
 
 
 def _google_to_yaml_dict(config: Config, config_file: Path | None) -> dict:
@@ -1141,6 +858,12 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "keypoints": config.openai_keypoints,
         },
         "run": {"enabled": config.run_enabled},
+        "notifications": {
+            "telegram": {
+                "bot_token": config.telegram_bot_token,
+                "chat_id": config.telegram_chat_id,
+            },
+        },
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
         # the prompt text stays owned by the .md assets; disabled built-ins (e.g.
@@ -1152,6 +875,13 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
 
 def _dump_yaml(data: dict) -> str:
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+
+
+def _missing_config_error(path: Path, *, empty: bool = False) -> ValueError:
+    state = "empty" if empty else "missing"
+    return ValueError(
+        f"{path} is {state}; run `gdstt config init` to create a config.yml."
+    )
 
 
 def _write_config_text(path: Path, text: str) -> None:
@@ -1190,63 +920,25 @@ def load_config(
     validate_providers: bool = True,
     config_path: str | Path | None = None,
 ) -> Config:
-    """Load configuration from `data/config.yml`, auto-migrating from `.env` once.
+    """Load configuration from the active ``config.yml``.
 
-    When the resolved config file is missing or empty, build the configuration from
-    the existing `.env`/environment, persist it as YAML for future runs, and return
-    the in-memory values. Otherwise read settings solely from the YAML file.
-
-    Forwarding pointers (a file containing only ``config_file: <path>``) are
-    followed so the effective target file is what gets read and written.
+    The active file is ``<GDSTT_HOME>/config.yml`` (or ``./data/config.yml`` when
+    ``GDSTT_HOME`` is unset), unless ``config_path`` overrides it. There is no
+    ``.env`` reading and no implicit config generation: a missing or empty file is a
+    clear setup error pointing the operator at ``gdstt config init``.
     """
-    resolved = resolve_effective_config_path(config_path)[1]
-    text = _read_config_text(resolved) if resolved.exists() else ""
-    if text.strip():
-        raw = _parse_config_yaml(text)
-        if not isinstance(raw, dict):
-            raise ValueError(
-                f"{resolved} must contain a YAML mapping, got: {type(raw).__name__}"
-            )
-        return _config_from_yaml(raw, resolved, validate_providers=validate_providers)
-
-    # Auto-migration: build from env, persist best-effort, then use in-memory values.
-    config = _config_from_env(validate_providers=validate_providers)
-    try:
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        _write_config_text(resolved, _dump_yaml(_config_to_yaml_dict(config, resolved)))
-        copy_prompt_assets(resolved.parent / PROMPTS_DIR_NAME)
-        logger.info("Migrated configuration from environment to %s", resolved)
-    except OSError as exc:
-        logger.warning("Could not write migrated config file %s: %s", resolved, exc)
-    return config
-
-
-def migrate_config(
-    *,
-    force: bool = False,
-    config_path: str | Path | None = None,
-) -> Path:
-    """Write `data/config.yml` from the current `.env`/environment.
-
-    Raises if the target already exists and ``force`` is False. Validation of
-    provider secrets is skipped so migration works for inspection-only setups.
-    Forwarding pointers are followed so migration writes the effective target.
-    """
-    resolved = resolve_effective_config_path(config_path)[1]
-    if resolved.exists() and _read_config_text(resolved).strip() and not force:
+    resolved = _resolve_config_file_path(config_path)
+    if not resolved.exists():
+        raise _missing_config_error(resolved)
+    text = _read_config_text(resolved)
+    if not text.strip():
+        raise _missing_config_error(resolved, empty=True)
+    raw = _parse_config_yaml(text)
+    if not isinstance(raw, dict):
         raise ValueError(
-            f"{resolved} already exists; pass --force to overwrite it."
+            f"{resolved} must contain a YAML mapping, got: {type(raw).__name__}"
         )
-    config = _config_from_env(validate_providers=False)
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    _write_config_text(resolved, _dump_yaml(_config_to_yaml_dict(config, resolved)))
-    copy_prompt_assets(resolved.parent / PROMPTS_DIR_NAME)
-    return resolved
-
-
-def _local_config_path() -> Path:
-    """Return ``./data/config.yml`` under the current working directory."""
-    return Path("data") / CONFIG_FILE_NAME
+    return _config_from_yaml(raw, resolved, validate_providers=validate_providers)
 
 
 def _rel_posix(path: Path, base: Path) -> str:
@@ -1261,7 +953,6 @@ def _rel_posix(path: Path, base: Path) -> str:
 def init_config(
     *,
     config_path: str | Path | None = None,
-    local: bool = False,
     data_dir: str | Path | None = None,
     output_dir: str | Path | None = None,
     prompt_dir: str | Path | None = None,
@@ -1269,27 +960,18 @@ def init_config(
 ) -> Path:
     """Create a fresh full ``config.yml`` from the packaged defaults.
 
-    Target selection: explicit ``config_path`` wins; ``local`` writes
-    ``./data/config.yml`` in the cwd; otherwise the runtime resolver picks the
-    target (``GDSTT_CONFIG`` > ``<DATA_DIR>/config.yml`` when ``DATA_DIR`` is set >
-    the cross-platform user config path) so init writes where the runtime reads.
-    The default preset chain is ``transcript -> keypoints`` with only
-    ``keypoints`` enabled. Prompt assets are always copied beside the config: into
-    ``prompt_dir`` when given (and the ``prompt_file`` entries point there), else into
-    ``<config_dir>/prompts/``. Refuses to overwrite a non-empty existing config unless
-    ``force``.
+    Target selection uses the same resolver as the runtime so init writes where
+    the runtime reads: an explicit ``config_path`` wins; otherwise the active
+    config is ``<GDSTT_HOME>/config.yml`` when ``GDSTT_HOME`` is set, falling back
+    to ``./data/config.yml`` when it is unset. The default preset chain is
+    ``transcript -> keypoints`` with only ``keypoints`` enabled. Prompt assets are
+    always copied beside the config: into ``prompt_dir`` when given (and the
+    ``prompt_file`` entries point there), else into ``<config_dir>/prompts/``.
+    Refuses to overwrite a non-empty existing config unless ``force``.
     """
     if config_path is not None:
         target = Path(config_path)
-    elif local:
-        target = _local_config_path()
     else:
-        # Match the runtime resolver's bootstrap target so init writes where the
-        # runtime reads: GDSTT_CONFIG > DATA_DIR/config.yml (when DATA_DIR set) >
-        # user path. Use the bootstrap resolver, not the public pointer-following
-        # one: `init` creates a fresh config at that location and must not silently
-        # dereference an existing forwarding pointer (keeps GDSTT_CONFIG/user-path
-        # targeting exactly as before, only adding DATA_DIR awareness).
         target = _resolve_config_file_path()
 
     if target.exists() and _read_config_text(target).strip() and not force:
@@ -1310,6 +992,7 @@ def init_config(
         prompt_rel = None
 
     copy_prompt_assets(prompts_target)
+    copy_deepgram_keyterms_asset(config_dir)
 
     data_dir_value = (
         _rel_posix(Path(data_dir), config_dir) if data_dir is not None else None
@@ -1330,66 +1013,6 @@ def init_config(
     return target
 
 
-def link_config(
-    target_dir: str | Path,
-    *,
-    copy_prompts: bool = False,
-    force: bool = False,
-    config_path: str | Path | None = None,
-) -> Path:
-    """Move/create the effective full config into ``target_dir/config.yml``.
-
-    Resolves the current bootstrap and effective config. If a full config already
-    lives at the bootstrap path (the OS-default or ``--config``/``GDSTT_CONFIG``
-    target), its settings are moved into ``target_dir/config.yml`` and the bootstrap
-    is replaced with a forwarding pointer (``config_file: <target>``). If no full
-    config exists yet, a fresh one is created from the packaged defaults. Refuses to
-    overwrite an existing ``target_dir/config.yml`` unless ``force``. ``copy_prompts``
-    copies the packaged prompt assets into ``target_dir/prompts/`` when missing.
-    """
-    dest_dir = Path(target_dir)
-    dest = dest_dir / CONFIG_FILE_NAME
-
-    bootstrap, effective = resolve_effective_config_path(config_path)
-
-    if dest.exists() and _read_config_text(dest).strip() and not force:
-        raise ValueError(
-            f"{dest} already exists; pass --force to overwrite it."
-        )
-
-    dest_dir.mkdir(parents=True, exist_ok=True)
-
-    effective_text = _read_config_text(effective) if effective.exists() else ""
-    if effective_text.strip():
-        # Move the existing full config's settings into the destination.
-        _write_config_text(dest, effective_text)
-        if effective.resolve() != dest.resolve():
-            # Replace the source with a pointer to the destination so the OS-default
-            # path keeps resolving to the moved config.
-            pointer_target = _rel_posix(dest, effective.parent)
-            effective.parent.mkdir(parents=True, exist_ok=True)
-            effective.write_text(
-                _dump_yaml({POINTER_KEY: pointer_target}), encoding="utf-8"
-            )
-    else:
-        # No full config yet: create one from defaults at the destination.
-        prompts_target = dest_dir / PROMPTS_DIR_NAME
-        copy_prompt_assets(prompts_target)
-        _write_config_text(dest, _dump_yaml(_default_config_dict()))
-        # Point the bootstrap path at the new destination unless it is the same file.
-        if bootstrap.resolve() != dest.resolve():
-            pointer_target = _rel_posix(dest, bootstrap.parent)
-            bootstrap.parent.mkdir(parents=True, exist_ok=True)
-            bootstrap.write_text(
-                _dump_yaml({POINTER_KEY: pointer_target}), encoding="utf-8"
-            )
-
-    if copy_prompts:
-        copy_prompt_assets(dest_dir / PROMPTS_DIR_NAME)
-
-    return dest
-
-
 # --- config get / set / unset -----------------------------------------------
 
 # Secret-bearing keys are masked when the whole config is dumped via ``config get``
@@ -1399,11 +1022,12 @@ MASKED_KEY_PATHS: tuple[tuple[str, ...], ...] = (
     ("stt", "deepgram", "api_key"),
     ("google", "client_secret"),
     ("google", "refresh_token"),
+    ("notifications", "telegram", "bot_token"),
 )
 # Leaf key names whose values are masked wherever they appear (covers nested
 # credentials/token blocks copied verbatim into the YAML).
 MASKED_LEAF_KEYS: frozenset[str] = frozenset(
-    {"client_secret", "refresh_token", "token", "access_token", "api_key"}
+    {"client_secret", "refresh_token", "token", "access_token", "api_key", "bot_token"}
 )
 MASK = "***"
 
@@ -1411,13 +1035,16 @@ MASK = "***"
 def _load_effective_yaml_dict(config_path: str | Path | None = None) -> tuple[Path, dict]:
     """Return the (effective_path, parsed-mapping) for the active config file.
 
-    Follows forwarding pointers so reads/writes land on the real config, never a
-    pointer. An empty or missing file yields an empty mapping.
+    Config mutation requires an existing, non-empty config: a missing or empty file
+    raises the same setup error as :func:`load_config`, pointing the operator at
+    ``gdstt config init`` rather than silently materializing an empty mapping.
     """
-    effective = resolve_effective_config_path(config_path)[1]
-    text = _read_config_text(effective) if effective.exists() else ""
+    effective = _resolve_config_file_path(config_path)
+    if not effective.exists():
+        raise _missing_config_error(effective)
+    text = _read_config_text(effective)
     if not text.strip():
-        return effective, {}
+        raise _missing_config_error(effective, empty=True)
     raw = _parse_config_yaml(text)
     if not isinstance(raw, dict):
         raise ValueError(
@@ -1714,20 +1341,23 @@ def use_google_files(
     inline ``google.credentials``/``google.token`` mappings so the file pointers are
     the single source. ``token_file`` defaults to ``<credentials parent>/token.json``.
     """
+    effective, data = _load_effective_yaml_dict(config_path)
     creds_path = Path(credentials_file)
+    if not creds_path.is_absolute():
+        creds_path = Path.cwd() / creds_path
     if token_file is None:
         token_path = creds_path.parent / "token.json"
     else:
         token_path = Path(token_file)
-
-    effective, data = _load_effective_yaml_dict(config_path)
+        if not token_path.is_absolute():
+            token_path = Path.cwd() / token_path
     google = data.setdefault("google", {})
     if not isinstance(google, dict):
         google = {}
         data["google"] = google
     google.pop("credentials", None)
     google.pop("token", None)
-    google["credentials_file"] = str(creds_path)
-    google["token_file"] = str(token_path)
+    google["credentials_file"] = _relpath_for_config(creds_path, effective)
+    google["token_file"] = _relpath_for_config(token_path, effective)
     _atomic_write_validated(effective, data, config_path=config_path)
     return effective

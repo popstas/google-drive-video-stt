@@ -2,8 +2,8 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.5.0
-last_updated: 2026-06-09
+version: 2.5.2
+last_updated: 2026-06-20
 ---
 
 # gdstt CLI
@@ -158,45 +158,43 @@ STT), `1..N`=пресеты в порядке цепочки (тратит OpenA
 
 ### `doctor [--drive]`
 
-Показать путь к `config.yml`, `DATA_DIR`, наличие credentials/token, источник Google-auth
-(без секретов), `FOLDER_IDS`, `STT_PROVIDER` и DAG пресетов с номерами стадий для
+Показать путь к `config.yml`, наличие credentials/token, источник Google-auth
+(без секретов), число folder-id, STT-провайдера и DAG пресетов с номерами стадий для
 `reprocess` (0=транскрипт, 1..N=пресеты). `--drive` ещё проверяет папки.
 
-### `config migrate [--force]`
+### `config init [--force]`
 
-Управление конфигом. Активный `config.yml` один; путь печатает `config path`.
-OS-дефолт (без `--config`/`GDSTT_CONFIG`/`DATA_DIR`): Linux
-`${XDG_CONFIG_HOME:-~/.config}/gdstt/config.yml`, macOS `~/Library/Application
-Support/gdstt/...`, Windows `%APPDATA%\gdstt\...`; рядом `<config_dir>/prompts/` с
-ассетами. Цель без флагов = как рантайм: `--config`/`GDSTT_CONFIG` >
-`<DATA_DIR>/config.yml` (если задан; важно под Docker) > OS-дефолт.
+Управление конфигом. Активный `config.yml` один: `<GDSTT_HOME>/config.yml`, а если
+`GDSTT_HOME` не задан - `./data/config.yml`. Никаких OS-дефолтных путей, dotenv,
+миграции и авто-генерации: отсутствующий или пустой файл - явная ошибка настройки,
+указывающая на `gdstt config init`. `--config PATH` - разовый файловый override
+(тесты/диагностика), не сохраняется. Путь печатает `config path`.
+
+Приоритет резолвера:
+
+```text
+--config PATH                 # разовый override
+GDSTT_HOME/config.yml         # директория инстанса
+./data/config.yml             # дефолт, когда GDSTT_HOME не задан
+```
 
 Подкоманды `config`:
 
-- `config migrate [--force]` - сгенерировать активный `config.yml` из
-  `.env`/окружения (с `presets`). Авто-мигрируется при первом запуске, если файл
-  отсутствует/пуст; это явная регенерация.
-- `config init [--local] [--data-dir DIR] [--output-dir DIR] [--prompt-dir DIR]
-  [--force]` - свежий полный конфиг из дефолтов: вся цепочка `transcript-cleanup ->
-  keypoints + action-items` включена, `openai.batch: true`, + копия промптов рядом.
-  `--local` -> `./data/config.yml`; `--output-dir` -> `output.target=folder`+`dir`;
-  `--prompt-dir` копирует промпты туда и направляет `prompt_file`.
-- `config path` - путь к активному конфигу без валидации секретов; при указателе
-  (`config_file:`) печатает обе точки (bootstrap и effective).
-- `config link DIR [--copy-prompts] [--force]` - перенести/создать полный конфиг
-  в `DIR/config.yml`, а на OS-дефолтном пути оставить указатель
-  `config_file: <DIR/config.yml>`. Нет полного конфига - создаёт из дефолтов.
-  `--copy-prompts` копирует промпты в `DIR/prompts/`.
+- `config init [--data-dir DIR] [--output-dir DIR] [--prompt-dir DIR] [--force]` -
+  свежий полный конфиг: цепочка `transcript-cleanup -> keypoints + action-items`,
+  `openai.batch: true`, промпты и `config/deepgram-keyterms.txt` рядом под
+  `<GDSTT_HOME>`. `--output-dir` -> folder; `--prompt-dir` -> промпты туда.
+- `config path` - путь к активному конфигу без валидации секретов.
 - `config get [KEY] [--show-secrets]` / `config set KEY VALUE` / `config unset KEY` -
   прочитать (секреты замаскированы, `--show-secrets` их раскрывает), записать+провалидировать или удалить точечный ключ.
 
-**Двухслойная shared-folder раскладка.** Общий `config.yml` + `prompts/` - в общей
-папке, а на каждой машине OS-дефолтный путь несёт лишь указатель
-`config_file: <общий config.yml>` (делается через `gdstt config link <папка>
---copy-prompts`; загрузчик идёт по цепочке указателей). Секреты (`openai.api_key`,
-`stt.deepgram.api_key`, inline `google.token`/`credentials`) в общем конфиге не
-храни. Артефакты в свою папку - `output.dir`+`output.target=folder`; конфиг/промпты
-- через `--config`, `GDSTT_CONFIG`, `config init --prompt-dir`.
+**Несколько инстансов.** Дай каждому свою директорию и укажи на неё `GDSTT_HOME`
+(`export GDSTT_HOME=/srv/gdstt-a`); весь инстанс - `config.yml`, `prompts/`,
+`config/deepgram-keyterms.txt`, credentials/token - лежит под одним home. Секреты
+(`openai.api_key`, `stt.deepgram.api_key`, inline `google.token`/`credentials`) в
+синхронизируемом/общем home не храни. Артефакты в свою папку -
+`output.dir`+`output.target=folder`; конфиг/промпты - через `--config` или
+`config init --prompt-dir`.
 
 ## Рабочий процесс Keypoints (агент)
 
@@ -384,6 +382,7 @@ presets:
   Сначала `--dry-run`; номера стадий бери из `gdstt doctor`.
 - У `run` нет превью-режима — используй после контролируемых проверок. Пауза -
   `gdstt stop` (sticky, переживает рестарт), возобновление - `gdstt start`/`gdstt run`.
+- Docker config-only (`GDSTT_HOME=/app/data`, том `./data:/app/data`): сначала `mkdir -p data`, потом `docker compose run --rm google-drive-video-stt gdstt config init --force`, затем заполни `./data/config.yml` и `docker compose up -d --build`.
 - Пустые транскрипты падают намеренно; никогда не принимай пустой TXT за успех.
 - Никогда не печатай API-ключи, OAuth-токены, `credentials.json`, `token.json`.
 

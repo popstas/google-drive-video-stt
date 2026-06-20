@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import re
 import sys
 from pathlib import Path
@@ -13,17 +12,13 @@ from src import auth, drive
 from src import main as main_module
 from src import preset_pipeline, relabel_transcript
 from src.config import (
-    CONFIG_PATH_ENV_VAR,
     config_get,
     config_set,
     config_unset,
     import_google_credentials,
     init_config,
-    link_config,
     load_config,
-    migrate_config,
     resolve_config_file_path,
-    resolve_effective_config_path,
     set_run_enabled,
     use_google_files,
 )
@@ -144,7 +139,7 @@ def _configure_console_encoding(
 
 
 def cmd_auth(args: argparse.Namespace) -> None:
-    config = load_config(validate_providers=False)
+    config = load_config(validate_providers=False, config_path=args.config)
     config.data_dir.mkdir(parents=True, exist_ok=True)
     auth.run_interactive_flow(
         config=config,
@@ -156,7 +151,7 @@ def cmd_auth(args: argparse.Namespace) -> None:
 
 def cmd_auth_import_credentials(args: argparse.Namespace) -> None:
     try:
-        path = import_google_credentials(args.path)
+        path = import_google_credentials(args.path, config_path=args.config)
     except ValueError as exc:
         logger.error("%s", exc)
         raise SystemExit(1) from exc
@@ -168,6 +163,7 @@ def cmd_auth_use_files(args: argparse.Namespace) -> None:
         path = use_google_files(
             args.credentials_file,
             token_file=args.token_file,
+            config_path=args.config,
         )
     except ValueError as exc:
         logger.error("%s", exc)
@@ -176,20 +172,18 @@ def cmd_auth_use_files(args: argparse.Namespace) -> None:
 
 
 def cmd_run(args: argparse.Namespace) -> None:
-    # Migrate `.env` -> config.yml first (when the config is missing/empty) so a
-    # fresh deploy is not clobbered: `set_run_enabled` writes the effective config,
-    # and on an empty file that would persist a minimal `{run: {enabled: true}}` and
-    # skip the env migration, losing FOLDER_IDS/provider settings.
-    load_config()
+    # Validate the config before enabling so a broken/missing config.yml fails fast
+    # with the `gdstt config init` setup error instead of starting a doomed loop.
+    load_config(config_path=args.config)
     # Explicitly resume: clear any sticky `gdstt stop` flag so an operator's
     # `gdstt run` always starts the polling loop.
-    set_run_enabled(True)
-    main_module.main()
+    set_run_enabled(True, config_path=args.config)
+    main_module.main(config_path=args.config)
 
 
 def cmd_start(args: argparse.Namespace) -> None:
     try:
-        path = set_run_enabled(True)
+        path = set_run_enabled(True, config_path=args.config)
     except ValueError as exc:
         logger.error("%s", exc)
         raise SystemExit(1) from exc
@@ -200,7 +194,7 @@ def cmd_start(args: argparse.Namespace) -> None:
 
 
 def cmd_run_once(args: argparse.Namespace) -> None:
-    config = load_config()
+    config = load_config(config_path=args.config)
     service = auth.build_drive_service(config=config)
     main_module.run_once(
         service,
@@ -212,7 +206,7 @@ def cmd_run_once(args: argparse.Namespace) -> None:
 
 
 def cmd_process(args: argparse.Namespace) -> None:
-    config = load_config()
+    config = load_config(config_path=args.config)
     service = auth.build_drive_service(config=config)
     is_folder = True if args.folder else None
     telemetry = main_module.process_target(
@@ -229,7 +223,7 @@ def cmd_process(args: argparse.Namespace) -> None:
 
 
 def cmd_latest(args: argparse.Namespace) -> None:
-    config = load_config()
+    config = load_config(config_path=args.config)
     folder_id = args.folder or (config.folder_ids[0] if config.folder_ids else None)
     if not folder_id:
         logger.error("No folder to inspect; set FOLDER_IDS or pass --folder")
@@ -328,7 +322,7 @@ def _parse_stage_spec(spec: str | None, stage_names: list[str]) -> tuple[bool, l
 
 
 def cmd_reprocess(args: argparse.Namespace) -> None:
-    config = load_config()
+    config = load_config(config_path=args.config)
     stage_names = _stage_names(config)
     try:
         reprocess_txt, preset_names = _parse_stage_spec(args.stages, stage_names)
@@ -361,7 +355,7 @@ def cmd_reprocess(args: argparse.Namespace) -> None:
 
 def cmd_stop(args: argparse.Namespace) -> None:
     try:
-        path = set_run_enabled(False)
+        path = set_run_enabled(False, config_path=args.config)
     except ValueError as exc:
         logger.error("%s", exc)
         raise SystemExit(1) from exc
@@ -395,9 +389,9 @@ def _describe_google_token(config) -> str:
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
-    config_path = resolve_config_file_path()
+    config_path = resolve_config_file_path(args.config)
     try:
-        config = load_config(validate_providers=False)
+        config = load_config(validate_providers=False, config_path=args.config)
     except ValueError as exc:
         # doctor is the command an operator runs to diagnose a broken config, so a
         # config error (e.g. an unresolvable preset prompt_file) must be reported as
@@ -409,7 +403,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     token_path = config.data_dir / "token.json"
 
     print(f"config: {config_path} ({'OK' if config_path.exists() else 'missing'})")
-    print(f"DATA_DIR: {config.data_dir}")
+    print(f"data dir: {config.data_dir}")
     print(f"credentials.json: {'OK' if credentials_path.exists() else 'missing'}")
     print(f"token.json: {'OK' if token_path.exists() else 'missing'}")
     # Report the Google auth source without ever printing secrets (client_secret /
@@ -431,19 +425,10 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         print(f"Folder {folder_id}: OK, {len(items)} mp4 file(s)")
 
 
-def cmd_config_migrate(args: argparse.Namespace) -> None:
-    try:
-        path = migrate_config(force=args.force)
-    except ValueError as exc:
-        logger.error("%s", exc)
-        raise SystemExit(1) from exc
-    print(f"Wrote configuration to {path}")
-
-
 def cmd_config_init(args: argparse.Namespace) -> None:
     try:
         path = init_config(
-            local=args.local,
+            config_path=args.config,
             data_dir=args.data_dir,
             output_dir=args.output_dir,
             prompt_dir=args.prompt_dir,
@@ -457,31 +442,15 @@ def cmd_config_init(args: argparse.Namespace) -> None:
 
 def cmd_config_path(args: argparse.Namespace) -> None:
     # Resolve the path without building a validated Config so this never requires
-    # Drive/Deepgram/OpenAI secrets. When a pointer is active, report both ends.
-    bootstrap, effective = resolve_effective_config_path()
-    if bootstrap.resolve() != effective.resolve():
-        print(f"bootstrap: {bootstrap}")
-        print(f"effective: {effective}")
-    else:
-        print(str(effective))
-
-
-def cmd_config_link(args: argparse.Namespace) -> None:
-    try:
-        path = link_config(
-            args.dir,
-            copy_prompts=args.copy_prompts,
-            force=args.force,
-        )
-    except ValueError as exc:
-        logger.error("%s", exc)
-        raise SystemExit(1) from exc
-    print(f"Linked configuration to {path}")
+    # Drive/Deepgram/OpenAI secrets.
+    print(str(resolve_config_file_path(args.config)))
 
 
 def cmd_config_get(args: argparse.Namespace) -> None:
     try:
-        output = config_get(args.key, show_secrets=args.show_secrets)
+        output = config_get(
+            args.key, config_path=args.config, show_secrets=args.show_secrets
+        )
     except ValueError as exc:
         logger.error("%s", exc)
         raise SystemExit(1) from exc
@@ -490,7 +459,7 @@ def cmd_config_get(args: argparse.Namespace) -> None:
 
 def cmd_config_set(args: argparse.Namespace) -> None:
     try:
-        path = config_set(args.key, args.value)
+        path = config_set(args.key, args.value, config_path=args.config)
     except ValueError as exc:
         logger.error("%s", exc)
         raise SystemExit(1) from exc
@@ -499,7 +468,7 @@ def cmd_config_set(args: argparse.Namespace) -> None:
 
 def cmd_config_unset(args: argparse.Namespace) -> None:
     try:
-        path = config_unset(args.key)
+        path = config_unset(args.key, config_path=args.config)
     except ValueError as exc:
         logger.error("%s", exc)
         raise SystemExit(1) from exc
@@ -507,7 +476,7 @@ def cmd_config_unset(args: argparse.Namespace) -> None:
 
 
 def cmd_speakers_set(args: argparse.Namespace) -> None:
-    config = load_config(validate_providers=False)
+    config = load_config(validate_providers=False, config_path=args.config)
     service = auth.build_drive_service(config=config)
     names = json.dumps(args.names, ensure_ascii=False)
     drive.set_file_app_properties(
@@ -519,7 +488,7 @@ def cmd_speakers_set(args: argparse.Namespace) -> None:
 
 
 def cmd_transcribe(args: argparse.Namespace) -> None:
-    config = load_config()
+    config = load_config(config_path=args.config)
     audio_path = Path(args.audio)
     if not audio_path.is_file():
         logger.error("Audio file not found: %s", audio_path)
@@ -546,7 +515,7 @@ def cmd_relabel(args: argparse.Namespace) -> None:
 
 
 def cmd_list(args: argparse.Namespace) -> None:
-    config = load_config(validate_providers=False)
+    config = load_config(validate_providers=False, config_path=args.config)
     folder_ids = [args.folder] if args.folder else config.folder_ids
     if not folder_ids:
         logger.error("No folders to inspect; set FOLDER_IDS or pass --folder")
@@ -610,8 +579,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help=(
-            "Path to config.yml (overrides the GDSTT_CONFIG env var and the default "
-            "<data_dir>/config.yml). Must appear before the subcommand."
+            "One-shot path to a config.yml, overriding GDSTT_HOME/config.yml (or the "
+            "default ./data/config.yml). Not persisted. Must appear before the subcommand."
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -807,25 +776,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Manage gdstt configuration (data/config.yml)",
     )
     config_sub = p_config.add_subparsers(dest="config_command", required=True)
-    p_config_migrate = config_sub.add_parser(
-        "migrate",
-        help="Generate data/config.yml from the current .env/environment",
-    )
-    p_config_migrate.add_argument(
-        "--force",
-        action="store_true",
-        help="Overwrite an existing config.yml",
-    )
-    p_config_migrate.set_defaults(func=cmd_config_migrate)
 
     p_config_init = config_sub.add_parser(
         "init",
         help="Create a fresh config.yml with default presets and prompt assets",
-    )
-    p_config_init.add_argument(
-        "--local",
-        action="store_true",
-        help="Write ./data/config.yml in the current directory instead of the user path",
     )
     p_config_init.add_argument(
         "--data-dir",
@@ -857,23 +811,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the resolved config.yml path without requiring provider secrets",
     )
     p_config_path.set_defaults(func=cmd_config_path)
-
-    p_config_link = config_sub.add_parser(
-        "link",
-        help="Move the effective config to DIR/config.yml and leave a pointer behind",
-    )
-    p_config_link.add_argument("dir", help="Directory to hold the full config.yml")
-    p_config_link.add_argument(
-        "--copy-prompts",
-        action="store_true",
-        help="Copy prompt assets into DIR/prompts/ if missing",
-    )
-    p_config_link.add_argument(
-        "--force",
-        action="store_true",
-        help="Overwrite an existing DIR/config.yml",
-    )
-    p_config_link.set_defaults(func=cmd_config_link)
 
     p_config_get = config_sub.add_parser(
         "get",
@@ -1007,11 +944,10 @@ def main(argv: list[str] | None = None) -> None:
         argv = sys.argv[1:]
     argv = _rewrite_auth_subcommand(list(argv))
     args = parser.parse_args(argv)
-    # --config is a bootstrap pointer to config.yml, not an application setting;
-    # surface it through the same GDSTT_CONFIG env var load_config already resolves
-    # so every command honors it without threading config_path through each call.
-    if getattr(args, "config", None):
-        os.environ[CONFIG_PATH_ENV_VAR] = args.config
+    # --config is a one-shot file override threaded explicitly into each command's
+    # config calls (config_path=args.config). It is deliberately not routed through
+    # an env var so the resolver stays the single source of truth and the CLI never
+    # mutates global process state.
     args.func(args)
 
 

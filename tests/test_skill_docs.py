@@ -165,8 +165,8 @@ def test_skill_documents_config_yml_and_preset_dag():
     text = SKILL_PATH.read_text(encoding="utf-8")
 
     assert "config.yml" in text
-    assert "config migrate" in text
-    assert "GDSTT_CONFIG" in text
+    assert "config init" in text
+    assert "GDSTT_HOME" in text
     # Preset DAG vocabulary the operator needs to author/inspect presets.
     assert "depends_on" in text
     assert "artifact_type" in text
@@ -184,7 +184,6 @@ def test_skill_documents_config_owned_posture():
     for needle in (
         "config init",
         "config path",
-        "config link",
         "config get",
         "config set",
         "config unset",
@@ -192,7 +191,7 @@ def test_skill_documents_config_owned_posture():
         "auth use-files",
         "google.credentials",
         "google.token_file",
-        "config_file",
+        "GDSTT_HOME",
     ):
         assert needle in text, f"skill must document {needle!r}"
     # Batch is cheaper/slower, not higher quality; batch_wait default; per-stage.
@@ -206,8 +205,8 @@ def test_agents_doc_documents_config_yml_and_preset_dag():
     assert "data/config.yml" in text
     assert "preset" in text.lower()
     assert "artifact_type" in text
-    # The .env -> YAML auto-migration is the breaking-change operators must know.
-    assert "auto-migrat" in text.lower()
+    # The GDSTT_HOME directory bootstrap is the breaking change operators must know.
+    assert "GDSTT_HOME" in text
 
 
 def test_agents_doc_exists_with_source_of_truth_pointer():

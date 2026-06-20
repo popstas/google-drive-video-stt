@@ -25,8 +25,8 @@ from pathlib import Path
 _PACKAGED_PROMPTS_PACKAGE = "src.assets.prompts"
 _SRC_PROMPTS_DIR = Path(__file__).resolve().parent / "assets" / "prompts"
 
-# Prompt assets shipped with the package. ``config init``/``config link`` and
-# auto-migration copy these beside a generated config so the default chain
+# Prompt assets shipped with the package. ``config init`` copies these beside a
+# generated config so the default chain
 # (transcript -> keypoints) works out of the box and extra presets are one edit
 # away. Keep ``keypoints.md`` first: it is the only preset enabled by default.
 PACKAGED_PROMPT_ASSETS: tuple[str, ...] = (

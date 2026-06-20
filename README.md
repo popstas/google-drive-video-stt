@@ -33,8 +33,8 @@ speech-to-text pipelines.
 
 - Python 3.11+ and [`uv`](https://github.com/astral-sh/uv) for local development
 - `ffmpeg` available on `PATH` for local runs (already included in the Docker image)
-- Google Cloud project with the Drive API enabled and OAuth client metadata in
-  `data/credentials.json`
+- Google Cloud project with the Drive API enabled and OAuth client metadata
+  imported into `config.yml` or supplied in file mode
 - A Deepgram API key for transcription (`stt.provider: deepgram`)
 - Optional: an OpenAI API key when any OpenAI preset is enabled (e.g. `keypoints`)
 - Optional: a Telegram bot token + chat ID for error notifications
@@ -56,7 +56,7 @@ For development in this checkout, install the editable environment too:
 uv sync --extra dev
 ```
 
-Configuration lives in a single `config.yml`. For a fresh global install, generate
+Configuration lives in a single `config.yml`. For a fresh install, generate
 one from the packaged defaults — the full chain `transcript-cleanup -> keypoints +
 action-items` is enabled out of the box with `openai.batch: true`:
 
@@ -65,35 +65,35 @@ gdstt config init      # writes config.yml + prompts/ to the resolved target (se
 gdstt config path      # print the resolved config.yml path
 ```
 
-`config init` (and `config link`/auto-migration) writes to an OS-specific per-user
-location unless you pass `--config`/`GDSTT_CONFIG` or set `DATA_DIR`:
+The active config is always `<GDSTT_HOME>/config.yml`. When `GDSTT_HOME` is unset
+the home defaults to `./data`, so a repo or VPS checkout uses `./data/config.yml`
+with no hidden OS config paths:
 
-| OS | Default `config.yml` |
-| --- | --- |
-| Linux | `${XDG_CONFIG_HOME:-~/.config}/gdstt/config.yml` |
-| macOS | `~/Library/Application Support/gdstt/config.yml` |
-| Windows | `%APPDATA%\gdstt\config.yml` |
+```text
+--config PATH                 # one-shot file override (tests/diagnostics, not persisted)
+GDSTT_HOME/config.yml         # persistent instance directory
+./data/config.yml             # default when GDSTT_HOME is unset
+```
+
+Point at a custom instance directory by exporting `GDSTT_HOME`:
+
+```bash
+export GDSTT_HOME=/srv/gdstt
+gdstt config init --force     # writes /srv/gdstt/config.yml
+```
 
 The packaged prompt assets (`keypoints.md`, `transcript-cleanup.md`,
-`action-items.md`) are copied into `<config_dir>/prompts/` beside the config, and
+`action-items.md`) are copied into `<GDSTT_HOME>/prompts/` beside the config, and
 each preset's `prompt_file` points at them. There is no hidden runtime prompt in
 Python — the prompt text is owned by these `.md` files.
 
-Alternatively, migrate from an existing `.env`:
+There is no auto-generation and no migration: a missing or empty config is a clear
+setup error that points you at `gdstt config init`. Author `config.yml` by hand
+(see [Configuration](#configuration)) or generate it, then fill in your keys. Pass
+`gdstt --config PATH ...` for a one-shot override against a specific file.
 
-```bash
-cp .env.example .env
-# Set at least FOLDER_IDS, DEEPGRAM_API_KEY, and (if used) OUTPUT_DIR / OPENAI_API_KEY
-gdstt config migrate   # writes config.yml from .env; first run also does this
-```
-
-`.env` is only read during this one-time migration; afterwards every command reads
-`config.yml` exclusively. You can also author `config.yml` by hand (see
-[Configuration](#configuration)). Point at a non-default file with
-`gdstt --config PATH ...` or the `GDSTT_CONFIG` env var.
-
-After `data/credentials.json` is in place (see below), authenticate once and
-verify access with the safe operator flow:
+After Google credentials are imported inline (or file mode is configured; see
+below), authenticate once and verify access with the safe operator flow:
 
 ```bash
 gdstt auth
@@ -209,17 +209,18 @@ Invoke-RestMethod `
   -Body $body
 ```
 
-Copy the returned `id` into `.env` as `FOLDER_IDS=<folder-id>`. For an existing
-Drive folder, the folder id is the last path segment in the browser URL:
+Copy the returned `id` into `config.yml` as `folder_ids: [<folder-id>]` (or use
+`gdstt config set folder_ids <folder-id>`). For an existing Drive folder, the
+folder id is the last path segment in the browser URL:
 `https://drive.google.com/drive/folders/<folder-id>`.
 
 ## Configuration
 
-All configuration lives in `data/config.yml`. It is grouped under `output`, `stt`
-(with a nested `deepgram` block), and `openai`, plus a top-level `presets` map. On
-first run (or via `gdstt config migrate`) the file is auto-generated from the
-`.env`/environment described by the table below; afterwards `.env` is no longer
-read. Resolve a non-default file with `gdstt --config PATH ...` or `GDSTT_CONFIG`.
+All configuration lives in the active `config.yml` (`<GDSTT_HOME>/config.yml`, or
+`./data/config.yml` when `GDSTT_HOME` is unset). It is grouped under `output`, `stt`
+(with a nested `deepgram` block), and `openai`, plus a top-level `presets` map.
+There is no auto-generation: create the file with `gdstt config init` (or by hand),
+then edit it. Resolve a one-shot non-default file with `gdstt --config PATH ...`.
 
 ```yaml
 folder_ids: [abc, def]
@@ -227,6 +228,12 @@ poll_interval: 600
 bitrate: 96k
 data_dir: data
 proxy_url: ""
+run:
+  enabled: true          # gdstt stop/start toggle this; persists across restarts
+notifications:
+  telegram:
+    bot_token: ""        # optional; errors are posted only when both are set
+    chat_id: ""
 output:
   target: drive          # drive | folder
   dir: null              # required when target=folder
@@ -263,19 +270,20 @@ presets:
 
 Presets define the OpenAI post-processing DAG (see
 [Preset DAG](#preset-dag-keypoints-and-beyond)). A preset's prompt comes from
-`instructions` (inline) **or** `prompt_file`; supplying neither is an error. The
-env-var names below are still recognized by the one-time migration and map onto
-these YAML keys:
+`instructions` (inline) **or** `prompt_file`; supplying neither is an error. Each
+setting below maps to a `config.yml` key; the names are the historical
+environment-variable labels, kept here as a quick reference for what each value
+controls (they are no longer read at runtime):
 
-| Variable | Default | Purpose |
+| Setting | Default | Purpose |
 | --- | --- | --- |
 | `FOLDER_IDS` | (required) | Comma-separated Google Drive folder IDs to monitor |
 | `POLL_INTERVAL` | `600` | Seconds between poll cycles |
 | `BITRATE` | `96k` | MP3 audio bitrate passed to ffmpeg |
 | `DRIVE_MP3_ARTIFACT` | auto | Upload an MP3 artifact to Drive. Defaults to `false` for `DEEPGRAM_AUDIO_SOURCE=m4a_copy`; `true` otherwise |
-| `TELEGRAM_BOT_TOKEN` | (empty) | If set with chat ID, errors are posted to Telegram |
-| `TELEGRAM_CHAT_ID` | (empty) | Telegram chat to receive error notifications |
-| `DATA_DIR` | `data` | Directory holding `credentials.json` and `token.json` |
+| `notifications.telegram.bot_token` | (empty) | Read at runtime from `config.yml`. If set with chat ID, errors are posted to Telegram |
+| `notifications.telegram.chat_id` | (empty) | Read at runtime from `config.yml`. Telegram chat to receive error notifications |
+| `data_dir` | `data` | Base directory for credentials/token files and other instance state (config.yml key `data_dir`) |
 | `PROXY_URL` | (empty) | Optional `http`/`https`/`socks5` proxy for Telegram, Deepgram, and OpenAI |
 | `STT_PROVIDER` | `deepgram` | `deepgram` by default. Set `disabled` (or empty) to skip transcription and only manage MP3 artifacts |
 | `STT_LANGUAGE` | (empty) | Language hint. `deepgram`: empty defaults to `ru` |
@@ -315,8 +323,8 @@ client dependency.
 Setup:
 
 1. Create a Deepgram API key.
-2. Set `STT_PROVIDER=deepgram` and either `DEEPGRAM_API_KEY` or
-   `DEEPGRAM_API_KEY_FILE` in `.env`.
+2. Set `stt.provider: deepgram` and either `stt.deepgram.api_key` or
+   `stt.deepgram.api_key_file` in `config.yml`.
 
 `DEEPGRAM_API_KEY_FILE` may contain either the raw token or JSON with one of these
 fields: `api_key`, `deepgram_api_key`, or `DEEPGRAM_API_KEY`. The API key is never
@@ -465,8 +473,9 @@ The process loops forever, sleeping `POLL_INTERVAL` seconds between cycles.
 
 `uv sync` installs a `gdstt` console script that wraps every operation
 (equivalently `uv run python -m src.cli`). All commands read configuration from
-`data/config.yml` via `load_config()` (auto-migrated from `.env` on first run);
-pass `gdstt --config PATH ...` or set `GDSTT_CONFIG` to use a non-default file.
+`<GDSTT_HOME>/config.yml` (default `./data/config.yml`) via `load_config()`; the
+config must already exist (`gdstt config init`). Pass `gdstt --config PATH ...` for
+a one-shot override against a non-default file.
 
 Safe operator flow: `gdstt doctor` -> `gdstt list` -> `gdstt process <file-id> --dry-run`
 -> `gdstt process <file-id>`. Move to `run-once` or continuous `run` only after
@@ -488,14 +497,12 @@ gdstt speakers set <file-id> "Alice" "Bob"   # store explicit speaker names on a
 gdstt transcribe <audio> [-o out.txt]   # STT-only on a local file; prints to stdout by default
 gdstt relabel --in SRC --out OUT --map MAP.json [--no-header]   # deterministic local speaker relabeling
 gdstt list [--folder ID]   # show sibling mp3/txt state without doing work (alias: status)
-gdstt config init [--local] [--data-dir DIR] [--output-dir DIR] [--prompt-dir DIR] [--force]   # fresh config.yml + prompts/ from packaged defaults
-gdstt config migrate [--force]   # (re)write config.yml from the current .env/environment
+gdstt config init [--data-dir DIR] [--output-dir DIR] [--prompt-dir DIR] [--force]   # fresh config.yml + prompts/ from packaged defaults
 gdstt config path           # print the resolved config.yml path (no secrets required)
-gdstt config link DIR [--copy-prompts] [--force]   # move config into DIR and leave a pointer behind
 gdstt config get [KEY] [--show-secrets]   # print the config/KEY with secrets masked (or revealed)
 gdstt config set KEY VALUE  # set a dotted KEY and validate
 gdstt config unset KEY      # remove an optional dotted KEY
-gdstt --config PATH <command>    # use a non-default config.yml (or set GDSTT_CONFIG)
+gdstt --config PATH <command>    # one-shot override against a non-default config.yml
 ```
 
 `process` auto-detects whether the ID is a file or a folder; pass `--folder` to
@@ -554,8 +561,8 @@ and processing does **not** auto-resume. Resume explicitly with `gdstt start` (o
 same-speaker turns, preserves each utterance's words (whitespace is normalized),
 and reports unmapped labels on stderr. It touches no Drive and spends nothing.
 
-Use `doctor` first when setting up a new agent or machine: it reports `DATA_DIR`,
-credentials/token presence, the `FOLDER_IDS` count, and `STT_PROVIDER` without
+Use `doctor` first when setting up a new agent or machine: it reports the resolved
+config path, credentials/token presence, the folder-id count, and STT provider without
 validating provider secrets. Add `--drive` only when you want it to authenticate
 and list the configured folders. Use `--dry-run` on `run-once`, `latest`, or folder
 `process` to preview pending work without downloads, uploads, or STT calls.
@@ -571,29 +578,23 @@ only after the single-file or `run-once --dry-run` path already matches expectat
 
 There is always exactly one active `config.yml`; `gdstt config path` prints where
 it is. `config init` creates one from the packaged defaults and copies the prompt
-assets into `<config_dir>/prompts/`. With no `--config`/`--local`, init resolves its
-target the same way the runtime reads it — `GDSTT_CONFIG` > `<DATA_DIR>/config.yml`
-(when `DATA_DIR` is set) > the OS-default path — so it writes exactly where the
-runtime will look (relevant under Docker, where the image bakes `DATA_DIR=/app/data`).
+assets into `<GDSTT_HOME>/prompts/`. With no `--config`, init resolves its target
+the same way the runtime reads it — `<GDSTT_HOME>/config.yml`, or `./data/config.yml`
+when `GDSTT_HOME` is unset — so it writes exactly where the runtime will look
+(relevant under Docker, where the image bakes `GDSTT_HOME=/app/data`).
 `config get`/`set`/`unset` read (with secrets masked) or edit a dotted key (e.g.
-`openai.model`, `stt.deepgram.api_key`) in place, validating the result. The
-OS-default locations are listed in [Setup](#setup).
+`openai.model`, `stt.deepgram.api_key`) in place, validating the result.
 
-`config link DIR` moves the effective full config into `DIR/config.yml` and leaves
-a forwarding pointer (`config_file: <DIR/config.yml>`) behind at the OS-default
-path; if no full config exists yet, it creates one there from the defaults. Pass
-`--copy-prompts` to copy the prompt assets into `DIR/prompts/`. This enables a
-**two-layer shared-folder setup**: keep the full `config.yml` + `prompts/` in a
-shared (synced) folder, while each machine's OS-default path holds only a pointer
-to it — the pointer path differs per OS, but every machine resolves the same shared
-config. `load_config()` follows the pointer chain to the real file. Keep secrets
-(`openai.api_key`, `stt.deepgram.api_key`, inline `google.token`/`credentials`) out
-of a shared config — use file mode or a local, non-synced copy.
+To run more than one instance, give each its own directory and point `GDSTT_HOME`
+at it (`export GDSTT_HOME=/srv/gdstt-a`); the entire instance — `config.yml`,
+`prompts/`, `config/deepgram-keyterms.txt`, and credentials/token files — lives
+under that one home. Keep secrets (`openai.api_key`, `stt.deepgram.api_key`, inline
+`google.token`/`credentials`) out of any synced or shared home directory.
 
 Synced notes folders are just ordinary user-chosen paths: to land artifacts in
 your (possibly synced) notes folder, set `output.target: folder` + `output.dir`,
-and select a non-default config or prompt directory with `gdstt --config PATH`,
-`GDSTT_CONFIG`, or `config init --prompt-dir`.
+and select a non-default config or prompt directory with `gdstt --config PATH` or
+`config init --prompt-dir`.
 
 ### Runtime reliability and summaries
 
@@ -655,12 +656,13 @@ Build and run with the bundled Compose file:
 docker compose up -d --build
 ```
 
-The image bakes `DATA_DIR=/app/data` and mounts `./data` there, so the config
-resolver keeps **all mutable state inside the volume**: `config.yml`, the first-run
-`.env`->YAML auto-migration, and `credentials.json`/`token.json` are written under
-`./data` and survive restarts. The Compose file also sets `DATA_DIR=/app/data`
-explicitly for clarity, and a bare `docker run` is correct by default thanks to the
-image `ENV`. Logs are JSON-file with a 10 MB / 3-file rotation. Restart policy is
+The image bakes `GDSTT_HOME=/app/data` and mounts `./data` there, so the config
+resolver keeps **all mutable state inside the volume**: `config.yml`,
+`prompts/`, `config/deepgram-keyterms.txt`, and credentials/token files are
+written under `./data` and survive restarts. The Compose file also sets
+`GDSTT_HOME=/app/data` explicitly for clarity, and a bare `docker run` is correct by
+default thanks to the image `ENV`. Logs are JSON-file with a 10 MB / 3-file
+rotation. Restart policy is
 `unless-stopped`. Because `gdstt stop` is sticky (it pauses the loop without exiting
 and `main()` never auto-enables on boot), the stop survives this restart policy:
 `docker compose exec <svc> gdstt stop` pauses processing and `gdstt start` resumes it;
@@ -677,20 +679,24 @@ Google auth follows the config-owned model (see
 (`gdstt auth use-files --credentials-file data/credentials.json`, which points
 `config.yml` at an operator-supplied `credentials.json`/`token.json` under the
 volume rather than creating them) as the explicit opt-in, and a legacy fallback to
-`data/credentials.json` / `data/token.json`. The generated `config.yml` is written `0600` because it can hold
-inline secrets.
+`credentials.json` / `token.json` beside the config. The generated `config.yml`
+is written `0600` on POSIX systems because it can hold inline secrets.
 
 For a fresh VPS:
 
-1. Copy the repo, `.env`, and `data/` (with `credentials.json` and `token.json`) to the host.
-2. `docker compose up -d --build`
-3. Tail logs with `docker compose logs -f` and verify a poll cycle completes.
+1. Copy the repo and create `./data` on the host.
+2. Generate the volume-owned config:
+   `docker compose run --rm google-drive-video-stt gdstt config init --force`
+3. Fill `./data/config.yml` (folder IDs, Deepgram/OpenAI keys, and Google auth
+   inline or file mode).
+4. `docker compose up -d --build`
+5. Tail logs with `docker compose logs -f` and verify a poll cycle completes.
 
 ### Container smoke check
 
-After a build, confirm the two deployment-critical fixes — volume persistence and
-packaged prompts — with the bundled script (a manual/CI check, not a pytest; it
-only runs `gdstt doctor` and spends nothing):
+After a build, confirm the deployment-critical config-only path — volume
+persistence, generated local assets, provider validation, and packaged prompts —
+with the bundled script (a manual/CI check, not a pytest; it spends nothing):
 
 ```bash
 scripts/docker-smoke.sh            # builds google-drive-video-stt:smoke, then runs doctor
@@ -701,18 +707,16 @@ Equivalently, by hand:
 
 ```bash
 docker build -t google-drive-video-stt:latest .
-docker run --rm -v "$PWD/data:/app/data" --env-file .env \
+docker run --rm -v "$PWD/data:/app/data" \
+  google-drive-video-stt:latest gdstt config init --force
+docker run --rm -v "$PWD/data:/app/data" \
   google-drive-video-stt:latest gdstt doctor
 ```
 
 A healthy run prints a `config:` path under `/app/data/config.yml` (volume
-persistence). It also proves packaged prompts load: importing the code reads
-`keypoints.md` from the `src` package, so a missing asset would abort `doctor`
-with a `ValueError` before it prints anything. (Whether `keypoints` appears in
-doctor's preset DAG is a *config* property — a migrated `.env` only enables it
-when `OPENAI_KEYPOINTS=true` — so it does not prove packaging.) The
-`docker-smoke.sh` script additionally loads the prompt explicitly inside the
-container to assert packaging directly.
+persistence). The smoke script also verifies that a generated config can pass
+provider validation without reaching external services and explicitly loads
+`keypoints.md` from the `src` package to assert prompt packaging.
 
 ## Project layout
 

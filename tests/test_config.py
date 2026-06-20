@@ -1,14 +1,13 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
 import yaml
-from dotenv import load_dotenv as real_load_dotenv
 
 from src.config import (
     CONFIG_FILE_NAME,
     _config_to_yaml_dict,
-    _user_config_path,
     config_get,
     config_set,
     config_unset,
@@ -16,70 +15,52 @@ from src.config import (
     import_google_credentials,
     init_config,
     is_run_enabled,
-    link_config,
     load_config,
-    migrate_config,
     set_run_enabled,
     resolve_config_file_path,
-    resolve_effective_config_path,
     use_google_files,
 )
 from src.presets import PACKAGED_PROMPT_ASSETS
 
-ENV_VARS = [
-    "FOLDER_IDS",
-    "POLL_INTERVAL",
-    "BITRATE",
-    "TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_CHAT_ID",
-    "DATA_DIR",
-    "PROXY_URL",
-    "STT_PROVIDER",
-    "STT_LANGUAGE",
-    "STT_POSTPROCESS",
-    "DRIVE_MP3_ARTIFACT",
-    "OPENAI_API_KEY",
-    "OPENAI_MODEL",
-    "OPENAI_KEYPOINTS",
-    "OPENAI_BATCH",
-    "OPENAI_MAX_PARALLEL",
-    "OUTPUT_TARGET",
-    "OUTPUT_DIR",
-    "DEEPGRAM_API_KEY",
-    "DEEPGRAM_API_KEY_FILE",
-    "DEEPGRAM_MODEL",
-    "DEEPGRAM_DIARIZE_MODEL",
-    "DEEPGRAM_AUDIO_SOURCE",
-    "DEEPGRAM_TXT_FORMATTER",
-    "DEEPGRAM_KEYTERMS_ENABLED",
-    "DEEPGRAM_KEYTERMS_FILE",
-]
-
-
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch, tmp_path):
-    for var in ENV_VARS:
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
-    monkeypatch.setattr("src.config.load_dotenv", lambda *a, **kw: False)
-    # Point the config-file resolver at a throwaway per-test path so auto-migration
-    # never reads or writes the repo's real data/config.yml. Tests that exercise the
-    # env-loading path still hit the migration branch (the file never exists), and
-    # the default keyterms file keeps resolving against the repo cwd.
-    monkeypatch.setenv("GDSTT_CONFIG", str(tmp_path / "config.yml"))
+    # Point the config-home resolver at a throwaway per-test directory so tests never
+    # read or write the repo's real data/config.yml. Resolver/init tests override or
+    # delete GDSTT_HOME as needed. The runtime reads no other environment variables.
+    monkeypatch.setenv("GDSTT_HOME", str(tmp_path))
     yield
 
 
-def _load_drive_only_config():
-    return load_config(validate_providers=False)
+def _write_yaml(path: Path, data: dict) -> None:
+    path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
 
-def test_defaults_when_no_env(monkeypatch):
-    cfg = _load_drive_only_config()
+def _load_config(tmp_path, data, *, validate_providers=False):
+    """Write ``data`` to ``<tmp_path>/config.yml`` and load it via the file override."""
+    config_file = tmp_path / "config.yml"
+    _write_yaml(config_file, data)
+    return load_config(config_path=config_file, validate_providers=validate_providers)
+
+
+def _deepgram_data(deepgram=None, *, stt_extra=None):
+    """Build a deepgram-only config dict (keypoints preset disabled, keyterms off)."""
+    dg = {"api_key": "dg-test", "keyterms_enabled": False}
+    if deepgram:
+        dg.update(deepgram)
+    stt = {"provider": "deepgram", "deepgram": dg}
+    if stt_extra:
+        stt.update(stt_extra)
+    return {"stt": stt, "presets": {"keypoints": {"enabled": False}}}
+
+
+def test_defaults_when_config_minimal(tmp_path):
+    cfg = _load_config(tmp_path, {"folder_ids": []})
     assert cfg.folder_ids == []
     assert cfg.poll_interval == 600
     assert cfg.bitrate == "96k"
-    assert cfg.data_dir == Path("data")
+    # No data_dir key -> defaults to "." (the config home), matching the
+    # `config init` template and the GDSTT_HOME instance-dir architecture.
+    assert cfg.data_dir == tmp_path
     assert cfg.stt_provider == "deepgram"
     assert cfg.stt_language == "ru"
     assert cfg.stt_postprocess is True
@@ -88,253 +69,165 @@ def test_defaults_when_no_env(monkeypatch):
     assert cfg.openai_keypoints is False
 
 
-def test_default_deepgram_processing_requires_key(monkeypatch):
-    with pytest.raises(ValueError, match="DEEPGRAM_API_KEY is required"):
-        load_config()
-
-
-def test_stt_provider_disabled_explicitly_turns_transcription_off(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-
-    cfg = load_config()
-
-    assert cfg.stt_provider == ""
-    assert cfg.stt_language == ""
-
-
-def test_stt_postprocess_can_be_disabled(monkeypatch):
-    monkeypatch.setenv("STT_POSTPROCESS", "false")
-    cfg = _load_drive_only_config()
+def test_stt_postprocess_can_be_disabled(tmp_path):
+    cfg = _load_config(tmp_path, {"stt": {"provider": "disabled", "postprocess": False}})
     assert cfg.stt_postprocess is False
 
 
-def test_drive_mp3_artifact_defaults_to_true_when_transcription_disabled(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-
-    cfg = load_config()
-
+def test_drive_mp3_artifact_defaults_to_true_when_transcription_disabled(tmp_path):
+    cfg = _load_config(tmp_path, {"stt": {"provider": "disabled"}})
     assert cfg.drive_mp3_artifact is True
 
 
-def test_drive_mp3_artifact_defaults_to_false_for_deepgram_m4a(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-
-    cfg = load_config()
-
+def test_drive_mp3_artifact_defaults_to_false_for_deepgram_m4a(tmp_path):
+    cfg = _load_config(tmp_path, _deepgram_data(), validate_providers=True)
     assert cfg.deepgram_audio_source == "m4a_copy"
     assert cfg.drive_mp3_artifact is False
 
 
-def test_drive_mp3_artifact_can_be_enabled_for_deepgram_m4a(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("DRIVE_MP3_ARTIFACT", "true")
-
-    cfg = load_config()
-
+def test_drive_mp3_artifact_can_be_enabled_for_deepgram_m4a(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _deepgram_data(stt_extra={"drive_mp3_artifact": True}),
+        validate_providers=True,
+    )
     assert cfg.drive_mp3_artifact is True
 
 
-def test_openai_pipeline_defaults(monkeypatch):
-    cfg = _load_drive_only_config()
+def test_openai_pipeline_defaults(tmp_path):
+    cfg = _load_config(tmp_path, {"stt": {"provider": "disabled"}})
     assert cfg.openai_model == "gpt-5.4-mini"
     assert cfg.openai_keypoints is False
     assert cfg.openai_batch is False
 
 
-def test_openai_keypoints_requires_api_key(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
-    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
-        load_config()
-
-
-def test_validate_providers_false_skips_openai_keypoints_secret(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
-    cfg = load_config(validate_providers=False)
-    assert cfg.openai_keypoints is True
-    assert cfg.openai_api_key == ""
-
-
-def test_validate_providers_true_is_default(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
-    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
-        load_config()
-
-
-def test_openai_keypoints_with_api_key(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
-    monkeypatch.setenv("OPENAI_BATCH", "true")
-    cfg = load_config()
+def test_openai_keypoints_with_api_key(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "openai": {
+                "keypoints": True,
+                "api_key": "sk-test",
+                "model": "gpt-5.4",
+                "batch": True,
+            },
+        },
+        validate_providers=True,
+    )
     assert cfg.openai_keypoints is True
     assert cfg.openai_api_key == "sk-test"
     assert cfg.openai_model == "gpt-5.4"
     assert cfg.openai_batch is True
 
 
-def test_openai_keypoints_enabled_without_stt_provider(monkeypatch):
-    # OPENAI_KEYPOINTS is independent of STT_PROVIDER selection.
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    cfg = load_config()
+def test_openai_keypoints_enabled_without_stt_provider(tmp_path):
+    # openai.keypoints is independent of the stt.provider selection.
+    cfg = _load_config(
+        tmp_path,
+        {"stt": {"provider": "disabled"}, "openai": {"keypoints": True, "api_key": "sk-test"}},
+        validate_providers=True,
+    )
     assert cfg.stt_provider == ""
     assert cfg.openai_keypoints is True
 
 
-def test_output_target_defaults_to_drive(monkeypatch):
-    cfg = _load_drive_only_config()
+def test_output_target_defaults_to_drive(tmp_path):
+    cfg = _load_config(tmp_path, {"stt": {"provider": "disabled"}})
     assert cfg.output_target == "drive"
     assert cfg.output_dir is None
 
 
-def test_output_target_folder_requires_output_dir(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("OUTPUT_TARGET", "folder")
-    with pytest.raises(ValueError, match="OUTPUT_DIR"):
-        load_config()
-
-
-def test_output_target_folder_with_output_dir(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("OUTPUT_TARGET", "folder")
-    monkeypatch.setenv("OUTPUT_DIR", "/var/lib/transcripts")
-    cfg = load_config()
+def test_output_target_folder_with_output_dir(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "output": {"target": "folder", "dir": "/var/lib/transcripts"},
+        },
+    )
     assert cfg.output_target == "folder"
     assert cfg.output_dir == Path("/var/lib/transcripts")
 
 
-def test_invalid_output_target_raises(monkeypatch):
-    monkeypatch.setenv("OUTPUT_TARGET", "s3")
-    with pytest.raises(ValueError, match="OUTPUT_TARGET"):
-        load_config()
-
-
-def test_parses_single_folder_id(monkeypatch):
-    monkeypatch.setenv("FOLDER_IDS", "abc123")
-    cfg = _load_drive_only_config()
+def test_parses_single_folder_id(tmp_path):
+    cfg = _load_config(tmp_path, {"folder_ids": "abc123", "stt": {"provider": "disabled"}})
     assert cfg.folder_ids == ["abc123"]
 
 
-def test_load_config_accepts_dotenv_with_utf8_bom(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("src.config.load_dotenv", real_load_dotenv)
-    (tmp_path / ".env").write_text("FOLDER_IDS=abc123\n", encoding="utf-8-sig")
-
-    cfg = _load_drive_only_config()
-
-    assert cfg.folder_ids == ["abc123"]
+def test_parses_multiple_folder_ids(tmp_path):
+    cfg = _load_config(tmp_path, {"folder_ids": "id1,id2,id3", "stt": {"provider": "disabled"}})
+    assert cfg.folder_ids == ["id1", "id2", "id3"]
 
 
-def test_load_config_falls_back_to_checkout_env_outside_repo(monkeypatch, tmp_path):
-    checkout = tmp_path / "checkout"
-    elsewhere = tmp_path / "elsewhere"
-    checkout.mkdir()
-    elsewhere.mkdir()
-    (checkout / ".env").write_text(
-        "FOLDER_IDS=folder-1\nDATA_DIR=data\nSTT_PROVIDER=disabled\n",
-        encoding="utf-8",
+def test_strips_whitespace_in_folder_ids(tmp_path):
+    cfg = _load_config(
+        tmp_path, {"folder_ids": " id1 , id2 ,  ,id3 ", "stt": {"provider": "disabled"}}
     )
-    monkeypatch.chdir(elsewhere)
-    monkeypatch.setattr("src.config.CHECKOUT_ROOT", checkout, raising=False)
-    monkeypatch.setattr("src.config.load_dotenv", real_load_dotenv)
-
-    cfg = load_config()
-
-    assert cfg.folder_ids == ["folder-1"]
-    assert cfg.data_dir == checkout / "data"
-
-
-def test_parses_multiple_folder_ids(monkeypatch):
-    monkeypatch.setenv("FOLDER_IDS", "id1,id2,id3")
-    cfg = _load_drive_only_config()
     assert cfg.folder_ids == ["id1", "id2", "id3"]
 
 
-def test_strips_whitespace_in_folder_ids(monkeypatch):
-    monkeypatch.setenv("FOLDER_IDS", " id1 , id2 ,  ,id3 ")
-    cfg = _load_drive_only_config()
-    assert cfg.folder_ids == ["id1", "id2", "id3"]
-
-
-def test_empty_folder_ids_returns_empty_list(monkeypatch):
-    monkeypatch.setenv("FOLDER_IDS", "")
-    cfg = _load_drive_only_config()
+def test_empty_folder_ids_returns_empty_list(tmp_path):
+    cfg = _load_config(tmp_path, {"folder_ids": "", "stt": {"provider": "disabled"}})
     assert cfg.folder_ids == []
 
 
-def test_folder_ids_only_commas(monkeypatch):
-    monkeypatch.setenv("FOLDER_IDS", " , , ")
-    with pytest.raises(ValueError, match="FOLDER_IDS"):
-        load_config()
+def test_folder_ids_only_commas_returns_empty_list(tmp_path):
+    cfg = _load_config(tmp_path, {"folder_ids": " , , ", "stt": {"provider": "disabled"}})
+    assert cfg.folder_ids == []
 
 
-def test_custom_poll_interval(monkeypatch):
-    monkeypatch.setenv("POLL_INTERVAL", "120")
-    cfg = _load_drive_only_config()
+def test_custom_poll_interval(tmp_path):
+    cfg = _load_config(tmp_path, {"poll_interval": 120, "stt": {"provider": "disabled"}})
     assert cfg.poll_interval == 120
 
 
-def test_invalid_poll_interval_raises(monkeypatch):
-    monkeypatch.setenv("POLL_INTERVAL", "not-a-number")
-    with pytest.raises(ValueError, match="POLL_INTERVAL"):
-        load_config()
+def test_invalid_poll_interval_raises(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(config_file, {"poll_interval": "not-a-number"})
+    with pytest.raises(ValueError, match="poll_interval"):
+        load_config(config_path=config_file, validate_providers=False)
 
 
-def test_non_positive_poll_interval_raises(monkeypatch):
-    monkeypatch.setenv("POLL_INTERVAL", "0")
+def test_non_positive_poll_interval_raises(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(config_file, {"poll_interval": 0})
     with pytest.raises(ValueError, match="positive"):
-        load_config()
+        load_config(config_path=config_file, validate_providers=False)
 
 
-def test_custom_bitrate(monkeypatch):
-    monkeypatch.setenv("BITRATE", "128k")
-    cfg = _load_drive_only_config()
+def test_custom_bitrate(tmp_path):
+    cfg = _load_config(tmp_path, {"bitrate": "128k", "stt": {"provider": "disabled"}})
     assert cfg.bitrate == "128k"
 
 
-def test_blank_bitrate_uses_default(monkeypatch):
-    monkeypatch.setenv("BITRATE", "")
-    cfg = _load_drive_only_config()
+def test_blank_bitrate_uses_default(tmp_path):
+    cfg = _load_config(tmp_path, {"bitrate": "", "stt": {"provider": "disabled"}})
     assert cfg.bitrate == "96k"
 
 
-def test_custom_data_dir(monkeypatch):
-    monkeypatch.setenv("DATA_DIR", "/var/lib/stt")
-    cfg = _load_drive_only_config()
+def test_custom_data_dir(tmp_path):
+    cfg = _load_config(tmp_path, {"data_dir": "/var/lib/stt", "stt": {"provider": "disabled"}})
     assert cfg.data_dir == Path("/var/lib/stt")
 
 
-def test_blank_data_dir_uses_default(monkeypatch):
-    monkeypatch.setenv("DATA_DIR", "")
-    cfg = _load_drive_only_config()
-    assert cfg.data_dir == Path("data")
+def test_blank_data_dir_uses_default(tmp_path):
+    cfg = _load_config(tmp_path, {"data_dir": "", "stt": {"provider": "disabled"}})
+    # Blank data_dir falls back to "." (the config home), not a nested data/ subdir.
+    assert cfg.data_dir == tmp_path
 
 
-def test_stt_deepgram_requires_api_key(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("STT_LANGUAGE", "ru")
-    with pytest.raises(ValueError, match="DEEPGRAM_API_KEY"):
-        load_config()
-
-
-def test_stt_deepgram_defaults_language_and_options(monkeypatch, tmp_path):
+def test_stt_deepgram_defaults_language_and_options(tmp_path):
     keyterms = tmp_path / "keyterms.txt"
     keyterms.write_text(
         "# tech terms\nKubernetes\n\nRuby on Rails\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("DEEPGRAM_KEYTERMS_FILE", str(keyterms))
-
-    cfg = load_config()
+    cfg = _load_config(
+        tmp_path,
+        _deepgram_data({"keyterms_enabled": True, "keyterms_file": str(keyterms)}),
+        validate_providers=True,
+    )
 
     assert cfg.stt_language == "ru"
     assert cfg.deepgram_model == "nova-3"
@@ -346,29 +239,35 @@ def test_stt_deepgram_defaults_language_and_options(monkeypatch, tmp_path):
     assert cfg.deepgram_keyterms == ("Kubernetes", "Ruby on Rails")
 
 
-def test_stt_deepgram_with_api_key(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("STT_LANGUAGE", "ru")
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "  dg-test  ")
-    cfg = load_config()
+def test_stt_deepgram_with_api_key(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _deepgram_data({"api_key": "  dg-test  "}, stt_extra={"language": "ru"}),
+        validate_providers=True,
+    )
     assert cfg.stt_provider == "deepgram"
     assert cfg.stt_language == "ru"
     assert cfg.deepgram_api_key == "dg-test"
 
 
-def test_stt_deepgram_accepts_custom_options(monkeypatch, tmp_path):
+def test_stt_deepgram_accepts_custom_options(tmp_path):
     keyterms = tmp_path / "keyterms.txt"
     keyterms.write_text("React\nTypeScript\n", encoding="utf-8")
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("STT_LANGUAGE", "multi")
-    monkeypatch.setenv("DEEPGRAM_MODEL", "nova-2")
-    monkeypatch.setenv("DEEPGRAM_DIARIZE_MODEL", "v1")
-    monkeypatch.setenv("DEEPGRAM_AUDIO_SOURCE", "mp3_96k")
-    monkeypatch.setenv("DEEPGRAM_TXT_FORMATTER", "utterance")
-    monkeypatch.setenv("DEEPGRAM_KEYTERMS_FILE", str(keyterms))
-
-    cfg = load_config()
+    cfg = _load_config(
+        tmp_path,
+        _deepgram_data(
+            {
+                "model": "nova-2",
+                "diarize_model": "v1",
+                "audio_source": "mp3_96k",
+                "txt_formatter": "utterance",
+                "keyterms_enabled": True,
+                "keyterms_file": str(keyterms),
+            },
+            stt_extra={"language": "multi"},
+        ),
+        validate_providers=True,
+    )
 
     assert cfg.stt_language == "multi"
     assert cfg.deepgram_model == "nova-2"
@@ -378,179 +277,195 @@ def test_stt_deepgram_accepts_custom_options(monkeypatch, tmp_path):
     assert cfg.deepgram_keyterms == ("React", "TypeScript")
 
 
-def test_stt_deepgram_accepts_mp3_192k_audio_source(monkeypatch, tmp_path):
+def test_stt_deepgram_accepts_mp3_192k_audio_source(tmp_path):
     keyterms = tmp_path / "keyterms.txt"
     keyterms.write_text("React\n", encoding="utf-8")
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("DEEPGRAM_AUDIO_SOURCE", "mp3_192k")
-    monkeypatch.setenv("DEEPGRAM_KEYTERMS_FILE", str(keyterms))
-
-    cfg = load_config()
+    cfg = _load_config(
+        tmp_path,
+        _deepgram_data(
+            {"audio_source": "mp3_192k", "keyterms_enabled": True, "keyterms_file": str(keyterms)}
+        ),
+        validate_providers=True,
+    )
 
     assert cfg.deepgram_audio_source == "mp3_192k"
 
 
-def test_stt_deepgram_rejects_invalid_options(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+def test_stt_deepgram_rejects_invalid_options(tmp_path):
+    config_file = tmp_path / "config.yml"
 
-    monkeypatch.setenv("DEEPGRAM_DIARIZE_MODEL", "bad")
-    with pytest.raises(ValueError, match="DEEPGRAM_DIARIZE_MODEL"):
-        load_config()
-    monkeypatch.setenv("DEEPGRAM_DIARIZE_MODEL", "latest")
+    _write_yaml(config_file, _deepgram_data({"diarize_model": "bad"}))
+    with pytest.raises(ValueError, match="diarize_model"):
+        load_config(config_path=config_file)
 
-    monkeypatch.setenv("DEEPGRAM_AUDIO_SOURCE", "wav")
-    with pytest.raises(ValueError, match="DEEPGRAM_AUDIO_SOURCE"):
-        load_config()
-    monkeypatch.setenv("DEEPGRAM_AUDIO_SOURCE", "m4a_copy")
+    _write_yaml(config_file, _deepgram_data({"audio_source": "wav"}))
+    with pytest.raises(ValueError, match="audio_source"):
+        load_config(config_path=config_file)
 
-    monkeypatch.setenv("DEEPGRAM_TXT_FORMATTER", "plain")
-    with pytest.raises(ValueError, match="DEEPGRAM_TXT_FORMATTER"):
-        load_config()
+    _write_yaml(config_file, _deepgram_data({"txt_formatter": "plain"}))
+    with pytest.raises(ValueError, match="txt_formatter"):
+        load_config(config_path=config_file)
 
 
-def test_stt_deepgram_can_disable_keyterms(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("DEEPGRAM_KEYTERMS_ENABLED", "false")
-    monkeypatch.setenv("DEEPGRAM_KEYTERMS_FILE", "missing.txt")
-
-    cfg = load_config()
+def test_stt_deepgram_can_disable_keyterms(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _deepgram_data({"keyterms_enabled": False, "keyterms_file": "missing.txt"}),
+        validate_providers=True,
+    )
 
     assert cfg.deepgram_keyterms_enabled is False
     assert cfg.deepgram_keyterms == ()
 
 
-def test_stt_deepgram_rejects_missing_keyterms_file_when_enabled(monkeypatch, tmp_path):
+def test_stt_deepgram_rejects_missing_keyterms_file_when_enabled(tmp_path):
     missing_keyterms = tmp_path / "missing-keyterms.txt"
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("DEEPGRAM_KEYTERMS_ENABLED", "true")
-    monkeypatch.setenv("DEEPGRAM_KEYTERMS_FILE", str(missing_keyterms))
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        _deepgram_data({"keyterms_enabled": True, "keyterms_file": str(missing_keyterms)}),
+    )
 
     with pytest.raises(ValueError, match="could not be read"):
-        load_config()
+        load_config(config_path=config_file)
 
 
-def test_stt_deepgram_rejects_too_many_keyterms(monkeypatch, tmp_path):
+def test_stt_deepgram_rejects_too_many_keyterms(tmp_path):
     keyterms = tmp_path / "keyterms.txt"
     keyterms.write_text("\n".join(f"term-{i}" for i in range(101)), encoding="utf-8")
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("DEEPGRAM_KEYTERMS_FILE", str(keyterms))
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        _deepgram_data({"keyterms_enabled": True, "keyterms_file": str(keyterms)}),
+    )
 
     with pytest.raises(ValueError, match="100"):
-        load_config()
+        load_config(config_path=config_file)
 
 
-def test_stt_deepgram_prefers_env_key_over_file(monkeypatch, tmp_path):
+def test_stt_deepgram_api_key_wins_over_api_key_file(tmp_path):
     key_file = tmp_path / "deepgram.json"
     key_file.write_text("file-key", encoding="utf-8")
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("STT_LANGUAGE", "ru")
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "env-key")
-    monkeypatch.setenv("DEEPGRAM_API_KEY_FILE", str(key_file))
-
-    cfg = load_config()
+    cfg = _load_config(
+        tmp_path,
+        _deepgram_data(
+            {"api_key": "env-key", "api_key_file": str(key_file)},
+            stt_extra={"language": "ru"},
+        ),
+        validate_providers=True,
+    )
 
     assert cfg.deepgram_api_key == "env-key"
 
 
-def test_stt_deepgram_reads_raw_key_file(monkeypatch, tmp_path):
+def test_stt_deepgram_reads_raw_key_file(tmp_path):
     key_file = tmp_path / "deepgram_api_secret.json"
     key_file.write_text("  raw-file-key  \n", encoding="utf-8")
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("STT_LANGUAGE", "ru")
-    monkeypatch.setenv("DEEPGRAM_API_KEY_FILE", str(key_file))
-
-    cfg = load_config()
+    cfg = _load_config(
+        tmp_path,
+        _deepgram_data(
+            {"api_key": "", "api_key_file": str(key_file)}, stt_extra={"language": "ru"}
+        ),
+        validate_providers=True,
+    )
 
     assert cfg.deepgram_api_key == "raw-file-key"
 
 
-def test_stt_deepgram_reads_raw_key_file_with_utf8_bom(monkeypatch, tmp_path):
+def test_stt_deepgram_reads_raw_key_file_with_utf8_bom(tmp_path):
     key_file = tmp_path / "deepgram_api_secret.json"
     key_file.write_text("raw-file-key\n", encoding="utf-8-sig")
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("STT_LANGUAGE", "ru")
-    monkeypatch.setenv("DEEPGRAM_API_KEY_FILE", str(key_file))
-
-    cfg = load_config()
+    cfg = _load_config(
+        tmp_path,
+        _deepgram_data(
+            {"api_key": "", "api_key_file": str(key_file)}, stt_extra={"language": "ru"}
+        ),
+        validate_providers=True,
+    )
 
     assert cfg.deepgram_api_key == "raw-file-key"
 
 
-def test_stt_deepgram_reads_json_key_file(monkeypatch, tmp_path):
+def test_stt_deepgram_reads_json_key_file(tmp_path):
     key_file = tmp_path / "deepgram_api_secret.json"
     key_file.write_text('{"deepgram_api_key": "json-file-key"}', encoding="utf-8")
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("STT_LANGUAGE", "ru")
-    monkeypatch.setenv("DEEPGRAM_API_KEY_FILE", str(key_file))
-
-    cfg = load_config()
+    cfg = _load_config(
+        tmp_path,
+        _deepgram_data(
+            {"api_key": "", "api_key_file": str(key_file)}, stt_extra={"language": "ru"}
+        ),
+        validate_providers=True,
+    )
 
     assert cfg.deepgram_api_key == "json-file-key"
 
 
-def test_stt_deepgram_reads_json_key_file_with_utf8_bom(monkeypatch, tmp_path):
+def test_stt_deepgram_reads_json_key_file_with_utf8_bom(tmp_path):
     key_file = tmp_path / "deepgram_api_secret.json"
     key_file.write_text('{"deepgram_api_key": "json-file-key"}', encoding="utf-8-sig")
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("STT_LANGUAGE", "ru")
-    monkeypatch.setenv("DEEPGRAM_API_KEY_FILE", str(key_file))
-
-    cfg = load_config()
+    cfg = _load_config(
+        tmp_path,
+        _deepgram_data(
+            {"api_key": "", "api_key_file": str(key_file)}, stt_extra={"language": "ru"}
+        ),
+        validate_providers=True,
+    )
 
     assert cfg.deepgram_api_key == "json-file-key"
 
 
-def test_stt_deepgram_reads_keyterms_file_with_utf8_bom(monkeypatch, tmp_path):
+def test_stt_deepgram_reads_keyterms_file_with_utf8_bom(tmp_path):
     keyterms = tmp_path / "keyterms.txt"
     keyterms.write_text("# header\nKubernetes\n", encoding="utf-8-sig")
-    monkeypatch.setenv("STT_PROVIDER", "deepgram")
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
-    monkeypatch.setenv("DEEPGRAM_KEYTERMS_FILE", str(keyterms))
-
-    cfg = load_config()
+    cfg = _load_config(
+        tmp_path,
+        _deepgram_data({"keyterms_enabled": True, "keyterms_file": str(keyterms)}),
+        validate_providers=True,
+    )
 
     assert cfg.deepgram_keyterms == ("Kubernetes",)
 
 
-def test_stt_deepgram_key_file_is_ignored_when_transcription_disabled(monkeypatch, tmp_path):
+def test_stt_deepgram_key_file_is_ignored_when_transcription_disabled(tmp_path):
     missing_key_file = tmp_path / "missing.json"
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("DEEPGRAM_API_KEY_FILE", str(missing_key_file))
-
-    cfg = load_config()
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled", "deepgram": {"api_key_file": str(missing_key_file)}},
+            "presets": {"keypoints": {"enabled": False}},
+        },
+        validate_providers=True,
+    )
 
     assert cfg.stt_provider == ""
     assert cfg.deepgram_api_key == ""
 
 
-def test_stt_unsupported_provider_raises(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "azure")
-    with pytest.raises(ValueError, match="STT_PROVIDER"):
-        load_config()
+def test_stt_unsupported_provider_raises(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(config_file, {"stt": {"provider": "azure"}})
+    with pytest.raises(ValueError, match="stt.provider"):
+        load_config(config_path=config_file, validate_providers=False)
 
 
-def test_full_env_combination(monkeypatch):
-    monkeypatch.setenv("FOLDER_IDS", "f1,f2")
-    monkeypatch.setenv("POLL_INTERVAL", "300")
-    monkeypatch.setenv("BITRATE", "192k")
-    monkeypatch.setenv("DATA_DIR", "mydata")
-    cfg = _load_drive_only_config()
+def test_full_yaml_combination(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "folder_ids": "f1,f2",
+            "poll_interval": 300,
+            "bitrate": "192k",
+            "data_dir": "mydata",
+            "stt": {"provider": "disabled"},
+        },
+    )
     assert cfg.folder_ids == ["f1", "f2"]
     assert cfg.poll_interval == 300
     assert cfg.bitrate == "192k"
-    assert cfg.data_dir == Path("mydata")
+    assert cfg.data_dir == tmp_path / "mydata"
 
 
 # --- config.yml loading -----------------------------------------------------
-
-
-def _write_yaml(path: Path, data: dict) -> None:
-    path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
 
 def test_loads_grouped_yaml(tmp_path):
@@ -752,290 +667,81 @@ def test_yaml_validate_providers_false_skips_secrets(tmp_path):
     assert cfg.deepgram_api_key == ""
 
 
-# --- auto-migration ---------------------------------------------------------
+# --- resolver semantics -----------------------------------------------------
 
 
-def test_auto_migration_writes_config_yml_when_missing(monkeypatch, tmp_path):
-    monkeypatch.setenv("FOLDER_IDS", "mig1,mig2")
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    config_file = tmp_path / "config.yml"
-    assert not config_file.exists()
+def test_resolve_config_file_path_defaults_to_cwd_data(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GDSTT_HOME", raising=False)
 
-    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert resolve_config_file_path() == Path("data") / CONFIG_FILE_NAME
 
-    assert cfg.folder_ids == ["mig1", "mig2"]
-    assert config_file.exists()
-    written = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    assert written["folder_ids"] == ["mig1", "mig2"]
-    assert written["stt"]["provider"] == ""
-    assert "presets" in written
 
+def test_resolve_config_file_path_honors_gdstt_home(monkeypatch, tmp_path):
+    home = tmp_path / "instance"
+    monkeypatch.setenv("GDSTT_HOME", str(home))
 
-def test_auto_migration_triggers_on_empty_file(monkeypatch, tmp_path):
-    monkeypatch.setenv("FOLDER_IDS", "only-env")
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    config_file = tmp_path / "config.yml"
-    config_file.write_text("   \n", encoding="utf-8")
+    assert resolve_config_file_path() == home / CONFIG_FILE_NAME
 
-    cfg = load_config(config_path=config_file, validate_providers=False)
 
-    assert cfg.folder_ids == ["only-env"]
-    assert yaml.safe_load(config_file.read_text(encoding="utf-8"))["folder_ids"] == ["only-env"]
+def test_resolve_config_file_path_expands_home_and_envvars(monkeypatch, tmp_path):
+    root = tmp_path / "root"
+    monkeypatch.setenv("GDSTT_ROOT", str(root))
+    monkeypatch.setenv("GDSTT_HOME", "$GDSTT_ROOT/instance")
 
+    assert resolve_config_file_path() == root / "instance" / CONFIG_FILE_NAME
 
-def test_existing_yaml_takes_precedence_over_env(monkeypatch, tmp_path):
-    monkeypatch.setenv("FOLDER_IDS", "from-env")
-    config_file = tmp_path / "config.yml"
-    _write_yaml(config_file, {"folder_ids": ["from-yaml"], "stt": {"provider": "disabled"}})
 
-    cfg = load_config(config_path=config_file, validate_providers=False)
-
-    assert cfg.folder_ids == ["from-yaml"]
-
-
-# --- user config path -------------------------------------------------------
-
-
-def test_user_config_path_windows(monkeypatch):
-    monkeypatch.setattr("src.config.sys.platform", "win32")
-    monkeypatch.setenv("APPDATA", "/win/appdata")
-    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-
-    assert _user_config_path() == Path("/win/appdata/gdstt/config.yml")
-
-
-def test_user_config_path_windows_without_appdata(monkeypatch):
-    monkeypatch.setattr("src.config.sys.platform", "win32")
-    monkeypatch.delenv("APPDATA", raising=False)
-
-    expected = (Path("~/AppData/Roaming") / "gdstt" / "config.yml").expanduser()
-    assert _user_config_path() == expected
-
-
-def test_user_config_path_macos(monkeypatch):
-    monkeypatch.setattr("src.config.sys.platform", "darwin")
-
-    expected = (
-        Path("~/Library/Application Support") / "gdstt" / "config.yml"
-    ).expanduser()
-    assert _user_config_path() == expected
-
-
-def test_user_config_path_linux_uses_xdg(monkeypatch):
-    monkeypatch.setattr("src.config.sys.platform", "linux")
-    monkeypatch.setenv("XDG_CONFIG_HOME", "/custom/xdg")
-
-    assert _user_config_path() == Path("/custom/xdg/gdstt/config.yml")
-
-
-def test_user_config_path_linux_defaults_to_dot_config(monkeypatch):
-    monkeypatch.setattr("src.config.sys.platform", "linux")
-    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-
-    expected = (Path("~/.config") / "gdstt" / "config.yml").expanduser()
-    assert _user_config_path() == expected
-
-
-# --- resolver priority ------------------------------------------------------
-
-
-def test_resolve_priority_full_ordering(monkeypatch, tmp_path):
-    arg = tmp_path / "arg.yml"
-    env = tmp_path / "env.yml"
-    data = tmp_path / "datadir"
-    user = tmp_path / "user.yml"
-    monkeypatch.setattr("src.config._user_config_path", lambda: user)
-    monkeypatch.setenv("GDSTT_CONFIG", str(env))
-    monkeypatch.setenv("DATA_DIR", str(data))
-
-    # --config arg beats everything.
-    assert resolve_config_file_path(arg) == arg
-
-    # Without an arg, GDSTT_CONFIG wins over DATA_DIR and the user path.
-    assert resolve_config_file_path() == env
-
-    # Without GDSTT_CONFIG, DATA_DIR/config.yml is used.
-    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
-    assert resolve_config_file_path() == data / CONFIG_FILE_NAME
-
-    # With neither set, fall back to the per-user path (no cwd ./data default).
-    monkeypatch.delenv("DATA_DIR", raising=False)
-    assert resolve_config_file_path() == user
-
-
-def test_resolve_data_dir_only_honored_when_set(monkeypatch, tmp_path):
-    user = tmp_path / "user.yml"
-    monkeypatch.setattr("src.config._user_config_path", lambda: user)
-    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
-    monkeypatch.delenv("DATA_DIR", raising=False)
-
-    # No DATA_DIR -> user path, NOT ./data/config.yml.
-    assert resolve_config_file_path() == user
-
-    # Empty DATA_DIR is treated as unset.
-    monkeypatch.setenv("DATA_DIR", "  ")
-    assert resolve_config_file_path() == user
-
-    # Explicit DATA_DIR -> its config.yml.
-    monkeypatch.setenv("DATA_DIR", str(tmp_path / "dd"))
-    assert resolve_config_file_path() == tmp_path / "dd" / CONFIG_FILE_NAME
-
-
-def test_resolve_container_data_dir(monkeypatch, tmp_path):
-    """Container layout: DATA_DIR=/app/data resolves config into the volume.
-
-    Guards the Docker fix - the image bakes DATA_DIR=/app/data (and compose
-    sets it too) so the bootstrap config lands in the mounted ./data volume.
-    Without DATA_DIR the resolver must fall back to the per-user path, never
-    /app/data, so an ambient container env can't hijack a host install.
-    """
-    user = tmp_path / "user.yml"
-    monkeypatch.setattr("src.config._user_config_path", lambda: user)
-    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
-    monkeypatch.delenv("DATA_DIR", raising=False)
-
-    # No DATA_DIR -> per-user path, not the container volume.
-    assert resolve_config_file_path() == user
-
-    # DATA_DIR=/app/data (the baked container default) -> /app/data/config.yml.
-    monkeypatch.setenv("DATA_DIR", "/app/data")
-    assert resolve_config_file_path() == Path("/app/data") / CONFIG_FILE_NAME
-
-
-def test_resolve_identical_from_different_cwd(monkeypatch, tmp_path):
-    user = tmp_path / "user.yml"
-    monkeypatch.setattr("src.config._user_config_path", lambda: user)
-    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
-    monkeypatch.delenv("DATA_DIR", raising=False)
-
-    here = tmp_path / "here"
-    there = tmp_path / "there"
-    here.mkdir()
-    there.mkdir()
-
-    monkeypatch.chdir(here)
-    first = resolve_config_file_path()
-    monkeypatch.chdir(there)
-    second = resolve_config_file_path()
-
-    assert first == second == user
-
-
-# --- pointer configs --------------------------------------------------------
-
-
-def test_pointer_resolves_relative_target(monkeypatch, tmp_path):
-    pointer = tmp_path / "pointer.yml"
-    target = tmp_path / "real" / "config.yml"
-    target.parent.mkdir()
-    _write_yaml(target, {"folder_ids": ["pointed"], "stt": {"provider": "disabled"}})
-    pointer.write_text("config_file: real/config.yml\n", encoding="utf-8")
-
-    bootstrap, effective = resolve_effective_config_path(pointer)
-    assert bootstrap == pointer
-    assert effective == target
-
-    cfg = load_config(config_path=pointer, validate_providers=False)
-    assert cfg.folder_ids == ["pointed"]
-
-
-def test_pointer_resolves_absolute_target(monkeypatch, tmp_path):
-    pointer = tmp_path / "pointer.yml"
-    target = tmp_path / "abs.yml"
-    _write_yaml(target, {"folder_ids": ["abs"], "stt": {"provider": "disabled"}})
-    pointer.write_text(f"config_file: {target}\n", encoding="utf-8")
-
-    _, effective = resolve_effective_config_path(pointer)
-    assert effective == target
-
-
-def test_pointer_expands_user_and_env_vars(monkeypatch, tmp_path):
-    home = tmp_path / "home"
-    target = home / "gdstt.yml"
-    target.parent.mkdir()
-    _write_yaml(target, {"folder_ids": ["expanded"], "stt": {"provider": "disabled"}})
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))
-    monkeypatch.setenv("MY_CFG_DIR", str(home))
-
-    pointer = tmp_path / "pointer.yml"
-    pointer.write_text("config_file: $MY_CFG_DIR/gdstt.yml\n", encoding="utf-8")
-    _, effective = resolve_effective_config_path(pointer)
-    assert effective == target
-
-    pointer.write_text("config_file: ~/gdstt.yml\n", encoding="utf-8")
-    _, effective = resolve_effective_config_path(pointer)
-    assert effective == target
-
-
-def test_pointer_with_extra_keys_rejected(tmp_path):
-    pointer = tmp_path / "pointer.yml"
-    pointer.write_text(
-        "config_file: real.yml\nfolder_ids: [oops]\n", encoding="utf-8"
-    )
-
-    with pytest.raises(ValueError, match="extra keys"):
-        resolve_effective_config_path(pointer)
-
-
-def test_pointer_self_reference_rejected(tmp_path):
-    pointer = tmp_path / "pointer.yml"
-    pointer.write_text("config_file: pointer.yml\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="loop"):
-        resolve_effective_config_path(pointer)
-
-
-def test_pointer_loop_rejected(tmp_path):
-    a = tmp_path / "a.yml"
-    b = tmp_path / "b.yml"
-    a.write_text("config_file: b.yml\n", encoding="utf-8")
-    b.write_text("config_file: a.yml\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="loop"):
-        resolve_effective_config_path(a)
-
-
-def test_resolve_config_file_path_prefers_explicit_arg(monkeypatch, tmp_path):
-    monkeypatch.setenv("GDSTT_CONFIG", str(tmp_path / "from-env.yml"))
-    explicit = tmp_path / "explicit.yml"
+def test_resolve_config_file_path_prefers_explicit_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("GDSTT_HOME", str(tmp_path / "instance"))
+    explicit = tmp_path / "custom.yml"
 
     assert resolve_config_file_path(explicit) == explicit
 
 
-def test_resolve_config_file_path_honors_env_var(monkeypatch, tmp_path):
-    env_path = tmp_path / "from-env.yml"
-    monkeypatch.setenv("GDSTT_CONFIG", str(env_path))
-
-    assert resolve_config_file_path() == env_path
+# --- missing / empty config -------------------------------------------------
 
 
-def test_resolve_config_file_path_defaults_to_data_dir(monkeypatch, tmp_path):
-    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
-    monkeypatch.setenv("DATA_DIR", str(tmp_path / "datadir"))
+def test_load_config_missing_file_tells_operator_to_init(tmp_path):
+    config_file = tmp_path / "missing.yml"
 
-    assert resolve_config_file_path() == tmp_path / "datadir" / CONFIG_FILE_NAME
+    with pytest.raises(ValueError, match="gdstt config init"):
+        load_config(config_path=config_file, validate_providers=False)
 
-
-def test_gdstt_config_env_var_resolves_path(monkeypatch, tmp_path):
-    config_file = tmp_path / "custom-config.yml"
-    _write_yaml(config_file, {"folder_ids": ["env-path"], "stt": {"provider": "disabled"}})
-    monkeypatch.setenv("GDSTT_CONFIG", str(config_file))
-
-    cfg = load_config(validate_providers=False)
-
-    assert cfg.folder_ids == ["env-path"]
+    assert not config_file.exists()
 
 
-def test_config_to_yaml_dict_round_trips(monkeypatch, tmp_path):
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("FOLDER_IDS", "rt1")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-rt")
-    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
-    cfg = load_config(validate_providers=False)
+def test_load_config_empty_file_tells_operator_to_init(tmp_path):
+    config_file = tmp_path / "config.yml"
+    config_file.write_text("  \n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="empty"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
+def test_config_set_missing_config_requires_init(tmp_path):
+    with pytest.raises(ValueError, match="gdstt config init"):
+        config_set("run.enabled", "false", config_path=tmp_path / "missing.yml")
+
+
+def test_config_get_missing_config_requires_init(tmp_path):
+    with pytest.raises(ValueError, match="gdstt config init"):
+        config_get(config_path=tmp_path / "missing.yml")
+
+
+def test_config_to_yaml_dict_round_trips(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "folder_ids": "rt1",
+            "stt": {"provider": "disabled"},
+            "openai": {"api_key": "sk-rt", "keypoints": True},
+        },
+        validate_providers=False,
+    )
 
     data = _config_to_yaml_dict(cfg)
-    config_file = tmp_path / "config.yml"
+    config_file = tmp_path / "roundtrip.yml"
     _write_yaml(config_file, data)
     reloaded = load_config(config_path=config_file, validate_providers=False)
 
@@ -1043,45 +749,6 @@ def test_config_to_yaml_dict_round_trips(monkeypatch, tmp_path):
     assert reloaded.openai_api_key == "sk-rt"
     assert reloaded.openai_keypoints is True
     assert reloaded.stt_provider == ""
-
-
-# --- migrate_config ---------------------------------------------------------
-
-
-def test_migrate_config_writes_from_env(monkeypatch, tmp_path):
-    monkeypatch.setenv("FOLDER_IDS", "m1")
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    config_file = tmp_path / "config.yml"
-
-    written_path = migrate_config(config_path=config_file)
-
-    assert written_path == config_file
-    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    assert data["folder_ids"] == ["m1"]
-    assert data["presets"]["keypoints"]["enabled"] is False
-
-
-def test_migrate_config_refuses_existing_without_force(monkeypatch, tmp_path):
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    config_file = tmp_path / "config.yml"
-    config_file.write_text("folder_ids: [keep]\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="already exists"):
-        migrate_config(config_path=config_file)
-
-    assert config_file.read_text(encoding="utf-8") == "folder_ids: [keep]\n"
-
-
-def test_migrate_config_force_overwrites(monkeypatch, tmp_path):
-    monkeypatch.setenv("FOLDER_IDS", "fresh")
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    config_file = tmp_path / "config.yml"
-    config_file.write_text("folder_ids: [stale]\n", encoding="utf-8")
-
-    migrate_config(config_path=config_file, force=True)
-
-    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    assert data["folder_ids"] == ["fresh"]
 
 
 # --- presets DAG wiring -----------------------------------------------------
@@ -1339,29 +1006,6 @@ def test_yaml_shared_prompt_file_distinct_names_and_suffixes_allowed(tmp_path):
     assert by_name["second"].artifact_suffix == ".two.md"
 
 
-def test_env_migration_seeds_keypoints_preset(monkeypatch, tmp_path):
-    monkeypatch.setenv("FOLDER_IDS", "f1")
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-x")
-    config_file = tmp_path / "config.yml"
-
-    cfg = load_config(config_path=config_file, validate_providers=False)
-
-    assert {p.name for p in cfg.presets} == {"keypoints"}
-
-
-def test_env_migration_drops_keypoints_when_gate_off(monkeypatch, tmp_path):
-    monkeypatch.setenv("FOLDER_IDS", "f1")
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("OPENAI_KEYPOINTS", "false")
-    config_file = tmp_path / "config.yml"
-
-    cfg = load_config(config_path=config_file, validate_providers=False)
-
-    assert cfg.presets == ()
-
-
 # --- openai.max_parallel ----------------------------------------------------
 
 
@@ -1419,26 +1063,18 @@ def test_yaml_max_parallel_rejects_non_integer_float(tmp_path):
         load_config(config_path=config_file, validate_providers=False)
 
 
-def test_env_migration_reads_max_parallel(monkeypatch, tmp_path):
-    monkeypatch.setenv("FOLDER_IDS", "f1")
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("OPENAI_MAX_PARALLEL", "6")
+def test_max_parallel_round_trips(tmp_path):
     config_file = tmp_path / "config.yml"
-
+    _write_yaml(
+        config_file,
+        {"stt": {"provider": "disabled"}, "openai": {"max_parallel": 9}},
+    )
     cfg = load_config(config_path=config_file, validate_providers=False)
 
-    assert cfg.openai_max_parallel == 6
-
-
-def test_max_parallel_round_trips(monkeypatch, tmp_path):
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("OPENAI_MAX_PARALLEL", "9")
-    cfg = load_config(validate_providers=False)
-
     data = _config_to_yaml_dict(cfg)
-    config_file = tmp_path / "config.yml"
-    _write_yaml(config_file, data)
-    reloaded = load_config(config_path=config_file, validate_providers=False)
+    out_file = tmp_path / "out.yml"
+    _write_yaml(out_file, data)
+    reloaded = load_config(config_path=out_file, validate_providers=False)
 
     assert reloaded.openai_max_parallel == 9
 
@@ -1473,6 +1109,8 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
 
     assert path == config_file
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["data_dir"] == "."
+    assert data["stt"]["deepgram"]["keyterms_file"] == "config/deepgram-keyterms.txt"
     assert data["presets"]["keypoints"]["enabled"] is True
     assert data["presets"]["keypoints"]["prompt_file"] == "prompts/keypoints.md"
     # The full default chain is enabled out of the box, with transcript-cleanup
@@ -1492,8 +1130,10 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     assert (tmp_path / "prompts" / "keypoints.md").is_file()
     assert (tmp_path / "prompts" / "transcript-cleanup.md").is_file()
     assert (tmp_path / "prompts" / "action-items.md").is_file()
+    assert (tmp_path / "config" / "deepgram-keyterms.txt").is_file()
     # The generated config loads back without provider secrets and yields the chain.
     cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.data_dir == tmp_path
     assert {p.name for p in cfg.presets} == {
         "transcript-cleanup",
         "keypoints",
@@ -1501,146 +1141,49 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     }
 
 
-def test_init_local_writes_under_cwd_data(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
+def test_init_config_validates_with_copied_keyterms(tmp_path):
+    config_file = tmp_path / "config.yml"
+    init_config(config_path=config_file)
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    data["stt"]["deepgram"]["api_key"] = "dg-test"
+    data["openai"]["api_key"] = "sk-test"
+    _write_yaml(config_file, data)
 
-    path = init_config(local=True)
+    cfg = load_config(config_path=config_file)
+
+    assert cfg.deepgram_keyterms_file == tmp_path / "config" / "deepgram-keyterms.txt"
+    assert "Kubernetes" in cfg.deepgram_keyterms
+
+
+def test_init_default_writes_to_gdstt_home(monkeypatch, tmp_path):
+    home = tmp_path / "instance"
+    monkeypatch.setenv("GDSTT_HOME", str(home))
+
+    path = init_config()
+
+    assert path == home / CONFIG_FILE_NAME
+    assert path.is_file()
+    assert (home / "prompts" / "keypoints.md").is_file()
+    assert (home / "config" / "deepgram-keyterms.txt").is_file()
+
+
+def test_init_default_falls_back_to_cwd_data(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GDSTT_HOME", raising=False)
+
+    path = init_config()
 
     assert path == Path("data") / CONFIG_FILE_NAME
     assert (tmp_path / "data" / CONFIG_FILE_NAME).is_file()
     assert (tmp_path / "data" / "prompts" / "keypoints.md").is_file()
 
 
-def test_init_uses_user_path_without_config(monkeypatch, tmp_path):
-    user = tmp_path / "user" / "config.yml"
-    monkeypatch.setattr("src.config._user_config_path", lambda: user)
-    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
-    monkeypatch.delenv("DATA_DIR", raising=False)
-
-    path = init_config()
-
-    assert path == user
-    assert user.is_file()
-
-
-def test_init_default_target_honors_data_dir(monkeypatch, tmp_path):
-    """With no flags, init writes where the runtime resolver reads.
-
-    Guards the Docker fix: the image bakes DATA_DIR=/app/data, so a bare
-    ``gdstt config init`` must land inside the mounted volume (matching the
-    runtime/``doctor`` read path), not the per-user config path.
-    """
-    user = tmp_path / "user" / "config.yml"
-    monkeypatch.setattr("src.config._user_config_path", lambda: user)
-    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
-    data_dir = tmp_path / "app" / "data"
-    monkeypatch.setenv("DATA_DIR", str(data_dir))
-
-    path = init_config()
-
-    # Writes config (and prompts) under DATA_DIR, not the per-user path.
-    assert path == data_dir / CONFIG_FILE_NAME
-    assert path.is_file()
-    assert (data_dir / "prompts" / "keypoints.md").is_file()
-    assert not user.exists()
-
-
-def test_init_default_target_honors_relative_data_dir(monkeypatch, tmp_path):
-    """A relative DATA_DIR in the bare default anchors to the dotenv parent.
-
-    Guards the resolver path the Docker fix routes ``init`` through: a relative
-    ``DATA_DIR`` must resolve via ``_resolve_relative_to_dotenv`` exactly as the
-    runtime reader does, not against an unrelated cwd.
-    """
-    user = tmp_path / "user" / "config.yml"
-    monkeypatch.setattr("src.config._user_config_path", lambda: user)
-    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
-    # Pin the dotenv anchor inside tmp_path so the relative DATA_DIR is
-    # deterministic regardless of any .env in the checkout.
-    dotenv = tmp_path / "anchor" / ".env"
-    monkeypatch.setattr("src.config._dotenv_path", lambda: dotenv)
-    monkeypatch.setenv("DATA_DIR", "app/data")
-
-    path = init_config()
-
-    assert path == dotenv.parent / "app" / "data" / CONFIG_FILE_NAME
-    assert path.is_file()
-    assert not user.exists()
-
-
-def test_init_default_blank_gdstt_config_falls_back_to_data_dir(monkeypatch, tmp_path):
-    """A whitespace-only GDSTT_CONFIG is treated as unset, so DATA_DIR wins.
-
-    The resolver strips ``GDSTT_CONFIG`` before honoring it; this guards the
-    init default branch against regressing to a raw (non-stripped) read that
-    would target an empty path instead of the volume.
-    """
-    user = tmp_path / "user" / "config.yml"
-    monkeypatch.setattr("src.config._user_config_path", lambda: user)
-    monkeypatch.setenv("GDSTT_CONFIG", "   ")
-    data_dir = tmp_path / "app" / "data"
-    monkeypatch.setenv("DATA_DIR", str(data_dir))
-
-    path = init_config()
-
-    assert path == data_dir / CONFIG_FILE_NAME
-    assert path.is_file()
-    assert not user.exists()
-
-
-def test_init_data_dir_does_not_override_explicit_targets(monkeypatch, tmp_path):
-    """DATA_DIR awareness applies only to the bare default, not --local/--config."""
-    user = tmp_path / "user" / "config.yml"
-    monkeypatch.setattr("src.config._user_config_path", lambda: user)
-    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
-    monkeypatch.setenv("DATA_DIR", str(tmp_path / "datadir"))
-
-    # Explicit --config still wins.
+def test_init_explicit_config_path_overrides_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("GDSTT_HOME", str(tmp_path / "instance"))
     explicit = tmp_path / "explicit" / "config.yml"
+
     assert init_config(config_path=explicit) == explicit
-
-    # --local still targets ./data/config.yml under the cwd.
-    monkeypatch.chdir(tmp_path)
-    assert init_config(local=True) == Path("data") / CONFIG_FILE_NAME
-
-
-def test_init_default_prefers_gdstt_config_over_data_dir(monkeypatch, tmp_path):
-    """In the bare-default branch, GDSTT_CONFIG outranks DATA_DIR and the user path."""
-    user = tmp_path / "user" / "config.yml"
-    monkeypatch.setattr("src.config._user_config_path", lambda: user)
-    env_target = tmp_path / "env" / "config.yml"
-    monkeypatch.setenv("GDSTT_CONFIG", str(env_target))
-    monkeypatch.setenv("DATA_DIR", str(tmp_path / "datadir"))
-
-    path = init_config()
-
-    assert path == env_target
-    assert env_target.is_file()
-    assert not user.exists()
-    assert not (tmp_path / "datadir").exists()
-
-
-def test_init_default_does_not_dereference_forwarding_pointer(monkeypatch, tmp_path):
-    """init targets the bootstrap location, never silently following a pointer.
-
-    The bootstrap target (here the per-user path) is a forwarding pointer to a
-    real config. init must treat the pointer file itself as the existing config
-    and refuse to overwrite it without --force - it must NOT dereference the
-    pointer and create the real target behind it.
-    """
-    user = tmp_path / "user" / "config.yml"
-    monkeypatch.setattr("src.config._user_config_path", lambda: user)
-    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
-    monkeypatch.delenv("DATA_DIR", raising=False)
-    real_target = tmp_path / "real" / "config.yml"
-    user.parent.mkdir(parents=True, exist_ok=True)
-    user.write_text(f"config_file: {real_target}\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="already exists"):
-        init_config()
-
-    # The pointer was not dereferenced: the real target was never created.
-    assert not real_target.exists()
+    assert explicit.is_file()
 
 
 def test_init_output_dir_sets_folder_target(tmp_path):
@@ -1695,105 +1238,6 @@ def test_init_force_overwrites(tmp_path):
 
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     assert data["folder_ids"] == []
-
-
-def test_link_moves_full_config_and_leaves_pointer(monkeypatch, tmp_path):
-    user = tmp_path / "user" / "config.yml"
-    user.parent.mkdir()
-    _write_yaml(user, {"folder_ids": ["moved"], "stt": {"provider": "disabled"}})
-    monkeypatch.setattr("src.config._user_config_path", lambda: user)
-    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
-    monkeypatch.delenv("DATA_DIR", raising=False)
-
-    dest_dir = tmp_path / "linked"
-    dest = link_config(dest_dir)
-
-    assert dest == dest_dir / CONFIG_FILE_NAME
-    moved = yaml.safe_load(dest.read_text(encoding="utf-8"))
-    assert moved["folder_ids"] == ["moved"]
-    # The user path now forwards to the moved config.
-    pointer = yaml.safe_load(user.read_text(encoding="utf-8"))
-    assert "config_file" in pointer
-    _, effective = resolve_effective_config_path()
-    assert effective.resolve() == dest.resolve()
-
-
-def test_link_creates_default_when_no_config(monkeypatch, tmp_path):
-    user = tmp_path / "user" / "config.yml"
-    monkeypatch.setattr("src.config._user_config_path", lambda: user)
-    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
-    monkeypatch.delenv("DATA_DIR", raising=False)
-
-    dest_dir = tmp_path / "linked"
-    dest = link_config(dest_dir)
-
-    data = yaml.safe_load(dest.read_text(encoding="utf-8"))
-    assert data["presets"]["keypoints"]["enabled"] is True
-    assert (dest_dir / "prompts" / "keypoints.md").is_file()
-    pointer = yaml.safe_load(user.read_text(encoding="utf-8"))
-    assert "config_file" in pointer
-
-
-def test_link_refuses_existing_dest_without_force(monkeypatch, tmp_path):
-    user = tmp_path / "user" / "config.yml"
-    user.parent.mkdir()
-    _write_yaml(user, {"folder_ids": ["x"], "stt": {"provider": "disabled"}})
-    monkeypatch.setattr("src.config._user_config_path", lambda: user)
-    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
-    monkeypatch.delenv("DATA_DIR", raising=False)
-
-    dest_dir = tmp_path / "linked"
-    dest_dir.mkdir()
-    (dest_dir / CONFIG_FILE_NAME).write_text("folder_ids: [keep]\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="already exists"):
-        link_config(dest_dir)
-
-    assert (dest_dir / CONFIG_FILE_NAME).read_text(encoding="utf-8") == (
-        "folder_ids: [keep]\n"
-    )
-
-
-def test_link_copy_prompts_into_dest(monkeypatch, tmp_path):
-    user = tmp_path / "user" / "config.yml"
-    user.parent.mkdir()
-    _write_yaml(user, {"folder_ids": ["x"], "stt": {"provider": "disabled"}})
-    monkeypatch.setattr("src.config._user_config_path", lambda: user)
-    monkeypatch.delenv("GDSTT_CONFIG", raising=False)
-    monkeypatch.delenv("DATA_DIR", raising=False)
-
-    dest_dir = tmp_path / "linked"
-    link_config(dest_dir, copy_prompts=True)
-
-    assert (dest_dir / "prompts" / "keypoints.md").is_file()
-
-
-def test_migrate_writes_preset_prompt_file(monkeypatch, tmp_path):
-    monkeypatch.setenv("FOLDER_IDS", "m1")
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("OPENAI_KEYPOINTS", "false")
-    config_file = tmp_path / "config.yml"
-
-    migrate_config(config_path=config_file)
-
-    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    # OPENAI_KEYPOINTS=false -> keypoints disabled but it STILL carries a prompt_file.
-    assert data["presets"]["keypoints"]["enabled"] is False
-    assert data["presets"]["keypoints"]["prompt_file"] == "prompts/keypoints.md"
-    assert (tmp_path / "prompts" / "keypoints.md").is_file()
-
-
-def test_migrate_keypoints_enabled_writes_prompt_file(monkeypatch, tmp_path):
-    monkeypatch.setenv("FOLDER_IDS", "m1")
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-    monkeypatch.setenv("OPENAI_KEYPOINTS", "true")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-x")
-    config_file = tmp_path / "config.yml"
-
-    migrate_config(config_path=config_file)
-
-    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    assert data["presets"]["keypoints"]["enabled"] is True
 
 
 # --- config get / set / unset -----------------------------------------------
@@ -1933,6 +1377,29 @@ def test_config_get_single_secret_is_masked_by_default(tmp_path):
     assert config_get("openai.api_key", config_path=config_file) == "***"
 
 
+def test_config_get_masks_telegram_bot_token(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set(
+        "notifications.telegram.bot_token", "123456:SECRET", config_path=config_file
+    )
+
+    # The bot token grants full control of the bot and must be masked in both the
+    # whole-config dump and a single-key lookup.
+    whole = config_get(config_path=config_file)
+    assert "123456:SECRET" not in whole
+    assert "***" in whole
+    assert (
+        config_get("notifications.telegram.bot_token", config_path=config_file)
+        == "***"
+    )
+    # chat_id is not a secret and stays visible.
+    config_set("notifications.telegram.chat_id", "98765", config_path=config_file)
+    assert (
+        config_get("notifications.telegram.chat_id", config_path=config_file)
+        == "98765"
+    )
+
+
 def test_config_get_single_secret_revealed_with_show_secrets(tmp_path):
     config_file = _base_config_file(tmp_path)
     config_set("openai.api_key", "sk-secret", config_path=config_file)
@@ -1955,23 +1422,6 @@ def test_config_get_missing_key_raises(tmp_path):
 
     with pytest.raises(ValueError, match="not set"):
         config_get("openai.nope", config_path=config_file)
-
-
-def test_config_set_follows_pointer_to_effective_file(tmp_path):
-    real = tmp_path / "real" / "config.yml"
-    real.parent.mkdir()
-    init_config(config_path=real)
-    config_set("stt.provider", "disabled", config_path=real)
-    config_set("openai.api_key", "sk-base", config_path=real)
-    pointer = tmp_path / "pointer.yml"
-    pointer.write_text(f"config_file: {real}\n", encoding="utf-8")
-
-    config_set("openai.model", "gpt-pointer", config_path=pointer)
-
-    # The effective (real) file changed; the pointer file is untouched.
-    assert pointer.read_text(encoding="utf-8") == f"config_file: {real}\n"
-    data = yaml.safe_load(real.read_text(encoding="utf-8"))
-    assert data["openai"]["model"] == "gpt-pointer"
 
 
 def test_config_set_invalid_leaves_file_unchanged(tmp_path):
@@ -2030,7 +1480,10 @@ def test_yaml_google_file_paths_resolve_relative(tmp_path):
 
     assert cfg.google_credentials is None
     assert cfg.google_credentials_file == tmp_path / "secrets" / "creds.json"
-    assert cfg.google_token_file == Path("/abs/token.json")
+    expected_token = Path("/abs/token.json")
+    if not expected_token.is_absolute():
+        expected_token = config_file.parent / expected_token
+    assert cfg.google_token_file == expected_token
 
 
 def test_yaml_google_back_compat_data_dir_fallback(tmp_path):
@@ -2126,8 +1579,26 @@ def test_use_google_files_switches_and_clears_inline(tmp_path):
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     assert "credentials" not in data["google"]
     assert "token" not in data["google"]
-    assert data["google"]["credentials_file"] == str(creds_file)
-    assert data["google"]["token_file"] == str(creds_file.parent / "token.json")
+    assert data["google"]["credentials_file"] == "creds/client.json"
+    assert data["google"]["token_file"] == "creds/token.json"
+
+
+def test_use_google_files_resolves_cli_relative_paths_before_serializing(monkeypatch, tmp_path):
+    app_dir = tmp_path / "app"
+    data_dir = app_dir / "data"
+    config_file = data_dir / "config.yml"
+    init_config(config_path=config_file)
+    (data_dir / "credentials.json").write_text("{}", encoding="utf-8")
+    monkeypatch.chdir(app_dir)
+
+    use_google_files("data/credentials.json", config_path=config_file)
+
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert data["google"]["credentials_file"] == "credentials.json"
+    assert data["google"]["token_file"] == "token.json"
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.google_credentials_file == data_dir / "credentials.json"
+    assert cfg.google_token_file == data_dir / "token.json"
 
 
 def test_use_google_files_honors_explicit_token_file(tmp_path):
@@ -2138,7 +1609,7 @@ def test_use_google_files_honors_explicit_token_file(tmp_path):
     use_google_files(creds_file, token_file=token_file, config_path=config_file)
 
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    assert data["google"]["token_file"] == str(token_file)
+    assert data["google"]["token_file"] == "elsewhere/tok.json"
 
 
 def test_config_get_masks_inline_google_secrets(tmp_path):
@@ -2202,27 +1673,56 @@ def test_is_run_enabled_missing_file_defaults_true(tmp_path):
     assert is_run_enabled(config_path=tmp_path / "absent.yml") is True
 
 
+# --- telegram notification settings -----------------------------------------
+
+
+def test_telegram_notification_defaults_blank(tmp_path):
+    config_file = tmp_path / "config.yml"
+    init_config(config_path=config_file)
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.telegram_bot_token == ""
+    assert cfg.telegram_chat_id == ""
+
+
+def test_telegram_notification_parsed_from_config(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "notifications": {
+                "telegram": {"bot_token": "token-abc", "chat_id": "98765"},
+            },
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.telegram_bot_token == "token-abc"
+    assert cfg.telegram_chat_id == "98765"
+
+
+def test_telegram_notification_round_trips(tmp_path):
+    config_file = tmp_path / "config.yml"
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "notifications": {
+                "telegram": {"bot_token": "token-abc", "chat_id": "98765"},
+            },
+        },
+    )
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    data = _config_to_yaml_dict(cfg, config_file)
+    assert data["notifications"]["telegram"] == {
+        "bot_token": "token-abc",
+        "chat_id": "98765",
+    }
+
+
 # --- field-test regression fixes --------------------------------------------
-
-def test_run_migration_runs_before_run_enabled_keeps_env(monkeypatch, tmp_path):
-    """`gdstt run` migrates .env first; flipping run.enabled must not clobber it.
-
-    Reproduces the field bug where set_run_enabled wrote a minimal
-    `{run: {enabled: true}}` before the .env->YAML migration, losing FOLDER_IDS.
-    Here we run the fixed order (load_config migrates, THEN set_run_enabled).
-    """
-    config_file = tmp_path / "config.yml"  # missing -> auto-migration
-    monkeypatch.setenv("GDSTT_CONFIG", str(config_file))
-    monkeypatch.setenv("FOLDER_IDS", "f1,f2")
-    monkeypatch.setenv("STT_PROVIDER", "disabled")
-
-    load_config()  # migrate
-    set_run_enabled(False)
-
-    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    assert data["folder_ids"] == ["f1", "f2"]  # env preserved, not clobbered
-    assert data["run"]["enabled"] is False
-
 
 def test_config_prompt_file_overrides_builtin_keypoints_instructions(tmp_path):
     """An explicit prompt_file on the keypoints preset must win over the built-in
@@ -2240,6 +1740,8 @@ def test_config_prompt_file_overrides_builtin_keypoints_instructions(tmp_path):
 def test_fresh_config_is_owner_only(tmp_path):
     import stat
 
+    if os.name == "nt":
+        pytest.skip("Windows does not expose POSIX owner-only mode bits reliably")
     config_file = tmp_path / "config.yml"
     init_config(config_path=config_file)  # brand-new file
     mode = stat.S_IMODE(config_file.stat().st_mode)
