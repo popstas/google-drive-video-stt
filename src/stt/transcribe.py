@@ -28,7 +28,7 @@ def transcribe_file(
 ) -> str:
     """Transcribe the input audio path with the configured provider."""
     if not config.stt_provider:
-        raise STTError("STT_PROVIDER is not configured")
+        raise STTError("stt.provider is not configured")
 
     mp3_path = Path(mp3_path)
     if not mp3_path.exists():

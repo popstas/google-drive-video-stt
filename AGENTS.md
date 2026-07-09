@@ -18,12 +18,12 @@ runs a config-defined DAG of OpenAI presets (each preset writes its own sibling
 artifact, e.g. Keypoints), and writes the results back to Drive or to a local
 folder.
 
-The code is configured through `data/config.yml` (loaded by `src/config.py`); the
-main runtime lives in `src/main.py`, preset definitions in `src/presets.py`, the
-DAG executor in `src/preset_pipeline.py`, and STT provider dispatch in
-`src/stt/__init__.py`. `.env` is no longer a runtime source: on first run an
-existing `.env`/environment is auto-migrated into `data/config.yml` and every
-subsequent run reads only the YAML.
+The code is configured through `<GDSTT_HOME>/config.yml` (default `./data/config.yml`,
+loaded by `src/config.py`); the main runtime lives in `src/main.py`, preset
+definitions in `src/presets.py`, the DAG executor in `src/preset_pipeline.py`, and
+STT provider dispatch in `src/stt/__init__.py`. There is no dotenv loader and no
+migration step: the config must already exist (`gdstt config init`); a missing or
+empty file is a clear setup error, and every run reads only the YAML.
 
 ## Commands
 
@@ -37,13 +37,42 @@ uv run ruff check            # lint (line-length 100, target py311)
 gdstt auth [--manual]        # OAuth refresh or recovery flow
 uv run python -m src.auth    # module entry for the same OAuth flow
 uv run python -m src.main    # run the polling loop locally
-gdstt <auth|doctor|latest|run|run-once|process|transcribe|relabel|speakers|list|config>  # operator CLI (src/cli.py)
-gdstt config migrate [--force]  # (re)write data/config.yml from the current .env/environment
-gdstt --config PATH <command>   # point at a non-default config.yml (or set GDSTT_CONFIG)
-docker compose up -d --build # containerized deployment (mounts ./data)
+gdstt <auth|doctor|latest|run|start|stop|run-once|process|reprocess|transcribe|relabel|speakers|list|config>  # operator CLI (src/cli.py)
+gdstt reprocess <id> [STAGES]   # force-rerun chain stages by number (0=transcript, 1..N=presets; see `gdstt doctor`)
+gdstt stop                      # set run.enabled=false so a running `gdstt run` loop pauses (idles) and stays paused across restarts
+gdstt start                     # set run.enabled=true so a paused `gdstt run` loop resumes processing
+gdstt config init [--force]     # create config.yml + prompts/ under GDSTT_HOME (default ./data)
+gdstt --config PATH <command>   # one-shot override against a non-default config.yml
+docker compose up -d --build # containerized deployment (mounts ./data, GDSTT_HOME=/app/data)
+scripts/docker-smoke.sh      # manual/CI: clean config-only Docker smoke
 ```
 
 `ffmpeg` must be on PATH for local runs (bundled in the Docker image).
+
+## Deployment (Docker)
+
+The deployment is config-owned and persists everything in the mounted volume:
+
+- The image bakes `ENV GDSTT_HOME=/app/data` and Compose mounts `./data:/app/data`,
+  so the config resolver writes `config.yml`, prompt copies,
+  `config/deepgram-keyterms.txt`, and any file-mode `credentials.json`/`token.json`
+  under the volume. Without `GDSTT_HOME` the resolver defaults the home to `./data`
+  (relative to the working directory) — keep `GDSTT_HOME=/app/data` set so the
+  instance directory is the volume. `init_config()`'s default (no `--config`) target
+  follows the same resolver as the runtime (`<GDSTT_HOME>/config.yml`, else
+  `./data/config.yml`) so `gdstt config init` writes exactly where the runtime reads.
+  Keep the two unified — `_resolve_config_file_path()` is the single source of truth
+  for both, and there are no OS-default paths or pointer files to dereference.
+- Prompt assets ship inside the `src` package (`src/assets/prompts/*.md`), so the
+  Dockerfile's `COPY src ./src` carries them; no separate `assets/` copy and no repo
+  fallback. This is also why a wheel / `uv tool install` finds the prompts.
+- Google auth is inline-first in `config.yml` (`google.credentials`/`google.token`),
+  with file mode as the opt-in and a legacy `credentials.json`/`token.json`
+  fallback under `data_dir`. The generated `config.yml` is written `0600` on POSIX.
+- `scripts/docker-smoke.sh` is the manual/CI verification: it builds the image,
+  initializes a clean `/app/data` volume via `gdstt config init`, runs `gdstt doctor`,
+  validates provider config, and loads the packaged `keypoints` prompt inside the
+  container.
 
 ## Architecture
 
@@ -51,10 +80,10 @@ Headless service: polls Google Drive folders, extracts audio from new MP4s via
 ffmpeg, transcribes to a `.txt`, and optionally runs the enabled OpenAI presets to
 write per-preset sibling artifacts (e.g. `.keypoints.md`). All flow is driven by
 `Config` (`src/config.py`, frozen dataclass built by `load_config()` which reads
-`data/config.yml`, validates provider-specific required values, and raises on
-misconfiguration). `load_config()` resolves the config path from `--config PATH`,
-the `GDSTT_CONFIG` env var, or `<data_dir>/config.yml`, and auto-migrates a
-`.env`/environment into YAML when the file is missing or empty.
+`<GDSTT_HOME>/config.yml`, validates provider-specific required values, and raises on
+misconfiguration). `load_config()` resolves the config path from `--config PATH`
+(one-shot), else `<GDSTT_HOME>/config.yml`, else `./data/config.yml`; a missing or
+empty file raises a setup error pointing at `gdstt config init` (no auto-generation).
 
 **Polling loop** (`src/main.py`): `main()` builds the Drive service once, then loops
 `run_once()` every `POLL_INTERVAL` seconds. Per file, `process_item` computes two
@@ -70,7 +99,7 @@ it auto-detects file vs folder by `mimeType` (override with `is_folder`), then r
 without duplicating business logic.
 
 **`latest` command** (`src/cli.py` + `drive.find_newest_mp4`): resolves a folder
-(arg or first of `FOLDER_IDS`), finds the newest mp4 by `createdTime desc`, and
+(arg or first configured `folder_ids` entry), finds the newest mp4 by `createdTime desc`, and
 dispatches it through `process_target` (honoring `--dry-run`).
 
 **Post-processing** runs in `process_item` after `transcribe_file` and before the
@@ -94,9 +123,9 @@ independent branches still persist, then an aggregated error makes the file retr
 and re-run only the still-missing presets on a later cycle.
 
 **Output layer** (`src/output.py`): `write_artifact` writes each artifact either as
-a Drive sibling (`OUTPUT_TARGET=drive` — upload, or update an existing sibling in
+a Drive sibling (`output.target=drive` — upload, or update an existing sibling in
 place via `drive.update_file`, its id flowing through `list_folder_state`) or into a
-local `OUTPUT_DIR` (`OUTPUT_TARGET=folder`).
+local `output.dir` (`output.target=folder`).
 
 For deterministic, agent-driven speaker correction, `src/relabel_transcript.py`
 (and the `gdstt relabel` command) rewrite `Speaker N` labels from a `MAP.json`
@@ -112,7 +141,7 @@ folder and one cycle summary with provider, overall outcome, folder count,
 pending count, processed count, failed count, `retry_total`,
 skipped-by-size count, folder-error count, dry-run flag, and duration.
 
-**STT layer** (`src/stt/`): `get_provider(config)` dispatches on `STT_PROVIDER`,
+**STT layer** (`src/stt/`): `get_provider(config)` dispatches on `stt.provider`,
 which is Deepgram-only (`""`/`disabled` skips transcription). The base
 `STTProvider` exposes `transcribe_full()`; Deepgram does whole-file transcription
 and overrides it. `transcribe_file()` (`transcribe.py`) calls `transcribe_full` and
@@ -134,17 +163,29 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   `deepgram`; set `stt.provider: disabled` (or empty) to skip transcription and only
   manage MP3 artifacts.
 - Bootstrap and Drive-only commands use `load_config(validate_providers=False)`:
-  `auth`, `doctor`, `list` / `status`, `speakers set`, and `config migrate`.
+  `auth`, `doctor`, `list` / `status`, and `speakers set`.
 - Processing commands validate provider configuration and can spend credits:
-  `run`, `run-once`, `process`, `latest`, and `transcribe`.
+  `run`, `run-once`, `process`, `reprocess`, `latest`, and `transcribe`.
 - `relabel` is a local file transform that touches no Drive and spends nothing.
-- Configuration is `data/config.yml` (grouped `output`, `stt.deepgram`, `openai`,
-  and a top-level `presets` map). `.env` is auto-migrated into YAML on first run;
-  `gdstt config migrate [--force]` regenerates it explicitly. Resolve a non-default
-  file with `gdstt --config PATH ...` or the `GDSTT_CONFIG` env var.
+- `reprocess <id> [STAGES]` force-reruns chain stages by number: `0` = transcript
+  (re-runs STT + everything downstream), `1..N` = enabled presets in
+  `preset_pipeline.topological_order`. It threads `reprocess_presets` through
+  `process_target` -> `process_item` -> `_run_preset_stage(only_presets=...)`,
+  reusing dependency artifacts as `precomputed`. `gdstt doctor` prints the numbers.
+- `run.enabled` (config flag, default true) controls the polling loop: `gdstt stop`
+  sets it false and the loop **pauses** — `main()` re-reads it each cycle via
+  `is_run_enabled()` and idles (sleeps then re-checks) instead of exiting, so the
+  container stays up. The stop is sticky: `main()` never auto-enables the flag at
+  startup, so it survives Docker `restart: unless-stopped` without auto-resuming.
+  Resume with `gdstt start`/`gdstt run` (both set it true); `docker compose stop`
+  halts the container itself.
+- Configuration is `<GDSTT_HOME>/config.yml` (default `./data/config.yml`; grouped
+  `output`, `stt.deepgram`, `openai`, and a top-level `presets` map). The file must
+  exist — create it with `gdstt config init` (no dotenv, no migration, no
+  auto-generation). Resolve a one-shot non-default file with `gdstt --config PATH ...`.
 - Enabled presets run after the transcript is produced and require `openai.api_key`;
   each writes a `<base><artifact_suffix>` document tagged `artifact_type=<name>`.
-  Having no enabled presets replaces the old `OPENAI_KEYPOINTS=false` gate.
+  Having no enabled presets replaces the old `openai.keypoints=false` gate.
 - `output.target` selects where artifacts land: `drive` (siblings) or `folder`
   (`output.dir`, required when `folder`).
 - Idempotency relies on `appProperties.source_video_id`, the per-artifact

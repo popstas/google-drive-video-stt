@@ -92,7 +92,7 @@ def test_preset_dag_end_to_end_writes_each_artifact(tmp_path, monkeypatch):
     }
     config_file = tmp_path / "config.yml"
     config_file.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
-    monkeypatch.setenv("GDSTT_CONFIG", str(config_file))
+    monkeypatch.setenv("GDSTT_HOME", str(tmp_path))
 
     cli.main(["process", file_id])
 

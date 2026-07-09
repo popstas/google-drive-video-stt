@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from src import presets as presets_module
 from src.presets import (
     BUILTIN_PRESETS,
     INSTRUCTIONS,
     Preset,
     default_artifact_suffix,
+    load_packaged_prompt,
     merge_presets,
     validate_dag,
 )
@@ -44,6 +48,54 @@ def test_builtin_keypoints_present():
     assert by_name["keypoints"].instructions == INSTRUCTIONS
     assert by_name["keypoints"].artifact_suffix == ".keypoints.md"
     assert by_name["keypoints"].enabled is True
+    assert by_name["keypoints"].prompt_file == "keypoints.md"
+
+
+# --- packaged prompt assets -------------------------------------------------
+
+
+def test_load_packaged_prompt_returns_keypoints_text():
+    text = load_packaged_prompt("keypoints.md")
+    assert "## Задачи" in text
+    assert "## Тезисы" in text
+    assert "## Открытые вопросы" in text
+
+
+def test_instructions_equals_keypoints_asset_text():
+    assert INSTRUCTIONS == load_packaged_prompt("keypoints.md")
+
+
+def test_load_packaged_prompt_missing_raises():
+    with pytest.raises(ValueError, match="missing or empty"):
+        load_packaged_prompt("does-not-exist.md")
+
+
+def test_load_packaged_prompt_uses_importlib_resources_without_source_dir(monkeypatch):
+    # Simulate an installed/container layout where the source-dir fallback is absent
+    # (no top-level ``assets/`` and no ``src/assets/prompts`` on disk). The prompt must
+    # still resolve via ``importlib.resources`` package data alone.
+    monkeypatch.setattr(
+        presets_module, "_SRC_PROMPTS_DIR", Path("/nonexistent/assets/prompts")
+    )
+    text = load_packaged_prompt("keypoints.md")
+    assert "## Задачи" in text
+    assert text.strip()
+
+
+def test_load_packaged_prompt_falls_back_to_source_dir(monkeypatch):
+    # Force the ``importlib.resources`` lookup to fail so the ``Path``-relative
+    # source-dir fallback is exercised and still finds the shipped package data.
+    monkeypatch.setattr(
+        presets_module, "_PACKAGED_PROMPTS_PACKAGE", "src.assets.does_not_exist"
+    )
+    text = load_packaged_prompt("keypoints.md")
+    assert "## Задачи" in text
+    assert text.strip()
+
+
+def test_preset_accepts_prompt_file_field():
+    preset = Preset(name="kp", instructions="x", prompt_file="kp.md")
+    assert preset.prompt_file == "kp.md"
 
 
 # --- merge ------------------------------------------------------------------
@@ -80,9 +132,30 @@ def test_merge_adds_new_preset():
     assert new.artifact_suffix == ".expertizeme-managers.md"
 
 
-def test_merge_new_preset_requires_instructions():
+def test_merge_new_preset_requires_instructions_or_prompt_file():
     with pytest.raises(ValueError, match="must define instructions"):
         merge_presets(BUILTIN_PRESETS, {"orphan": {"depends_on": ["keypoints"]}})
+
+
+def test_merge_new_preset_accepts_prompt_file_without_instructions():
+    merged = merge_presets(
+        BUILTIN_PRESETS,
+        {"managers": {"prompt_file": "managers.md"}},
+    )
+    new = merged["managers"]
+    assert new.prompt_file == "managers.md"
+    # prompt_file presets carry no inline instructions; config.py resolves them.
+    assert new.instructions == ""
+
+
+def test_merge_new_preset_keeps_instructions_over_prompt_file():
+    merged = merge_presets(
+        BUILTIN_PRESETS,
+        {"managers": {"instructions": "inline", "prompt_file": "managers.md"}},
+    )
+    new = merged["managers"]
+    assert new.instructions == "inline"
+    assert new.prompt_file == "managers.md"
 
 
 def test_merge_disables_builtin():
@@ -116,6 +189,24 @@ def test_merge_batch_and_model_fallback_none():
     merged = merge_presets(BUILTIN_PRESETS, {"extra": {"instructions": "x"}})
     assert merged["extra"].model is None
     assert merged["extra"].batch is None
+    assert merged["extra"].batch_wait is None
+
+
+def test_merge_parses_batch_wait():
+    merged = merge_presets(
+        BUILTIN_PRESETS,
+        {
+            "wait": {"instructions": "x", "batch_wait": True},
+            "nowait": {"instructions": "y", "batch_wait": False},
+        },
+    )
+    assert merged["wait"].batch_wait is True
+    assert merged["nowait"].batch_wait is False
+
+
+def test_merge_overrides_builtin_batch_wait():
+    merged = merge_presets(BUILTIN_PRESETS, {"keypoints": {"batch_wait": False}})
+    assert merged["keypoints"].batch_wait is False
 
 
 def test_merge_rejects_non_mapping_entry():

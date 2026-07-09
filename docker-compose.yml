@@ -4,8 +4,11 @@ services:
     image: google-drive-video-stt:latest
     container_name: google-drive-video-stt
     restart: unless-stopped
-    env_file:
-      - .env
+    environment:
+      # The image already bakes GDSTT_HOME=/app/data; set it here too so the
+      # config resolver reads config.yml and credentials.json/token.json from
+      # the mounted ./data volume.
+      GDSTT_HOME: /app/data
     volumes:
       - ./data:/app/data
     logging:

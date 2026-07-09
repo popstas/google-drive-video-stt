@@ -32,8 +32,8 @@ def make_config(
     presets=None,
 ) -> Config:
     if presets is None:
-        # Mirror the env-migration default: the built-in keypoints pass is the only
-        # enabled preset when OPENAI_KEYPOINTS is on, and none otherwise.
+        # Mirror the legacy keypoints gate: the built-in keypoints pass is the only
+        # enabled preset when requested, and none otherwise.
         presets = BUILTIN_PRESETS if openai_keypoints else ()
     return Config(
         folder_ids=folder_ids if folder_ids is not None else ["folderA"],
@@ -1980,6 +1980,96 @@ def test_process_item_skips_preset_reprocess_without_drive_txt(mocker):
     transcribe.assert_not_called()
 
 
+def test_preset_only_reprocess_without_transcript_does_not_run_stt(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+    download = mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    transcribe = mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    run_mock = mocker.patch("src.main.preset_pipeline.run_presets")
+
+    result = main.process_item(
+        service,
+        _item("fid", "video.mp4", has_txt=False, txt_id=None),
+        "folderX",
+        _two_preset_config(drive_mp3_artifact=False),
+        reprocess_presets=["keypoints"],
+    )
+
+    assert result is None
+    download.assert_not_called()
+    transcribe.assert_not_called()
+    run_mock.assert_not_called()
+
+
+def test_apply_local_output_state_tracks_local_txt_and_preset_artifacts(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "video.txt").write_text("local transcript", encoding="utf-8")
+    (out / "video.transcript-cleanup.md").write_text("cleaned", encoding="utf-8")
+    cfg = _two_preset_config(output_target="folder", output_dir=out)
+    item = _item("fid", "video.mp4", has_txt=False, txt_id=None, artifact_ids={})
+
+    main._apply_local_output_state([item], cfg)
+
+    assert item["has_txt"] is True
+    assert item["local_txt_path"] == out / "video.txt"
+    assert item["local_artifact_paths"] == {
+        "transcript-cleanup": out / "video.transcript-cleanup.md"
+    }
+
+
+def test_process_item_reprocesses_presets_from_local_folder_transcript(mocker, tmp_path):
+    service = MagicMock()
+    out = tmp_path / "out"
+    out.mkdir()
+    local_txt = out / "video.txt"
+    local_txt.write_text("existing local transcript", encoding="utf-8")
+    mocker.patch("src.main.transcribe_file")
+    mocker.patch("src.main.drive.download_text")
+    run_mock = mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "transcript-cleanup": PresetResult(
+                name="transcript-cleanup", text="cleaned"
+            ),
+            "keypoints": PresetResult(name="keypoints", text="notes"),
+        },
+    )
+
+    item = _item("fid", "video.mp4", has_txt=True, txt_id=None, artifact_ids={})
+    item["local_txt_path"] = local_txt
+    cfg = _two_preset_config(output_target="folder", output_dir=out)
+    result = main.process_item(
+        service,
+        item,
+        "folderX",
+        cfg,
+        reprocess_presets=["keypoints"],
+    )
+
+    assert result is not None
+    assert run_mock.call_args.args[0] == "existing local transcript"
+    assert (out / "video.transcript-cleanup.md").read_text(encoding="utf-8") == "cleaned"
+    assert (out / "video.keypoints.md").read_text(encoding="utf-8") == "notes"
+
+
+def test_dry_run_preset_names_expands_missing_dependencies_for_reprocess():
+    cfg = _two_preset_config()
+    item = _item("fid", "video.mp4", has_txt=True, txt_id="txt-1", artifact_ids={})
+
+    names = main._dry_run_preset_names(
+        item,
+        cfg,
+        needs_txt=False,
+        reprocess_txt=False,
+        reprocess_presets=["keypoints"],
+    )
+
+    assert names == ["transcript-cleanup", "keypoints"]
+
+
 def test_pending_items_includes_drive_txt_with_missing_preset():
     cfg = _two_preset_config()
     done = _item(
@@ -1997,3 +2087,103 @@ def test_pending_items_includes_drive_txt_with_missing_preset():
     pending = main._pending_items([done, missing, folder_local], cfg)
 
     assert [item["file"]["id"] for item in pending] == ["v2"]
+
+
+# --- run loop stop flag (gdstt stop) ----------------------------------------
+
+class _LoopStop(Exception):
+    """Sentinel raised from a patched time.sleep to break the polling loop."""
+
+
+def test_main_loop_idles_while_run_disabled_without_running(mocker):
+    # `gdstt stop` keeps the loop alive but idle: run_once is never called while
+    # run.enabled is false. The container stays up (no break/exit) so a Docker
+    # `restart: unless-stopped` policy does not auto-resume processing.
+    cfg = make_config(folder_ids=["f1"], poll_interval=7)
+    mocker.patch("src.main.load_config", return_value=cfg)
+    mocker.patch("src.main.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.main.is_run_enabled", return_value=False)
+    once = mocker.patch("src.main.run_once")
+    # Break the otherwise-infinite idle loop after a couple of sleeps.
+    sleep = mocker.patch("src.main.time.sleep", side_effect=[None, _LoopStop()])
+
+    with pytest.raises(_LoopStop):
+        main.main()
+
+    once.assert_not_called()
+    assert sleep.call_args_list == [mocker.call(7), mocker.call(7)]
+
+
+def test_main_loop_runs_while_enabled_and_idles_when_disabled(mocker):
+    # Enabled twice (two cycles), then disabled (idle). run_once is called only
+    # while enabled; once disabled the loop idles instead of exiting.
+    cfg = make_config(folder_ids=["f1"], poll_interval=5)
+    mocker.patch("src.main.load_config", return_value=cfg)
+    mocker.patch("src.main.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.main.is_run_enabled", side_effect=[True, True, False])
+    once = mocker.patch("src.main.run_once")
+    sleep = mocker.patch("src.main.time.sleep", side_effect=[None, None, _LoopStop()])
+
+    with pytest.raises(_LoopStop):
+        main.main()
+
+    assert once.call_count == 2
+    assert sleep.call_count == 3
+
+
+def test_main_does_not_enable_run_on_startup(mocker):
+    # main() must not auto-enable run.enabled, so a sticky `gdstt stop` survives a
+    # container restart instead of resuming on the next boot.
+    import dataclasses
+
+    cfg = dataclasses.replace(make_config(folder_ids=["f1"]), run_enabled=False)
+    mocker.patch("src.main.load_config", return_value=cfg)
+    mocker.patch("src.main.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.main.is_run_enabled", return_value=False)
+    mocker.patch("src.main.run_once")
+    mocker.patch("src.main.time.sleep", side_effect=_LoopStop())
+    set_enabled = mocker.patch(
+        "src.config.set_run_enabled", side_effect=AssertionError("must not be called")
+    )
+
+    with pytest.raises(_LoopStop):
+        main.main()
+
+    set_enabled.assert_not_called()
+
+
+def test_run_preset_stage_forces_only_selected(mocker):
+    presets = (
+        Preset(name="transcript-cleanup", instructions="c"),
+        Preset(name="keypoints", instructions="k", depends_on=("transcript-cleanup",)),
+        Preset(name="action-items", instructions="a", depends_on=("transcript-cleanup",)),
+    )
+    cfg = make_config(presets=presets)
+    run_presets = mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "action-items": PresetResult(name="action-items", text="out"),
+        },
+    )
+    mocker.patch("src.main._save_and_upload_preset")
+    # transcript-cleanup artifact already exists -> reused as a precomputed dependency.
+    mocker.patch("src.main._call_with_transient_retries", return_value="cleanup text")
+
+    main._run_preset_stage(
+        MagicMock(),
+        "file-1",
+        "Alice and Bob.mp4",
+        "Speaker 1: hi",
+        "folderA",
+        Path("/tmp"),
+        cfg,
+        speaker_names=None,
+        artifact_ids={"transcript-cleanup": "tc-id"},
+        reprocess=False,
+        only_presets=["action-items"],
+        usage={},
+    )
+
+    kwargs = run_presets.call_args.kwargs
+    assert kwargs["only"] == ["action-items"]
+    assert kwargs["precomputed"] == {"transcript-cleanup": "cleanup text"}

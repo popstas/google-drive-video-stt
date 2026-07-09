@@ -88,6 +88,38 @@ def dependency_names(
     return _closure(preset_map, names) - set(names)
 
 
+def topological_order(
+    presets: Mapping[str, Preset] | Iterable[Preset],
+) -> list[str]:
+    """Return preset names in dependency order (dependencies before dependents).
+
+    Independent presets keep their input order, so a config-declared chain like
+    ``transcript-cleanup -> {keypoints, action-items}`` yields
+    ``[transcript-cleanup, keypoints, action-items]``. This is the order the CLI
+    numbers chain stages with (stage 1 = first preset). Assumes a valid DAG
+    (validated by :func:`~src.presets.validate_dag`); a residual cycle falls back to
+    appending the unresolved names in input order rather than raising.
+    """
+    preset_map = _as_preset_map(presets)
+    ordered: list[str] = []
+    placed: set[str] = set()
+
+    def visit(name: str, stack: set[str]) -> None:
+        if name in placed or name not in preset_map or name in stack:
+            return
+        stack.add(name)
+        for dep in preset_map[name].depends_on:
+            visit(dep, stack)
+        stack.discard(name)
+        if name not in placed:
+            placed.add(name)
+            ordered.append(name)
+
+    for name in preset_map:
+        visit(name, set())
+    return ordered
+
+
 def _dependency_input(preset: Preset, results: Mapping[str, PresetResult]) -> str:
     """Concatenate dependency outputs with a labeled separator per dependency."""
     sections: list[str] = []
@@ -111,11 +143,28 @@ def _run_one(
     else:
         input_text = build_prompt(transcript, file_name, speaker_names=speaker_names)
 
+    use_batch = preset.batch if preset.batch is not None else config.openai_batch
+    # batch_wait resolution: per-preset override wins, else the global default
+    # (openai.batch_wait, itself defaulting to true). Only the synchronous
+    # submit-and-wait path is implemented; an async pending-job state (batch_wait
+    # false) is intentionally unsupported.
+    batch_wait = (
+        preset.batch_wait if preset.batch_wait is not None else config.openai_batch_wait
+    )
+    # batch_wait only governs batch submissions; a synchronous (non-batch) preset is
+    # already inline, so batch_wait=false is a no-op there and must not error.
+    if use_batch and not batch_wait:
+        raise NotImplementedError(
+            f"preset {preset.name!r}: batch_wait=false is not supported; the DAG "
+            f"submits batch jobs and waits synchronously. Set batch_wait: true "
+            f"(or leave it unset to inherit the default)."
+        )
+
     pipeline = OpenAIPipeline(
         api_key=config.openai_api_key,
         model=preset.model or config.openai_model,
         proxy_url=config.proxy_url,
-        use_batch=preset.batch if preset.batch is not None else config.openai_batch,
+        use_batch=use_batch,
     )
     try:
         text, usage = pipeline.run(preset.instructions, input_text)
