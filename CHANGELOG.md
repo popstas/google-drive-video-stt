@@ -1,11 +1,15 @@
 # Changelog
 
 
-## Unreleased
+## v0.2.1 - 2026-07-09
 
 ### Build
 
 - Add git-cliff changelog generation
+
+### Miscellaneous
+
+- Add tests workflow and bump-my-version release tooling
 
 ## v0.2.0 - 2026-07-09
 
@@ -18,6 +22,21 @@
 - DAG executor over the OpenAI pipeline
 - Add preset model, built-ins, merge, and DAG validation
 - Config.yml load, auto-migration, and config migrate command
+
+### Bug Fixes
+
+- Address codex review findings
+- Gate provider validation on enabled presets and fix data_dir round-trip
+- review: Reprocess missing presets and report all preset usage
+
+### Documentation
+
+- Add OpenAI preset DAG design spec
+
+## v0.1.0 - 2026-06-04
+
+### Features
+
 - Verify acceptance criteria for CLI/postprocess/OpenAI plan
 - Add OpenAI Responses transcript post-processing pipeline
 - Add transcript post-processing and speaker mapping
@@ -41,9 +60,6 @@
 ### Bug Fixes
 
 - Address codex review findings
-- Gate provider validation on enabled presets and fix data_dir round-trip
-- review: Reprocess missing presets and report all preset usage
-- Address codex review findings
 - review: Surface failed OpenAI batch lines and fix stale docs
 - Prevent single extracted name from collapsing all speakers
 - review: Document CLI/post-processing and cover batch polling
@@ -55,7 +71,6 @@
 
 ### Documentation
 
-- Add OpenAI preset DAG design spec
 - Add CLAUDE.md for Claude Code
 - Add init plan.md
 
