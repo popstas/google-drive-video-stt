@@ -10,6 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILL_ID = "gdstt-cli"
 AGENTS_PATH = REPO_ROOT / "AGENTS.md"
 CLAUDE_PATH = REPO_ROOT / "CLAUDE.md"
+README_PATH = REPO_ROOT / "README.md"
 CANONICAL_SKILL_ROOT = REPO_ROOT / "skills" / SKILL_ID
 SKILL_PATH = CANONICAL_SKILL_ROOT / "SKILL.md"
 
@@ -158,6 +159,80 @@ def test_skill_vault_integration_is_optional_and_impersonal():
     assert wikilinks, "vault section should include at least one placeholder wikilink"
     for link in wikilinks:
         assert "<" in link, f"wikilink must be a placeholder, not a real name: [[{link}]]"
+
+
+def test_skill_documents_config_yml_and_preset_dag():
+    """The operator skill must teach the config.yml + preset-DAG posture."""
+    text = SKILL_PATH.read_text(encoding="utf-8")
+
+    assert "config.yml" in text
+    assert "config init" in text
+    assert "GDSTT_HOME" in text
+    # Preset DAG vocabulary the operator needs to author/inspect presets.
+    assert "depends_on" in text
+    assert "artifact_type" in text
+    assert "transcript-cleanup -> keypoints + action-items" in text
+    assert "transcript -> keypoints" not in text
+
+
+def test_skill_documents_config_owned_posture():
+    """The skill must teach prompt source priority, conflicts, batch, and the
+    config-management surface earlier stages added."""
+    text = SKILL_PATH.read_text(encoding="utf-8")
+
+    # Prompt source priority: instructions > prompt_file > error, packaged assets.
+    assert "instructions" in text
+    assert "prompt_file" in text
+    # The new config subcommands and the inline-first / file-mode auth split.
+    for needle in (
+        "config init",
+        "config path",
+        "config get",
+        "config set",
+        "config unset",
+        "auth import-credentials",
+        "auth use-files",
+        "google.credentials",
+        "google.token_file",
+        "GDSTT_HOME",
+    ):
+        assert needle in text, f"skill must document {needle!r}"
+    # Batch is cheaper/slower, not higher quality; batch_wait default; per-stage.
+    assert "batch_wait" in text
+    assert "transcript-cleanup.batch" in text or "transcript-cleanup" in text
+
+
+def test_agents_doc_documents_config_yml_and_preset_dag():
+    text = AGENTS_PATH.read_text(encoding="utf-8")
+
+    assert "data/config.yml" in text
+    assert "preset" in text.lower()
+    assert "artifact_type" in text
+    # The GDSTT_HOME directory bootstrap is the breaking change operators must know.
+    assert "GDSTT_HOME" in text
+
+
+def test_docs_describe_config_keys_not_env_runtime_defaults():
+    readme = README_PATH.read_text(encoding="utf-8")
+    skill = SKILL_PATH.read_text(encoding="utf-8")
+    agents = AGENTS_PATH.read_text(encoding="utf-8")
+    combined = "\n".join([readme, skill, agents])
+
+    assert "data_dir: ." in readme
+    assert "data_dir: data" not in readme
+    assert "| `data_dir` | `.` |" in readme
+    assert "Manage gdstt configuration (data/config.yml)" not in combined
+    assert "scripts/docker-smoke.sh my-image   # use an existing tag instead" not in readme
+    assert "validates `run-once --dry-run`" not in agents
+
+    for stale in (
+        "`FOLDER_IDS`",
+        "`STT_PROVIDER`",
+        "`OUTPUT_TARGET`",
+        "`OUTPUT_DIR`",
+        "`OPENAI_KEYPOINTS`",
+    ):
+        assert stale not in readme
 
 
 def test_agents_doc_exists_with_source_of_truth_pointer():

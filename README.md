@@ -19,9 +19,10 @@ speech-to-text pipelines.
   relabeling, and folder-state inspection
 - Local post-processing that maps diarized `Speaker N` labels to the interlocutor
   names parsed from the file name
-- Optional Keypoints generation (`## Задачи` / `## Тезисы` / `## Открытые
-  вопросы`) via the OpenAI Responses API
-- Output to Google Drive siblings or to a local folder (`OUTPUT_TARGET`)
+- Config-defined DAG of OpenAI presets (each writes its own sibling artifact, e.g.
+  the built-in Keypoints pass: `## Задачи` / `## Тезисы` / `## Открытые вопросы`),
+  with independent presets run in parallel via the OpenAI Responses API
+- Output to Google Drive siblings or to a local folder (`output.target`)
 - Sibling `.mp3`/`.txt` names preserve the full Drive file name, including `/`
   characters
 - Explicit speaker names can be stored on the Drive MP4 when the filename is not
@@ -32,10 +33,10 @@ speech-to-text pipelines.
 
 - Python 3.11+ and [`uv`](https://github.com/astral-sh/uv) for local development
 - `ffmpeg` available on `PATH` for local runs (already included in the Docker image)
-- Google Cloud project with the Drive API enabled and OAuth client metadata in
-  `data/credentials.json`
-- A Deepgram API key for transcription (`STT_PROVIDER=deepgram`)
-- Optional: an OpenAI API key when `OPENAI_KEYPOINTS=true`
+- Google Cloud project with the Drive API enabled and OAuth client metadata
+  imported into `config.yml` or supplied in file mode
+- A Deepgram API key for transcription (`stt.provider: deepgram`)
+- Optional: an OpenAI API key when any OpenAI preset is enabled (e.g. `keypoints`)
 - Optional: a Telegram bot token + chat ID for error notifications
 - Optional: an HTTP(S) or SOCKS proxy via `PROXY_URL`; SOCKS support is included
   through the `requests[socks]` dependency
@@ -55,15 +56,44 @@ For development in this checkout, install the editable environment too:
 uv sync --extra dev
 ```
 
-Then create `.env` from the template and fill in the required values:
+Configuration lives in a single `config.yml`. For a fresh install, generate
+one from the packaged defaults — the full chain `transcript-cleanup -> keypoints +
+action-items` is enabled out of the box with `openai.batch: true`:
 
 ```bash
-cp .env.example .env
-# Set at least FOLDER_IDS, DEEPGRAM_API_KEY, and (if used) OUTPUT_DIR / OPENAI_API_KEY
+gdstt config init      # writes config.yml + prompts/ to the resolved target (see below)
+gdstt config path      # print the resolved config.yml path
 ```
 
-After `data/credentials.json` is in place (see below), authenticate once and
-verify access with the safe operator flow:
+The active config is always `<GDSTT_HOME>/config.yml`. When `GDSTT_HOME` is unset
+the home defaults to `./data`, so a repo or VPS checkout uses `./data/config.yml`
+with no hidden OS config paths:
+
+```text
+--config PATH                 # one-shot file override (tests/diagnostics, not persisted)
+GDSTT_HOME/config.yml         # persistent instance directory
+./data/config.yml             # default when GDSTT_HOME is unset
+```
+
+Point at a custom instance directory by exporting `GDSTT_HOME`:
+
+```bash
+export GDSTT_HOME=/srv/gdstt
+gdstt config init --force     # writes /srv/gdstt/config.yml
+```
+
+The packaged prompt assets (`keypoints.md`, `transcript-cleanup.md`,
+`action-items.md`) are copied into `<GDSTT_HOME>/prompts/` beside the config, and
+each preset's `prompt_file` points at them. There is no hidden runtime prompt in
+Python — the prompt text is owned by these `.md` files.
+
+There is no auto-generation and no migration: a missing or empty config is a clear
+setup error that points you at `gdstt config init`. Author `config.yml` by hand
+(see [Configuration](#configuration)) or generate it, then fill in your keys. Pass
+`gdstt --config PATH ...` for a one-shot override against a specific file.
+
+After Google credentials are imported inline (or file mode is configured; see
+below), authenticate once and verify access with the safe operator flow:
 
 ```bash
 gdstt auth
@@ -75,8 +105,21 @@ gdstt process <file-id> --dry-run
 ## Google Drive setup
 
 This app authenticates with a single Google OAuth user credential covering Drive.
-It reads OAuth client metadata from `data/credentials.json` and writes its own
-`data/token.json` when you run `gdstt auth`.
+
+Google auth is **config-owned and inline-first**. By default the OAuth client JSON
+lives inline in the config under `google.credentials` and the saved token under
+`google.token`, both inside `config.yml`. Import the downloaded client with
+`gdstt auth import-credentials <path>`, then run `gdstt auth` to write the token.
+
+File mode is an explicit opt-in: `gdstt auth use-files --credentials-file PATH
+[--token-file PATH]` sets `google.credentials_file`/`google.token_file` and clears
+the inline copies. When neither inline mappings nor file pointers are set, the
+loader falls back to `data/credentials.json` and `data/token.json` for
+back-compatibility (the legacy layout used by the examples below).
+
+Inline tokens, `client_secret`, and `refresh_token` are secrets: in a shared
+(synced) config, keep them in file mode (or a local, non-synced part of the
+config) rather than inline where others can read the config.
 
 ### Option A — gcloud / Application Default Credentials
 
@@ -166,47 +209,105 @@ Invoke-RestMethod `
   -Body $body
 ```
 
-Copy the returned `id` into `.env` as `FOLDER_IDS=<folder-id>`. For an existing
-Drive folder, the folder id is the last path segment in the browser URL:
+Copy the returned `id` into `config.yml` as `folder_ids: [<folder-id>]` (or use
+`gdstt config set folder_ids <folder-id>`). For an existing Drive folder, the
+folder id is the last path segment in the browser URL:
 `https://drive.google.com/drive/folders/<folder-id>`.
 
 ## Configuration
 
-All configuration is environment-driven. See `.env.example`.
+All configuration lives in the active `config.yml` (`<GDSTT_HOME>/config.yml`, or
+`./data/config.yml` when `GDSTT_HOME` is unset). It is grouped under `output`, `stt`
+(with a nested `deepgram` block), and `openai`, plus a top-level `presets` map.
+There is no auto-generation: create the file with `gdstt config init` (or by hand),
+then edit it. Resolve a one-shot non-default file with `gdstt --config PATH ...`.
 
-| Variable | Default | Purpose |
+```yaml
+folder_ids: [abc, def]
+poll_interval: 600
+bitrate: 96k
+data_dir: .
+proxy_url: ""
+run:
+  enabled: true          # gdstt stop/start toggle this; persists across restarts
+notifications:
+  telegram:
+    bot_token: ""        # optional; errors are posted only when both are set
+    chat_id: ""
+output:
+  target: drive          # drive | folder
+  dir: null              # required when target=folder
+stt:
+  provider: deepgram     # "" / disabled => MP3-only
+  language: ru
+  postprocess: true
+  drive_mp3_artifact: false
+  deepgram:
+    api_key: "..."
+    model: nova-3
+    diarize_model: latest
+    audio_source: m4a_copy
+    txt_formatter: word_speaker
+    keyterms_enabled: true
+    keyterms_file: config/deepgram-keyterms.txt
+openai:
+  api_key: "..."
+  model: gpt-5.4-mini    # global default model for presets
+  batch: false           # global default batch mode for presets
+  batch_wait: true       # wait synchronously for batch results (default)
+  max_parallel: 4        # cap on presets run concurrently
+google: {}               # inline-first auth; empty => data_dir fallback
+presets:
+  transcript-cleanup:
+    prompt_file: prompts/transcript-cleanup.md   # packaged asset, copied beside the config
+    batch: false                                 # keep an upstream stage off batch (see below)
+  keypoints:
+    depends_on: [transcript-cleanup]   # overrides the built-in keypoints preset
+  action-items:
+    depends_on: [transcript-cleanup]
+    instructions: "Extract per-manager action items..."   # inline prompt instead of a file
+```
+
+Presets define the OpenAI post-processing DAG (see
+[Preset DAG](#preset-dag-keypoints-and-beyond)). A preset's prompt comes from
+`instructions` (inline) **or** `prompt_file`; supplying neither is an error. Each
+setting below maps to a `config.yml` key; no `.env` file or legacy environment
+variable is read at runtime:
+
+| Setting | Default | Purpose |
 | --- | --- | --- |
-| `FOLDER_IDS` | (required) | Comma-separated Google Drive folder IDs to monitor |
-| `POLL_INTERVAL` | `600` | Seconds between poll cycles |
-| `BITRATE` | `96k` | MP3 audio bitrate passed to ffmpeg |
-| `DRIVE_MP3_ARTIFACT` | auto | Upload an MP3 artifact to Drive. Defaults to `false` for `DEEPGRAM_AUDIO_SOURCE=m4a_copy`; `true` otherwise |
-| `TELEGRAM_BOT_TOKEN` | (empty) | If set with chat ID, errors are posted to Telegram |
-| `TELEGRAM_CHAT_ID` | (empty) | Telegram chat to receive error notifications |
-| `DATA_DIR` | `data` | Directory holding `credentials.json` and `token.json` |
-| `PROXY_URL` | (empty) | Optional `http`/`https`/`socks5` proxy for Telegram, Deepgram, and OpenAI |
-| `STT_PROVIDER` | `deepgram` | `deepgram` by default. Set `disabled` (or empty) to skip transcription and only manage MP3 artifacts |
-| `STT_LANGUAGE` | (empty) | Language hint. `deepgram`: empty defaults to `ru` |
-| `STT_POSTPROCESS` | `true` | Clean the transcript and map diarized `Speaker N` labels to the interlocutor names parsed from the file name, merging spurious extra speakers |
-| `OUTPUT_TARGET` | `drive` | Where artifacts are written: `drive` (sibling files) or `folder` (local `OUTPUT_DIR`) |
-| `OUTPUT_DIR` | — | Required when `OUTPUT_TARGET=folder`; local directory for transcript/keypoints files |
-| `OPENAI_KEYPOINTS` | `false` | Generate a `<base>.keypoints.md` Keypoints document via the OpenAI Responses API after transcription. Requires `OPENAI_API_KEY` |
-| `OPENAI_API_KEY` | — | Required when `OPENAI_KEYPOINTS=true` |
-| `OPENAI_MODEL` | `gpt-5.4-mini` | Model for the OpenAI keypoints pipeline |
-| `OPENAI_BATCH` | `false` | Submit keypoints generation via the OpenAI Batch API (~50% cheaper, higher latency) |
-| `DEEPGRAM_API_KEY` | — | Required when `STT_PROVIDER=deepgram` unless `DEEPGRAM_API_KEY_FILE` is set |
-| `DEEPGRAM_API_KEY_FILE` | — | Optional file containing a raw Deepgram token or JSON with `api_key`, `deepgram_api_key`, or `DEEPGRAM_API_KEY` |
-| `DEEPGRAM_MODEL` | `nova-3` | Deepgram model name |
-| `DEEPGRAM_DIARIZE_MODEL` | `latest` | Deepgram diarization model: `latest` or `v1` |
-| `DEEPGRAM_AUDIO_SOURCE` | `m4a_copy` | Audio sent to Deepgram: `m4a_copy`, `mp3_96k`, or `mp3_192k` |
-| `DEEPGRAM_TXT_FORMATTER` | `word_speaker` | Deepgram TXT formatter: `word_speaker` or `utterance` |
-| `DEEPGRAM_KEYTERMS_ENABLED` | `true` | Enables Nova-3 keyterm prompting |
-| `DEEPGRAM_KEYTERMS_FILE` | `config/deepgram-keyterms.txt` | Keyterms file, one term per line, max 100 |
+| `folder_ids` | (required) | Google Drive folder IDs to monitor |
+| `poll_interval` | `600` | Seconds between poll cycles |
+| `bitrate` | `96k` | MP3 audio bitrate passed to ffmpeg |
+| `stt.drive_mp3_artifact` | auto | Upload an MP3 artifact to Drive. Defaults to `false` for `stt.deepgram.audio_source=m4a_copy`; `true` otherwise |
+| `notifications.telegram.bot_token` | (empty) | Read at runtime from `config.yml`. If set with chat ID, errors are posted to Telegram |
+| `notifications.telegram.chat_id` | (empty) | Read at runtime from `config.yml`. Telegram chat to receive error notifications |
+| `data_dir` | `.` | Base directory for credentials/token files and other instance state |
+| `proxy_url` | (empty) | Optional `http`/`https`/`socks5` proxy for Telegram, Deepgram, and OpenAI |
+| `stt.provider` | `deepgram` | `deepgram` by default. Set `disabled` (or empty) to skip transcription and only manage MP3 artifacts |
+| `stt.language` | (empty) | Language hint. `deepgram`: empty defaults to `ru` |
+| `stt.postprocess` | `true` | Clean the transcript and map diarized `Speaker N` labels to the interlocutor names parsed from the file name, merging spurious extra speakers |
+| `output.target` | `drive` | Where artifacts are written: `drive` (sibling files) or `folder` (local `output.dir`) |
+| `output.dir` | — | Required when `output.target=folder`; local directory for transcript/keypoints files |
+| `openai.api_key` | — | Required when any OpenAI preset is enabled |
+| `openai.model` | `gpt-5.4-mini` | Global default model for presets |
+| `openai.batch` | `false` | Global default batch mode. Batch API is ~50% cheaper but slower (not higher quality); batch on an upstream preset delays its downstream presets |
+| `openai.batch_wait` | `true` | Wait synchronously for batch results (the async path is unsupported) |
+| `openai.max_parallel` | `4` | Max number of independent presets run concurrently |
+| `stt.deepgram.api_key` | — | Required when `stt.provider=deepgram` unless `stt.deepgram.api_key_file` is set |
+| `stt.deepgram.api_key_file` | — | Optional file containing a raw Deepgram token or JSON with `api_key`, `deepgram_api_key`, or `DEEPGRAM_API_KEY` |
+| `stt.deepgram.model` | `nova-3` | Deepgram model name |
+| `stt.deepgram.diarize_model` | `latest` | Deepgram diarization model: `latest` or `v1` |
+| `stt.deepgram.audio_source` | `m4a_copy` | Audio sent to Deepgram: `m4a_copy`, `mp3_96k`, or `mp3_192k` |
+| `stt.deepgram.txt_formatter` | `word_speaker` | Deepgram TXT formatter: `word_speaker` or `utterance` |
+| `stt.deepgram.keyterms_enabled` | `true` | Enables Nova-3 keyterm prompting |
+| `stt.deepgram.keyterms_file` | `config/deepgram-keyterms.txt` | Keyterms file, one term per line, max 100 |
 
 ## Speech-to-text
 
-With `STT_PROVIDER=deepgram` (the default) each pending recording is transcribed
+With `stt.provider=deepgram` (the default) each pending recording is transcribed
 through Deepgram and a sibling `<basename>.txt` is written next to the MP4 (or into
-`OUTPUT_DIR` when `OUTPUT_TARGET=folder`). Set `STT_PROVIDER=disabled` to skip
+`output.dir` when `output.target=folder`). Set `stt.provider=disabled` to skip
 transcription entirely and only manage the optional MP3 artifact.
 
 ### Deepgram Nova-3 (diarization)
@@ -220,10 +321,10 @@ client dependency.
 Setup:
 
 1. Create a Deepgram API key.
-2. Set `STT_PROVIDER=deepgram` and either `DEEPGRAM_API_KEY` or
-   `DEEPGRAM_API_KEY_FILE` in `.env`.
+2. Set `stt.provider: deepgram` and either `stt.deepgram.api_key` or
+   `stt.deepgram.api_key_file` in `config.yml`.
 
-`DEEPGRAM_API_KEY_FILE` may contain either the raw token or JSON with one of these
+`stt.deepgram.api_key_file` may contain either the raw token or JSON with one of these
 fields: `api_key`, `deepgram_api_key`, or `DEEPGRAM_API_KEY`. The API key is never
 logged. After each successful Deepgram transcription, the service logs the request
 id, duration, and best-effort request cost in USD when Deepgram's usage API has
@@ -232,29 +333,31 @@ recorded it.
 The production defaults are:
 
 ```
-DEEPGRAM_MODEL=nova-3
-STT_LANGUAGE=ru
-DEEPGRAM_DIARIZE_MODEL=latest
-DEEPGRAM_AUDIO_SOURCE=m4a_copy  # m4a_copy, mp3_96k, or mp3_192k
-DEEPGRAM_TXT_FORMATTER=word_speaker
-DEEPGRAM_KEYTERMS_ENABLED=true
-DEEPGRAM_KEYTERMS_FILE=config/deepgram-keyterms.txt
+stt:
+  language: ru
+  deepgram:
+    model: nova-3
+    diarize_model: latest
+    audio_source: m4a_copy  # m4a_copy, mp3_96k, or mp3_192k
+    txt_formatter: word_speaker
+    keyterms_enabled: true
+    keyterms_file: config/deepgram-keyterms.txt
 ```
 
 `m4a_copy` extracts a temporary AAC/M4A audio copy from the source MP4 for
 Deepgram without re-encoding. Use `mp3_96k` or `mp3_192k` to send a temporary MP3
 instead. With the Deepgram `m4a_copy` default, no extra Drive MP3 is uploaded
-unless `DRIVE_MP3_ARTIFACT=true` is set. If an MP3 already exists but TXT is
+unless `stt.drive_mp3_artifact=true` is set. If an MP3 already exists but TXT is
 missing, Deepgram downloads the MP4 again so it can use the selected high-quality
 audio source.
 
 `word_speaker` is a Deepgram-only TXT formatter. It uses `utterances` for readable
 timing, but splits a line when `words[].speaker` changes inside the utterance.
-Set `DEEPGRAM_TXT_FORMATTER=utterance` to use the older utterance-level formatter.
+Set `stt.deepgram.txt_formatter=utterance` to use the older utterance-level formatter.
 
-Keyterms are read from `DEEPGRAM_KEYTERMS_FILE`, one term per line. Blank lines and
+Keyterms are read from `stt.deepgram.keyterms_file`, one term per line. Blank lines and
 lines beginning with `#` are ignored. At most 100 keyterms are allowed, and they
-are sent only when `DEEPGRAM_MODEL=nova-3`.
+are sent only when `stt.deepgram.model=nova-3`.
 
 Sample output:
 
@@ -287,15 +390,62 @@ intentionally want to run STT again and overwrite the existing `.txt` in place. 
 `.txt` and `.mp3` artifacts are tagged with the source MP4 id, so future source
 renames do not break artifact detection.
 
-### Keypoints generation
+### Preset DAG (Keypoints and beyond)
 
-When `OPENAI_KEYPOINTS=true`, the service generates a Keypoints document after the
-transcript is produced and writes it as `<base>.keypoints.md` next to the
-transcript (`src/openai_pipeline.py`, OpenAI Responses API). The document contains
-`## Задачи` (grouped by `### Ответственный`), `## Тезисы`, and `## Открытые
-вопросы` in plain text. It requires `OPENAI_API_KEY`, honors `PROXY_URL`, uses
-`OPENAI_MODEL` (default `gpt-5.4-mini`), and can run through the OpenAI Batch API
-(`OPENAI_BATCH=true`) for ~50% lower cost at the price of higher latency.
+After the transcript is produced, the service runs the **enabled presets** defined
+in `data/config.yml` (`src/presets.py` + `src/preset_pipeline.py`, OpenAI Responses
+API). Each preset is one OpenAI pass with its own `instructions`; it feeds on the
+concatenated outputs of its `depends_on` presets, or the raw transcript when it has
+none, and writes its own sibling artifact `<base><artifact_suffix>` (default
+`.<name>.md`) tagged `artifact_type=<name>`. Independent presets run in parallel up
+to `openai.max_parallel`, and each preset may set its own `model`/`batch`, falling
+back to the `openai` defaults.
+
+A built-in `keypoints` preset ships with the code and produces a `<base>.keypoints.md`
+document containing `## Задачи` (grouped by `### Ответственный`), `## Тезисы`, and
+`## Открытые вопросы` in plain text. A generated config enables the full chain
+`transcript-cleanup -> keypoints + action-items` out of the box (with
+`openai.batch: true`); `transcript-cleanup` is written above `keypoints`. Config
+presets override built-ins field-by-field, add new presets, and disable a built-in
+with `enabled: false`. Running any enabled preset requires `openai.api_key` and
+honors `proxy_url`.
+
+**Prompt source priority.** Each preset's instructions are resolved as
+`instructions` (inline text in the YAML) > `prompt_file` > error. A `prompt_file`
+is resolved in order: the path as written, then relative to the config file's
+directory, then the packaged asset by base name. A `prompt_file` that is missing,
+unreadable, or empty is an error, and a preset that defines neither `instructions`
+nor `prompt_file` is an error. The packaged prompt assets (`keypoints.md`,
+`transcript-cleanup.md`, `action-items.md`) are copied into `<config_dir>/prompts/`
+beside the config — there is no hidden runtime prompt in Python.
+
+**Adding a DAG stage (no Python changes).** Add an entry under `presets:` with an
+`instructions` or `prompt_file`, a `depends_on` chain, and optionally
+`model`/`batch`/`artifact_suffix`. To insert a stage in the middle, point the
+`depends_on` of the downstream presets at the new stage. Everything is config —
+editing `config.yml` is the only step.
+
+**Conflict rules (rejected at load time).** Duplicate YAML keys (including two
+presets sharing a name) are rejected; enabled presets must use unique
+`artifact_suffix` values so their sibling artifacts don't collide on disk; a
+`prompt_file` must resolve to a readable, non-empty file; and `depends_on` on an
+unknown/disabled preset or a cycle in the DAG is rejected.
+
+**Batch is cheaper and slower, not higher quality.** Setting `openai.batch: true`
+(globally or per preset) submits the pass through the OpenAI Batch API (~50%
+cheaper at the cost of higher latency); it does not change output quality. A
+recommended layout is global `openai.batch: true` with
+`transcript-cleanup.batch: false`, because batch on an upstream stage delays every
+downstream stage (they wait for its artifact). `openai.batch_wait: true` is the
+default (the service waits synchronously for batch results; the async path is not
+supported). Per-preset `model`/`batch`/`batch_wait` override the global
+`openai.*` defaults.
+
+Idempotency is per preset: `list_folder_state` reports an `artifact_ids` map keyed
+by `artifact_type`, so only the presets still missing an artifact are produced on a
+later cycle. Existing `.keypoints.md` files map onto the `keypoints` preset with no
+migration. `gdstt doctor` prints the resolved config path and the resolved preset
+DAG (names, dependencies, enabled state).
 
 For an agent-driven path (reason about speakers, confirm the mapping, relabel
 deterministically, and write the Keypoints document by hand), see
@@ -303,11 +453,11 @@ deterministically, and write the Keypoints document by hand), see
 
 ### Output destination
 
-`OUTPUT_TARGET` controls where the transcript and keypoints files land. With the
+`output.target` controls where the transcript and keypoints files land. With the
 default `drive`, they are written as siblings of the source MP4 and uploaded (or
 updated in place when one already exists). With `folder`, the service writes
-`<output_dir>/<base_name>.txt` (and `.keypoints.md`), creating `OUTPUT_DIR` if it
-is missing. `OUTPUT_DIR` is required when `OUTPUT_TARGET=folder`.
+`<output_dir>/<base_name>.txt` (and `.keypoints.md`), creating `output.dir` if it
+is missing. `output.dir` is required when `output.target=folder`.
 
 ## Usage
 
@@ -323,41 +473,96 @@ The process loops forever, sleeping `POLL_INTERVAL` seconds between cycles.
 
 `uv sync` installs a `gdstt` console script that wraps every operation
 (equivalently `uv run python -m src.cli`). All commands read configuration from
-`.env` / the environment via `load_config()`.
+`<GDSTT_HOME>/config.yml` (default `./data/config.yml`) via `load_config()`; the
+config must already exist (`gdstt config init`). Pass `gdstt --config PATH ...` for
+a one-shot override against a non-default file.
 
 Safe operator flow: `gdstt doctor` -> `gdstt list` -> `gdstt process <file-id> --dry-run`
 -> `gdstt process <file-id>`. Move to `run-once` or continuous `run` only after
 that single-file path looks correct.
 
 ```bash
-gdstt auth [response_url]   # one-time interactive OAuth → data/token.json
+gdstt auth [response_url]   # one-time interactive OAuth → google.token (or token.json in file mode)
+gdstt auth import-credentials <path>   # store an OAuth client JSON inline (google.credentials)
+gdstt auth use-files --credentials-file PATH [--token-file PATH]   # switch to file mode
 gdstt doctor [--drive]      # check Drive/OAuth configuration without changing it
 gdstt latest [--folder ID] [--dry-run] [--max-size SIZE] [--confirm-large]   # process the newest mp4 in a folder
 gdstt run                   # continuous polling; can spend STT credits across all pending configured folders
+gdstt stop                  # pause the loop (sets run.enabled=false; stays paused across restarts, no auto-resume)
+gdstt start                 # resume a paused loop (sets run.enabled=true)
 gdstt run-once [--dry-run] [--max-size SIZE] [--confirm-large]   # single cycle; use --dry-run first
 gdstt process <id> [--folder] [--reprocess-txt] [--dry-run] [--max-size SIZE] [--confirm-large]   # single target or folder; use --dry-run first
+gdstt reprocess <id> [STAGES] [--folder] [--dry-run] [--max-size SIZE] [--confirm-large]   # force-rerun chain stages by number (0=transcript, 1..N=presets; see doctor)
 gdstt speakers set <file-id> "Alice" "Bob"   # store explicit speaker names on an MP4
 gdstt transcribe <audio> [-o out.txt]   # STT-only on a local file; prints to stdout by default
 gdstt relabel --in SRC --out OUT --map MAP.json [--no-header]   # deterministic local speaker relabeling
 gdstt list [--folder ID]   # show sibling mp3/txt state without doing work (alias: status)
+gdstt config init [--data-dir DIR] [--output-dir DIR] [--prompt-dir DIR] [--force]   # fresh config.yml + prompts/ from packaged defaults
+gdstt config path           # print the resolved config.yml path (no secrets required)
+gdstt config get [KEY] [--show-secrets]   # print the config/KEY with secrets masked (or revealed)
+gdstt config set KEY VALUE  # set a dotted KEY and validate
+gdstt config unset KEY      # remove an optional dotted KEY
+gdstt --config PATH <command>    # one-shot override against a non-default config.yml
 ```
 
 `process` auto-detects whether the ID is a file or a folder; pass `--folder` to
 force folder handling. `latest` resolves the folder from `--folder` or the first of
-`FOLDER_IDS` and processes the newest (most recently created) mp4. `list`/`status`
-defaults to the configured `FOLDER_IDS` when `--folder` is omitted.
+`folder_ids` and processes the newest (most recently created) mp4. `list`/`status`
+defaults to the configured `folder_ids` when `--folder` is omitted.
 `--reprocess-txt` intentionally spends STT provider credits again and overwrites
 the linked `.txt` when one exists. `speakers set` affects future local
 post-processing; combine it with `process <file-id> --reprocess-txt` when an
 already-uploaded transcript needs to be regenerated with corrected names.
+
+**Reprocessing chain stages (`reprocess`).** Each enabled preset is a numbered
+chain stage; `gdstt doctor` prints the numbering, with `0` reserved for the
+transcript itself:
+
+```text
+$ gdstt doctor
+...
+Presets: 3 enabled (reprocess stages)
+  0. transcript (Deepgram base)
+  1. transcript-cleanup <- transcript
+  2. keypoints <- transcript-cleanup
+  3. action-items <- transcript-cleanup
+```
+
+`gdstt reprocess <id> [STAGES]` force-reruns those stages even when the artifact
+already exists. `STAGES` is a single number, a range (`lo-hi`), or a comma list over
+`0..N`; omit it (or pass `all`) to rerun every preset:
+
+```bash
+gdstt reprocess <id>           # rerun every preset (1..N) from the existing transcript
+gdstt reprocess <id> 2         # rerun only stage 2 (keypoints)
+gdstt reprocess <id> 1-2       # rerun stages 1 and 2 (transcript-cleanup + keypoints)
+gdstt reprocess <id> 2,3       # rerun stages 2 and 3 (keypoints + action-items)
+gdstt reprocess <id> 0         # re-transcribe (stage 0) and regenerate the whole chain
+gdstt reprocess <id> 2-3 --dry-run   # preview which stages would run, spend nothing
+```
+
+Stage `0` re-runs Deepgram (spends STT credits) and, since every preset feeds on the
+transcript, regenerates the entire chain. Stages `1..N` re-run only those presets
+(spending OpenAI); each one's dependency outputs are reused from the existing
+artifacts, so a partial reprocess never re-bills the upstream stages — and a missing
+dependency artifact is regenerated as needed. Add `--folder` to reprocess every
+transcribed file in a folder, and always `--dry-run` first.
+
+`run` starts the continuous loop (and explicitly resumes by clearing any sticky
+stop flag). `stop` sets `run.enabled: false` in the config; the loop re-reads it
+each cycle and **pauses** — it goes idle (sleeps and re-checks) instead of exiting,
+so the container stays up. The pause is sticky: `main()` never auto-enables the flag
+at startup, so under Docker's `restart: unless-stopped` the stop survives a restart
+and processing does **not** auto-resume. Resume explicitly with `gdstt start` (or
+`gdstt run`); to halt the container entirely use `docker compose stop`.
 
 `relabel` is a local file transform — it reads a transcript and a `MAP.json`
 (`default` label → name plus verbatim-text `exceptions`), merges consecutive
 same-speaker turns, preserves each utterance's words (whitespace is normalized),
 and reports unmapped labels on stderr. It touches no Drive and spends nothing.
 
-Use `doctor` first when setting up a new agent or machine: it reports `DATA_DIR`,
-credentials/token presence, the `FOLDER_IDS` count, and `STT_PROVIDER` without
+Use `doctor` first when setting up a new agent or machine: it reports the resolved
+config path, credentials/token presence, the folder-id count, and STT provider without
 validating provider secrets. Add `--drive` only when you want it to authenticate
 and list the configured folders. Use `--dry-run` on `run-once`, `latest`, or folder
 `process` to preview pending work without downloads, uploads, or STT calls.
@@ -369,6 +574,28 @@ limit are skipped unless you also pass `--confirm-large`.
 it keeps polling and can continue spending STT credits until you stop it. Use it
 only after the single-file or `run-once --dry-run` path already matches expectations.
 
+#### Managing the config file
+
+There is always exactly one active `config.yml`; `gdstt config path` prints where
+it is. `config init` creates one from the packaged defaults and copies the prompt
+assets into `<GDSTT_HOME>/prompts/`. With no `--config`, init resolves its target
+the same way the runtime reads it — `<GDSTT_HOME>/config.yml`, or `./data/config.yml`
+when `GDSTT_HOME` is unset — so it writes exactly where the runtime will look
+(relevant under Docker, where the image bakes `GDSTT_HOME=/app/data`).
+`config get`/`set`/`unset` read (with secrets masked) or edit a dotted key (e.g.
+`openai.model`, `stt.deepgram.api_key`) in place, validating the result.
+
+To run more than one instance, give each its own directory and point `GDSTT_HOME`
+at it (`export GDSTT_HOME=/srv/gdstt-a`); the entire instance — `config.yml`,
+`prompts/`, `config/deepgram-keyterms.txt`, and credentials/token files — lives
+under that one home. Keep secrets (`openai.api_key`, `stt.deepgram.api_key`, inline
+`google.token`/`credentials`) out of any synced or shared home directory.
+
+Synced notes folders are just ordinary user-chosen paths: to land artifacts in
+your (possibly synced) notes folder, set `output.target: folder` + `output.dir`,
+and select a non-default config or prompt directory with `gdstt --config PATH` or
+`config init --prompt-dir`.
+
 ### Runtime reliability and summaries
 
 The runtime treats incomplete output as failure instead of silently uploading it:
@@ -378,7 +605,7 @@ The runtime treats incomplete output as failure instead of silently uploading it
   bounded backoff. Uploads are not retried automatically.
 - Downloads are checked against Drive metadata size; mismatched partial temp files
   are removed before retry or recovery.
-- `FOLDER_IDS` containing only commas or whitespace fails configuration loading
+- `folder_ids` containing only commas or whitespace fails configuration loading
   instead of producing a misleading no-op run.
 
 `run-once` logs one process summary per worked file, one folder summary per folder,
@@ -429,14 +656,67 @@ Build and run with the bundled Compose file:
 docker compose up -d --build
 ```
 
-The container mounts `./data` for persistent token storage. Logs are JSON-file with
-a 10 MB / 3-file rotation. Restart policy is `unless-stopped`.
+The image bakes `GDSTT_HOME=/app/data` and mounts `./data` there, so the config
+resolver keeps **all mutable state inside the volume**: `config.yml`,
+`prompts/`, `config/deepgram-keyterms.txt`, and credentials/token files are
+written under `./data` and survive restarts. The Compose file also sets
+`GDSTT_HOME=/app/data` explicitly for clarity, and a bare `docker run` is correct by
+default thanks to the image `ENV`. Logs are JSON-file with a 10 MB / 3-file
+rotation. Restart policy is
+`unless-stopped`. Because `gdstt stop` is sticky (it pauses the loop without exiting
+and `main()` never auto-enables on boot), the stop survives this restart policy:
+`docker compose exec <svc> gdstt stop` pauses processing and `gdstt start` resumes it;
+`docker compose stop` halts the container itself.
+
+The prompt assets ship **inside the `src` package** (`src/assets/prompts/*.md`), so
+the `COPY src ./src` in the `Dockerfile` carries them automatically — there is no
+separate `assets/` copy and the keypoints / OpenAI preset stage works in the
+container with no extra setup.
+
+Google auth follows the config-owned model (see
+[Google Drive setup](#google-drive-setup)): it is inline-first in `config.yml`
+(`google.credentials` / `google.token`), with file mode
+(`gdstt auth use-files --credentials-file data/credentials.json`, which points
+`config.yml` at an operator-supplied `credentials.json`/`token.json` under the
+volume rather than creating them) as the explicit opt-in, and a legacy fallback to
+`credentials.json` / `token.json` beside the config. The generated `config.yml`
+is written `0600` on POSIX systems because it can hold inline secrets.
 
 For a fresh VPS:
 
-1. Copy the repo, `.env`, and `data/` (with `credentials.json` and `token.json`) to the host.
-2. `docker compose up -d --build`
-3. Tail logs with `docker compose logs -f` and verify a poll cycle completes.
+1. Copy the repo and create `./data` on the host.
+2. Generate the volume-owned config:
+   `docker compose run --rm google-drive-video-stt gdstt config init --force`
+3. Fill `./data/config.yml` (folder IDs, Deepgram/OpenAI keys, and Google auth
+   inline or file mode).
+4. `docker compose up -d --build`
+5. Tail logs with `docker compose logs -f` and verify a poll cycle completes.
+
+### Container smoke check
+
+After a build, confirm the deployment-critical config-only path — volume
+persistence, generated local assets, provider validation, and packaged prompts —
+with the bundled script (a manual/CI check, not a pytest; it spends nothing):
+
+```bash
+scripts/docker-smoke.sh            # builds google-drive-video-stt:smoke, then runs doctor
+scripts/docker-smoke.sh my-image   # build and test the custom tag name
+```
+
+Equivalently, by hand:
+
+```bash
+docker build -t google-drive-video-stt:latest .
+docker run --rm -v "$PWD/data:/app/data" \
+  google-drive-video-stt:latest gdstt config init --force
+docker run --rm -v "$PWD/data:/app/data" \
+  google-drive-video-stt:latest gdstt doctor
+```
+
+A healthy run prints a `config:` path under `/app/data/config.yml` (volume
+persistence). The smoke script also verifies that a generated config can pass
+provider validation without reaching external services and explicitly loads
+`keypoints.md` from the `src` package to assert prompt packaging.
 
 ## Project layout
 

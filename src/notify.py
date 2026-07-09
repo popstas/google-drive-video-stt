@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 
 import requests
 
@@ -11,9 +10,15 @@ MAX_MESSAGE_LENGTH = 4000
 REQUEST_TIMEOUT = 10
 
 
-def notify_error(text: str, *, proxy_url: str = "") -> None:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+def notify_error(
+    text: str,
+    *,
+    telegram_bot_token: str = "",
+    telegram_chat_id: str = "",
+    proxy_url: str = "",
+) -> None:
+    token = telegram_bot_token.strip()
+    chat_id = telegram_chat_id.strip()
 
     if not token or not chat_id:
         logger.debug("Telegram credentials not set, skipping notification")

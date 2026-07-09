@@ -9,6 +9,8 @@ from google.auth.exceptions import RefreshError
 from src import main
 from src.auth import AuthError
 from src.config import Config
+from src.presets import BUILTIN_PRESETS, Preset
+from src.preset_pipeline import PresetResult
 from src.stt.base import STTError
 
 
@@ -27,7 +29,12 @@ def make_config(
     output_target="drive",
     output_dir=None,
     openai_keypoints=False,
+    presets=None,
 ) -> Config:
+    if presets is None:
+        # Mirror the legacy keypoints gate: the built-in keypoints pass is the only
+        # enabled preset when requested, and none otherwise.
+        presets = BUILTIN_PRESETS if openai_keypoints else ()
     return Config(
         folder_ids=folder_ids if folder_ids is not None else ["folderA"],
         poll_interval=poll_interval,
@@ -44,16 +51,21 @@ def make_config(
         openai_keypoints=openai_keypoints,
         deepgram_audio_source=deepgram_audio_source,
         drive_mp3_artifact=drive_mp3_artifact,
+        presets=tuple(presets),
     )
 
 
 def _item(
     file_id="fid", name="video.mp4", *, has_mp3=False, has_txt=False,
-    mp3_id=None, mp3_name=None, txt_id=None, keypoints_id=None, size=None,
+    mp3_id=None, mp3_name=None, txt_id=None, keypoints_id=None,
+    artifact_ids=None, size=None,
 ):
     file_info = {"id": file_id, "name": name}
     if size is not None:
         file_info["size"] = str(size)
+    ids = dict(artifact_ids or {})
+    if keypoints_id is not None:
+        ids.setdefault("keypoints", keypoints_id)
     return {
         "file": file_info,
         "has_mp3": has_mp3,
@@ -61,7 +73,7 @@ def _item(
         "mp3_id": mp3_id,
         "mp3_name": mp3_name,
         "txt_id": txt_id,
-        "keypoints_id": keypoints_id,
+        "artifact_ids": ids,
     }
 
 
@@ -568,6 +580,35 @@ def test_process_target_folder_dry_run_does_not_process_items(mocker, caplog):
     assert "pending.mp4" in caplog.text
 
 
+def test_dry_run_surfaces_preset_only_work(mocker, caplog):
+    service = MagicMock()
+    cfg = _two_preset_config()
+
+    mocker.patch(
+        "src.main.drive.get_file_metadata",
+        return_value={"id": "folderA", "mimeType": main.drive.FOLDER_MIME},
+    )
+    # mp3+txt already done; only the expertizeme-managers preset is missing, so a
+    # real run would spend OpenAI credits even though mp3/txt are skipped.
+    item = _item(
+        "v1",
+        "done.mp4",
+        has_mp3=True,
+        has_txt=True,
+        txt_id="t1",
+        artifact_ids={"transcript-cleanup": "c1", "keypoints": "k1"},
+    )
+    mocker.patch("src.main.drive.list_folder_state", return_value=[item])
+    mocker.patch("src.main.process_item")
+
+    with caplog.at_level("INFO"):
+        main.process_target(service, "folderA", cfg, is_folder=True, dry_run=True)
+
+    assert "DRY RUN" in caplog.text
+    assert "mp3=skip, txt=skip" in caplog.text
+    assert "presets=expertizeme-managers" in caplog.text
+
+
 def test_process_target_skips_large_file_without_confirmation(mocker, caplog):
     service = MagicMock()
     cfg = make_config(stt_provider="deepgram", deepgram_api_key="dg-x")
@@ -1020,15 +1061,16 @@ def test_process_item_summary_surfaces_cost_and_keypoints_usage(mocker, tmp_path
         cost_usd["deepgram"] = 0.0123
         return "Speaker 1: hi"
 
-    def fake_keypoints(text, name, config, *, speaker_names, usage):
-        usage.update(
-            {"input_tokens": 100, "output_tokens": 40, "total_tokens": 140}
-        )
-        return "## Задачи\n- [ ] do it"
-
     mocker.patch("src.main.transcribe_file", side_effect=fake_transcribe)
     mocker.patch(
-        "src.main.openai_pipeline.generate_keypoints", side_effect=fake_keypoints
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "keypoints": PresetResult(
+                name="keypoints",
+                text="## Задачи\n- [ ] do it",
+                usage={"input_tokens": 100, "output_tokens": 40, "total_tokens": 140},
+            )
+        },
     )
 
     cfg = make_config(
@@ -1445,8 +1487,13 @@ def test_process_item_generates_keypoints_when_enabled(mocker, tmp_path):
     mocker.patch("src.main.drive.upload", side_effect=fake_upload)
     mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
     kp_mock = mocker.patch(
-        "src.main.openai_pipeline.generate_keypoints",
-        return_value="## Задачи\n\n## Тезисы\n- point\n\n## Открытые вопросы",
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "keypoints": PresetResult(
+                name="keypoints",
+                text="## Задачи\n\n## Тезисы\n- point\n\n## Открытые вопросы",
+            )
+        },
     )
 
     cfg = make_config(
@@ -1460,8 +1507,10 @@ def test_process_item_generates_keypoints_when_enabled(mocker, tmp_path):
     main.process_item(service, _item("fid", "video.mp4"), "folderX", cfg)
 
     kp_mock.assert_called_once()
-    # The keypoints call runs on the produced transcript.
+    # The preset DAG runs on the produced transcript, restricted to the missing
+    # keypoints preset.
     assert kp_mock.call_args.args[0] == "Speaker 1: hi"
+    assert kp_mock.call_args.kwargs["only"] == ["keypoints"]
     uploads = {
         name: (text, mime, props) for name, text, mime, props in captured["uploads"]
     }
@@ -1483,8 +1532,12 @@ def test_process_item_overwrites_existing_keypoints_on_reprocess(mocker, tmp_pat
     update_mock = mocker.patch("src.main.drive.update_file")
     mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
     mocker.patch(
-        "src.main.openai_pipeline.generate_keypoints",
-        return_value="## Задачи\n- [ ] do it",
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "keypoints": PresetResult(
+                name="keypoints", text="## Задачи\n- [ ] do it"
+            )
+        },
     )
 
     cfg = make_config(
@@ -1517,7 +1570,7 @@ def test_process_item_skips_keypoints_when_disabled(mocker, tmp_path):
     mocker.patch("src.main.extract_mp3", return_value=mp3_path)
     mocker.patch("src.main.drive.upload")
     mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
-    kp_mock = mocker.patch("src.main.openai_pipeline.generate_keypoints")
+    kp_mock = mocker.patch("src.main.preset_pipeline.run_presets")
 
     cfg = make_config(
         stt_provider="deepgram",
@@ -1543,8 +1596,12 @@ def test_process_item_writes_keypoints_to_local_folder(mocker, tmp_path):
     upload_mock = mocker.patch("src.main.drive.upload")
     mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
     mocker.patch(
-        "src.main.openai_pipeline.generate_keypoints",
-        return_value="## Задачи\n- [ ] do it",
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "keypoints": PresetResult(
+                name="keypoints", text="## Задачи\n- [ ] do it"
+            )
+        },
     )
 
     cfg = make_config(
@@ -1634,7 +1691,10 @@ def test_process_item_does_not_write_empty_keypoints(mocker, tmp_path):
 
     mocker.patch("src.main.drive.upload", side_effect=fake_upload)
     mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
-    mocker.patch("src.main.openai_pipeline.generate_keypoints", return_value="   \n  ")
+    mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={"keypoints": PresetResult(name="keypoints", text="   \n  ")},
+    )
 
     cfg = make_config(
         stt_provider="deepgram",
@@ -1680,3 +1740,450 @@ def test_process_item_uses_speaker_names_from_drive_properties(mocker, tmp_path)
     main.process_item(service, item, "f", cfg)
 
     assert captured["txt"] == "Alice: hi there\nBob: hello back"
+
+
+def _two_preset_config(**overrides):
+    presets = (
+        Preset(name="transcript-cleanup", instructions="clean it"),
+        Preset(
+            name="keypoints",
+            instructions="summarize",
+            artifact_suffix=".keypoints.md",
+            depends_on=("transcript-cleanup",),
+        ),
+        Preset(
+            name="expertizeme-managers",
+            instructions="managers",
+            depends_on=("transcript-cleanup",),
+        ),
+    )
+    base = dict(
+        stt_provider="deepgram",
+        deepgram_api_key="dg-x",
+        deepgram_audio_source="mp3_96k",
+        openai_api_key="sk-x",
+        openai_keypoints=True,
+        drive_mp3_artifact=False,
+        presets=presets,
+    )
+    base.update(overrides)
+    return make_config(**base)
+
+
+def test_process_item_writes_one_artifact_per_produced_preset(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    captured: dict = {}
+
+    def fake_upload(svc, local_path, folder, mime_type, name=None, app_properties=None):
+        captured.setdefault("uploads", []).append(
+            (name, local_path.read_text(encoding="utf-8"), mime_type, app_properties)
+        )
+
+    mocker.patch("src.main.drive.upload", side_effect=fake_upload)
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "transcript-cleanup": PresetResult(
+                name="transcript-cleanup", text="cleaned transcript"
+            ),
+            "keypoints": PresetResult(name="keypoints", text="## Задачи\n- [ ] do it"),
+            "expertizeme-managers": PresetResult(
+                name="expertizeme-managers", text="manager notes"
+            ),
+        },
+    )
+
+    main.process_item(service, _item("fid", "video.mp4"), "folderX", _two_preset_config())
+
+    uploads = {
+        name: (text, mime, props) for name, text, mime, props in captured["uploads"]
+    }
+    # The .txt plus one sibling per produced preset, each tagged with its own
+    # artifact_type and using its own suffix.
+    assert "video.txt" in uploads
+    assert uploads["video.transcript-cleanup.md"][2] == {
+        "source_video_id": "fid",
+        "artifact_type": "transcript-cleanup",
+    }
+    assert uploads["video.keypoints.md"][2] == {
+        "source_video_id": "fid",
+        "artifact_type": "keypoints",
+    }
+    assert uploads["video.expertizeme-managers.md"][2] == {
+        "source_video_id": "fid",
+        "artifact_type": "expertizeme-managers",
+    }
+
+
+def test_process_item_skips_presets_with_existing_artifacts(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    download_text = mocker.patch(
+        "src.main.drive.download_text", return_value="cleaned"
+    )
+    run_mock = mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "expertizeme-managers": PresetResult(
+                name="expertizeme-managers", text="notes"
+            ),
+        },
+    )
+
+    # transcript-cleanup and keypoints already have artifacts; only
+    # expertizeme-managers is missing and must be requested. Its dependency
+    # transcript-cleanup is reused from its persisted artifact (download_text)
+    # instead of being re-run.
+    item = _item(
+        "fid",
+        "video.mp4",
+        artifact_ids={"transcript-cleanup": "c1", "keypoints": "k1"},
+    )
+    main.process_item(service, item, "folderX", _two_preset_config())
+
+    run_mock.assert_called_once()
+    assert run_mock.call_args.kwargs["only"] == ["expertizeme-managers"]
+    assert run_mock.call_args.kwargs["precomputed"] == {"transcript-cleanup": "cleaned"}
+    download_text.assert_called_once_with(service, "c1")
+
+
+def test_process_item_skips_preset_stage_when_all_present(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    run_mock = mocker.patch("src.main.preset_pipeline.run_presets")
+
+    item = _item(
+        "fid",
+        "video.mp4",
+        artifact_ids={
+            "transcript-cleanup": "c1",
+            "keypoints": "k1",
+            "expertizeme-managers": "e1",
+        },
+    )
+    main.process_item(service, item, "folderX", _two_preset_config())
+
+    run_mock.assert_not_called()
+
+
+def test_process_item_raises_aggregated_error_but_persists_successes(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    captured: dict = {}
+
+    def fake_upload(svc, local_path, folder, mime_type, name=None, app_properties=None):
+        captured.setdefault("names", []).append(name)
+
+    mocker.patch("src.main.drive.upload", side_effect=fake_upload)
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "transcript-cleanup": PresetResult(
+                name="transcript-cleanup", text="cleaned"
+            ),
+            "keypoints": PresetResult(name="keypoints", text="## Задачи"),
+            "expertizeme-managers": PresetResult(
+                name="expertizeme-managers", error="boom"
+            ),
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="preset DAG had failures"):
+        main.process_item(service, _item("fid", "video.mp4"), "folderX", _two_preset_config())
+
+    # The successful presets' artifacts were written before the error surfaced.
+    assert "video.transcript-cleanup.md" in captured["names"]
+    assert "video.keypoints.md" in captured["names"]
+    assert "video.expertizeme-managers.md" not in captured["names"]
+
+
+def test_process_item_reprocesses_missing_presets_from_existing_drive_txt(mocker, tmp_path):
+    service = MagicMock()
+    download_text = mocker.patch(
+        "src.main.drive.download_text", return_value="existing transcript"
+    )
+    transcribe = mocker.patch("src.main.transcribe_file")
+    mocker.patch("src.main.drive.upload")
+    run_mock = mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "expertizeme-managers": PresetResult(
+                name="expertizeme-managers", text="notes"
+            ),
+        },
+    )
+
+    # The .txt plus transcript-cleanup and keypoints already exist on Drive; only
+    # expertizeme-managers is missing. It must be regenerated by re-feeding the
+    # existing transcript, without re-running STT, and its dependency
+    # transcript-cleanup is reused from its artifact rather than re-run.
+    item = _item(
+        "fid",
+        "video.mp4",
+        has_txt=True,
+        txt_id="t1",
+        artifact_ids={"transcript-cleanup": "c1", "keypoints": "k1"},
+    )
+    main.process_item(service, item, "folderX", _two_preset_config())
+
+    transcribe.assert_not_called()
+    # t1 = the existing transcript; c1 = the reused transcript-cleanup artifact.
+    assert download_text.call_count == 2
+    download_text.assert_any_call(service, "t1")
+    download_text.assert_any_call(service, "c1")
+    run_mock.assert_called_once()
+    assert run_mock.call_args.args[0] == "existing transcript"
+    assert run_mock.call_args.kwargs["only"] == ["expertizeme-managers"]
+    assert run_mock.call_args.kwargs["precomputed"] == {
+        "transcript-cleanup": "existing transcript"
+    }
+
+
+def test_process_item_skips_preset_reprocess_without_drive_txt(mocker):
+    service = MagicMock()
+    download_text = mocker.patch("src.main.drive.download_text")
+    run_mock = mocker.patch("src.main.preset_pipeline.run_presets")
+    transcribe = mocker.patch("src.main.transcribe_file")
+
+    # Folder-mode style: the transcript exists locally (has_txt) but there is no
+    # Drive .txt sibling (txt_id is None), so the preset stage must not reprocess
+    # (artifact_ids is not tracked for local files and would loop forever).
+    item = _item("fid", "video.mp4", has_txt=True, txt_id=None, artifact_ids={})
+    result = main.process_item(service, item, "folderX", _two_preset_config())
+
+    assert result is None
+    download_text.assert_not_called()
+    run_mock.assert_not_called()
+    transcribe.assert_not_called()
+
+
+def test_preset_only_reprocess_without_transcript_does_not_run_stt(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+    download = mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    transcribe = mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    run_mock = mocker.patch("src.main.preset_pipeline.run_presets")
+
+    result = main.process_item(
+        service,
+        _item("fid", "video.mp4", has_txt=False, txt_id=None),
+        "folderX",
+        _two_preset_config(drive_mp3_artifact=False),
+        reprocess_presets=["keypoints"],
+    )
+
+    assert result is None
+    download.assert_not_called()
+    transcribe.assert_not_called()
+    run_mock.assert_not_called()
+
+
+def test_apply_local_output_state_tracks_local_txt_and_preset_artifacts(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "video.txt").write_text("local transcript", encoding="utf-8")
+    (out / "video.transcript-cleanup.md").write_text("cleaned", encoding="utf-8")
+    cfg = _two_preset_config(output_target="folder", output_dir=out)
+    item = _item("fid", "video.mp4", has_txt=False, txt_id=None, artifact_ids={})
+
+    main._apply_local_output_state([item], cfg)
+
+    assert item["has_txt"] is True
+    assert item["local_txt_path"] == out / "video.txt"
+    assert item["local_artifact_paths"] == {
+        "transcript-cleanup": out / "video.transcript-cleanup.md"
+    }
+
+
+def test_process_item_reprocesses_presets_from_local_folder_transcript(mocker, tmp_path):
+    service = MagicMock()
+    out = tmp_path / "out"
+    out.mkdir()
+    local_txt = out / "video.txt"
+    local_txt.write_text("existing local transcript", encoding="utf-8")
+    mocker.patch("src.main.transcribe_file")
+    mocker.patch("src.main.drive.download_text")
+    run_mock = mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "transcript-cleanup": PresetResult(
+                name="transcript-cleanup", text="cleaned"
+            ),
+            "keypoints": PresetResult(name="keypoints", text="notes"),
+        },
+    )
+
+    item = _item("fid", "video.mp4", has_txt=True, txt_id=None, artifact_ids={})
+    item["local_txt_path"] = local_txt
+    cfg = _two_preset_config(output_target="folder", output_dir=out)
+    result = main.process_item(
+        service,
+        item,
+        "folderX",
+        cfg,
+        reprocess_presets=["keypoints"],
+    )
+
+    assert result is not None
+    assert run_mock.call_args.args[0] == "existing local transcript"
+    assert (out / "video.transcript-cleanup.md").read_text(encoding="utf-8") == "cleaned"
+    assert (out / "video.keypoints.md").read_text(encoding="utf-8") == "notes"
+
+
+def test_dry_run_preset_names_expands_missing_dependencies_for_reprocess():
+    cfg = _two_preset_config()
+    item = _item("fid", "video.mp4", has_txt=True, txt_id="txt-1", artifact_ids={})
+
+    names = main._dry_run_preset_names(
+        item,
+        cfg,
+        needs_txt=False,
+        reprocess_txt=False,
+        reprocess_presets=["keypoints"],
+    )
+
+    assert names == ["transcript-cleanup", "keypoints"]
+
+
+def test_pending_items_includes_drive_txt_with_missing_preset():
+    cfg = _two_preset_config()
+    done = _item(
+        "v1", "a.mp4", has_txt=True, txt_id="t1",
+        artifact_ids={
+            "transcript-cleanup": "c1", "keypoints": "k1", "expertizeme-managers": "e1",
+        },
+    )
+    missing = _item(
+        "v2", "b.mp4", has_txt=True, txt_id="t2",
+        artifact_ids={"transcript-cleanup": "c2"},
+    )
+    folder_local = _item("v3", "c.mp4", has_txt=True, txt_id=None, artifact_ids={})
+
+    pending = main._pending_items([done, missing, folder_local], cfg)
+
+    assert [item["file"]["id"] for item in pending] == ["v2"]
+
+
+# --- run loop stop flag (gdstt stop) ----------------------------------------
+
+class _LoopStop(Exception):
+    """Sentinel raised from a patched time.sleep to break the polling loop."""
+
+
+def test_main_loop_idles_while_run_disabled_without_running(mocker):
+    # `gdstt stop` keeps the loop alive but idle: run_once is never called while
+    # run.enabled is false. The container stays up (no break/exit) so a Docker
+    # `restart: unless-stopped` policy does not auto-resume processing.
+    cfg = make_config(folder_ids=["f1"], poll_interval=7)
+    mocker.patch("src.main.load_config", return_value=cfg)
+    mocker.patch("src.main.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.main.is_run_enabled", return_value=False)
+    once = mocker.patch("src.main.run_once")
+    # Break the otherwise-infinite idle loop after a couple of sleeps.
+    sleep = mocker.patch("src.main.time.sleep", side_effect=[None, _LoopStop()])
+
+    with pytest.raises(_LoopStop):
+        main.main()
+
+    once.assert_not_called()
+    assert sleep.call_args_list == [mocker.call(7), mocker.call(7)]
+
+
+def test_main_loop_runs_while_enabled_and_idles_when_disabled(mocker):
+    # Enabled twice (two cycles), then disabled (idle). run_once is called only
+    # while enabled; once disabled the loop idles instead of exiting.
+    cfg = make_config(folder_ids=["f1"], poll_interval=5)
+    mocker.patch("src.main.load_config", return_value=cfg)
+    mocker.patch("src.main.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.main.is_run_enabled", side_effect=[True, True, False])
+    once = mocker.patch("src.main.run_once")
+    sleep = mocker.patch("src.main.time.sleep", side_effect=[None, None, _LoopStop()])
+
+    with pytest.raises(_LoopStop):
+        main.main()
+
+    assert once.call_count == 2
+    assert sleep.call_count == 3
+
+
+def test_main_does_not_enable_run_on_startup(mocker):
+    # main() must not auto-enable run.enabled, so a sticky `gdstt stop` survives a
+    # container restart instead of resuming on the next boot.
+    import dataclasses
+
+    cfg = dataclasses.replace(make_config(folder_ids=["f1"]), run_enabled=False)
+    mocker.patch("src.main.load_config", return_value=cfg)
+    mocker.patch("src.main.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.main.is_run_enabled", return_value=False)
+    mocker.patch("src.main.run_once")
+    mocker.patch("src.main.time.sleep", side_effect=_LoopStop())
+    set_enabled = mocker.patch(
+        "src.config.set_run_enabled", side_effect=AssertionError("must not be called")
+    )
+
+    with pytest.raises(_LoopStop):
+        main.main()
+
+    set_enabled.assert_not_called()
+
+
+def test_run_preset_stage_forces_only_selected(mocker):
+    presets = (
+        Preset(name="transcript-cleanup", instructions="c"),
+        Preset(name="keypoints", instructions="k", depends_on=("transcript-cleanup",)),
+        Preset(name="action-items", instructions="a", depends_on=("transcript-cleanup",)),
+    )
+    cfg = make_config(presets=presets)
+    run_presets = mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "action-items": PresetResult(name="action-items", text="out"),
+        },
+    )
+    mocker.patch("src.main._save_and_upload_preset")
+    # transcript-cleanup artifact already exists -> reused as a precomputed dependency.
+    mocker.patch("src.main._call_with_transient_retries", return_value="cleanup text")
+
+    main._run_preset_stage(
+        MagicMock(),
+        "file-1",
+        "Alice and Bob.mp4",
+        "Speaker 1: hi",
+        "folderA",
+        Path("/tmp"),
+        cfg,
+        speaker_names=None,
+        artifact_ids={"transcript-cleanup": "tc-id"},
+        reprocess=False,
+        only_presets=["action-items"],
+        usage={},
+    )
+
+    kwargs = run_presets.call_args.kwargs
+    assert kwargs["only"] == ["action-items"]
+    assert kwargs["precomputed"] == {"transcript-cleanup": "cleanup text"}

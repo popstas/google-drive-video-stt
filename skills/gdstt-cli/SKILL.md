@@ -2,23 +2,21 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.2.0
-last_updated: 2026-06-04
+version: 2.5.2
+last_updated: 2026-06-20
 ---
 
 # gdstt CLI
 
-Операторская инструкция для Deepgram-only сервиса Google Drive video STT. У
-инструмента одна задача: превратить запись в транскрипт с именами спикеров плюс
-документ Keypoints, записав их либо в Google Drive, либо в локальную папку.
-Предпочитай безопасные команды по одному файлу, никогда не печатай секреты и
-спрашивай перед любым действием, которое меняет Drive, локальные auth-файлы или
+Операторская инструкция для Deepgram-only сервиса Google Drive video STT: превратить
+запись в транскрипт с именами спикеров плюс документ Keypoints, записав их в Google
+Drive или локальную папку. Предпочитай безопасные команды по одному файлу, не печатай
+секреты и спрашивай перед действием, которое меняет Drive, локальные auth-файлы или
 тратит кредиты Deepgram/OpenAI.
 
-Отвечай и пиши артефакты (транскрипт, Keypoints, статус) **на языке
-собеседника** - подстраивайся под язык, на котором пишет пользователь, не
-фиксируйся на одном. Заголовки разделов внутри документа Keypoints остаются как в
-шаблоне (Задачи / Тезисы / Открытые вопросы).
+Отвечай и пиши артефакты (транскрипт, Keypoints, статус) **на языке собеседника**,
+не фиксируясь на одном. Заголовки разделов Keypoints остаются как в шаблоне
+(Задачи / Тезисы / Открытые вопросы).
 
 Настройка Google Drive (OAuth, scopes, поиск folder-id) описана в
 [README.md](../../README.md) репозитория, не здесь.
@@ -61,8 +59,8 @@ Drive-only и bootstrap-команды используют `load_config(validat
 и не тратят кредиты: `auth`, `doctor`, `list` / `status`, `speakers set`.
 
 Обрабатывающие команды валидируют конфиг провайдера и могут тратить кредиты
-Deepgram (и, при `OPENAI_KEYPOINTS=true`, OpenAI): `run`, `run-once`, `process`,
-`latest`, `transcribe`.
+Deepgram (и, при включённых OpenAI-пресетах, OpenAI): `run`, `run-once`,
+`process`, `latest`, `transcribe`.
 
 `relabel` - локальное преобразование файла: Drive не трогает и ничего не тратит.
 
@@ -70,13 +68,37 @@ Deepgram (и, при `OPENAI_KEYPOINTS=true`, OpenAI): `run`, `run-once`, `proce
 
 ### `auth [--manual] [response_url]`
 
-Создать или обновить локальные OAuth-креденшелы. Обычный режим открывает
-браузерный flow на localhost. `--manual` печатает URL авторизации; переданный
-`response_url` завершает ручной обмен.
+Создать или обновить OAuth-токен. Обычный режим открывает браузерный flow на
+localhost. `--manual` печатает URL авторизации; `response_url` завершает ручной
+обмен. По умолчанию токен пишется inline в `google.token`; в файловом режиме - в
+`google.token_file`.
 
-### `latest [--folder ID] [--dry-run]`
+Источник Google-аутентификации **по умолчанию inline-first**: OAuth client JSON в
+`google.credentials`, токен в `google.token`, оба внутри `config.yml`. Файловый
+режим (`google.credentials_file`/`google.token_file`) - явный opt-in; если ни
+inline, ни файл не заданы, загрузчик откатывается к `<data_dir>/credentials.json`
+и `<data_dir>/token.json` (legacy). Inline-токены и
+`client_secret`/`refresh_token` - **секреты**: в общем (shared) конфиге держи их в
+файловом режиме или локальной части, а не inline там, где конфиг видят другие.
 
-Обработать самый свежий mp4 в папке (первой из `FOLDER_IDS`, если не задан
+### `auth-import-credentials <path>`
+
+Также доступно как `gdstt auth import-credentials <path>`. Прочитать скачанный
+OAuth client (Desktop app) JSON и записать inline под `google.credentials`
+(дефолтный inline-first путь, секреты не печатаются). Сбрасывает указатель
+`google.credentials_file`, чтобы источник был один.
+
+### `auth-use-files --credentials-file PATH [--token-file PATH]`
+
+Также доступно как `gdstt auth use-files ...`. Переключить в файловый режим
+(opt-in): записать `google.credentials_file`/`google.token_file` и удалить inline
+`google.credentials`/`google.token`. `--token-file` по умолчанию -
+`<папка credentials>/token.json`. Используй, когда не хочешь держать секреты inline
+в общем конфиге.
+
+### `latest [--folder ID] [--dry-run] [--max-size SIZE] [--confirm-large]`
+
+Обработать самый свежий mp4 в папке (первой из `folder_ids`, если не задан
 `--folder`). Сначала `--dry-run`, чтобы подтвердить, какой файл будет обработан.
 Понятно логирует, если mp4 в папке нет.
 
@@ -86,44 +108,93 @@ Deepgram (и, при `OPENAI_KEYPOINTS=true`, OpenAI): `run`, `run-once`, `proce
 `--dry-run`. Спрашивай перед `--reprocess-txt` (повторный STT и перезапись
 привязанного TXT), обработкой папки или `--confirm-large`.
 
+### `reprocess <target> [STAGES] [--folder] [--dry-run] [--max-size SIZE] [--confirm-large]`
+
+Форс-перепрогон стадий по номерам (см. `doctor`): `0`=транскрипт (Deepgram, тратит
+STT), `1..N`=пресеты в порядке цепочки (тратит OpenAI). STAGES: `3`, `2-3`, `1,3`,
+`0` (транскрипт+всё ниже), пусто/`all`=все пресеты. Сначала `--dry-run`.
+
 ### `transcribe <audio> [-o PATH]`
 
-Расшифровать локальный аудиофайл через Deepgram, не трогая Drive. С `-o` пишет в
-`PATH`, иначе печатает в stdout.
+Расшифровать локальный аудиофайл через Deepgram, не трогая Drive. С `-o` пишет в `PATH`, иначе в stdout.
 
 ### `relabel --in SRC --out OUT --map MAP.json [--no-header]`
 
-Детерминированно переименовать спикеров по MAP.json (`default` метка -> имя, с
-точечными `exceptions` по дословному тексту) и склеить подряд идущие реплики
-одного спикера. Слова реплик сохраняются (пробелы нормализуются). Неотображённые
-метки печатаются в stderr - добавь их в `default`. `--no-header` пропускает шапку
-из MAP.json.
+Детерминированно переименовать спикеров по MAP.json (`default` метка -> имя, точечные
+`exceptions` по дословному тексту) и склеить подряд идущие реплики одного спикера; слова
+сохраняются. Неотображённые метки идут в stderr. `--no-header` пропускает шапку MAP.json.
 
 ### `list` / `status`
 
-Показать состояние соседних MP3/TXT для настроенных `FOLDER_IDS` (или `--folder`)
-без обработки файлов.
+Показать состояние соседних MP3/TXT для `folder_ids` (или `--folder`) без обработки.
 
 ### `run`
 
-Запустить непрерывный цикл опроса. Спрашивай перед использованием: он может
-многократно тратить кредиты по всем настроенным папкам. Превью-режима нет.
+Запустить непрерывный цикл опроса. Спрашивай перед использованием: он может многократно
+тратить кредиты по всем папкам. Превью-режима нет. При старте явно ставит
+`run.enabled=true` (снимает sticky-стоп).
+
+### `stop`
+
+Поставить `run.enabled=false`: цикл **встаёт на паузу** (простаивает, не выходит),
+контейнер живёт. Стоп sticky - `main()` не включает флаг при старте, поэтому пауза
+переживает Docker `restart: unless-stopped` и сама не возобновляется. Возобновить -
+`gdstt start`/`gdstt run`; полностью остановить контейнер - `docker compose stop`.
+
+### `start`
+
+Поставить `run.enabled=true`: приостановленный `gdstt run` возобновляет обработку на
+следующем проходе. Симметрично `stop`, напр. `docker compose exec <svc> gdstt start`.
 
 ### `run-once`
 
-Один цикл опроса по настроенным папкам. Предпочитай сначала `--dry-run`;
-`--max-size` добавляй только как опциональный ручной лимит для больших папок.
+Один цикл опроса по папкам. Предпочитай сначала `--dry-run`; `--max-size` - опциональный
+ручной лимит для больших папок.
 
 ### `speakers set <file-id> <name...>`
 
-Сохранить явные имена спикеров на исходном MP4 для будущей пост-обработки.
-Повторная обработка - отдельно и может тратить кредиты.
+Сохранить явные имена спикеров на исходном MP4 для будущей пост-обработки. Повторная
+обработка - отдельно и может тратить кредиты.
 
 ### `doctor [--drive]`
 
-Показать `DATA_DIR`, наличие credentials/token, число `FOLDER_IDS` и
-`STT_PROVIDER`. С `--drive` дополнительно аутентифицируется и перечисляет
-настроенные папки.
+Показать путь к `config.yml`, наличие credentials/token, источник Google-auth
+(без секретов), число folder-id, STT-провайдера и DAG пресетов с номерами стадий для
+`reprocess` (0=транскрипт, 1..N=пресеты). `--drive` ещё проверяет папки.
+
+### `config init [--force]`
+
+Управление конфигом. Активный `config.yml` один: `<GDSTT_HOME>/config.yml`, а если
+`GDSTT_HOME` не задан - `./data/config.yml`. Никаких OS-дефолтных путей, dotenv,
+миграции и авто-генерации: отсутствующий или пустой файл - явная ошибка настройки,
+указывающая на `gdstt config init`. `--config PATH` - разовый файловый override
+(тесты/диагностика), не сохраняется. Путь печатает `config path`.
+
+Приоритет резолвера:
+
+```text
+--config PATH                 # разовый override
+GDSTT_HOME/config.yml         # директория инстанса
+./data/config.yml             # дефолт, когда GDSTT_HOME не задан
+```
+
+Подкоманды `config`:
+
+- `config init [--data-dir DIR] [--output-dir DIR] [--prompt-dir DIR] [--force]` -
+  свежий полный конфиг: цепочка `transcript-cleanup -> keypoints + action-items`,
+  `openai.batch: true`, промпты и `config/deepgram-keyterms.txt` рядом под
+  `<GDSTT_HOME>`. `--output-dir` -> folder; `--prompt-dir` -> промпты туда.
+- `config path` - путь к активному конфигу без валидации секретов.
+- `config get [KEY] [--show-secrets]` / `config set KEY VALUE` / `config unset KEY` -
+  прочитать (секреты замаскированы, `--show-secrets` их раскрывает), записать+провалидировать или удалить точечный ключ.
+
+**Несколько инстансов.** Дай каждому свою директорию и укажи на неё `GDSTT_HOME`
+(`export GDSTT_HOME=/srv/gdstt-a`); весь инстанс - `config.yml`, `prompts/`,
+`config/deepgram-keyterms.txt`, credentials/token - лежит под одним home. Секреты
+(`openai.api_key`, `stt.deepgram.api_key`, inline `google.token`/`credentials`) в
+синхронизируемом/общем home не храни. Артефакты в свою папку -
+`output.dir`+`output.target=folder`; конфиг/промпты - через `--config` или
+`config init --prompt-dir`.
 
 ## Рабочий процесс Keypoints (агент)
 
@@ -132,13 +203,10 @@ Deepgram (и, при `OPENAI_KEYPOINTS=true`, OpenAI): `run`, `run-once`, `proce
 `relabel` сохраняет слова каждой реплики (пробелы нормализуются).
 
 1. **Получи сырой диаризованный транскрипт.** Ключи relabel-маппинга - метки
-   `Speaker N`, поэтому на входе они должны сохраниться. `gdstt transcribe
-   <audio>` выдаёт сырой `Speaker N` (без пост-обработки). `gdstt latest` /
-   `gdstt process <file-id>` сохраняют `Speaker N` только при
-   `STT_POSTPROCESS=false`; при дефолтном `STT_POSTPROCESS=true` они уже
-   подставили имена собеседников в `<base>.txt`, и `Speaker N`-маппинг ни с чем не
-   совпадёт. Запомни `base` (стем исходного файла) - артефакты это `<base>.txt` и
-   далее `<base>.keypoints.md`.
+   `Speaker N`, поэтому на входе их надо сохранить. `gdstt transcribe <audio>` даёт
+   сырой `Speaker N`; `gdstt latest` / `process` сохраняют его лишь при
+   `STT_POSTPROCESS=false` (при дефолтном `true` имена уже подставлены, и маппинг не
+   совпадёт). Запомни `base` (стем файла): артефакты `<base>.txt` -> `<base>.keypoints.md`.
 2. **Разбери спикеров.** Диаризация обычно даёт больше меток, чем людей (напр.
    `Speaker 1/2/3` на двух участников). Сопоставь каждую метку с человеком по
    содержанию: роль и лексика, к кому обращаются по имени в реплике (строка «Я
@@ -181,7 +249,7 @@ Deepgram (и, при `OPENAI_KEYPOINTS=true`, OpenAI): `run`, `run-once`, `proce
    обязательная секция, выдуманные факты, не та тема), а не ради пунктуации или
    формата. Это убирает лишние генерации.
 7. **Положи артефакты в назначение.** При работе через Drive TXT уже сосед;
-   загрузи Keypoints рядом. При `OUTPUT_TARGET=folder` пиши оба в `OUTPUT_DIR`.
+   загрузи Keypoints рядом. При `output.target=folder` пиши оба в `output.dir`.
 8. **Финальный статус:** какие файлы созданы, маппинг спикеров (кого с кем
    склеил), остались ли неотображённые метки.
 
@@ -214,8 +282,48 @@ Deepgram (и, при `OPENAI_KEYPOINTS=true`, OpenAI): `run`, `run-once`, `proce
 - Без воды и маркетинга.
 - Пунктуацию и стиль **не перегенерируй** - правь sed-ом (см. шаг 6).
 
-Для автоматического пути без агента выстави `OPENAI_KEYPOINTS=true`, и сервис сам
-пишет `<base>.keypoints.md` через OpenAI Responses API одним вызовом.
+Для автоматического пути без агента включи пресеты в `config.yml`: встроенный
+пресет `keypoints` пишет `<base>.keypoints.md` через OpenAI Responses API. Пресеты
+образуют DAG (`depends_on`) - каждый пресет это один проход OpenAI со своими
+инструкциями, пишет свой соседний артефакт `<base><artifact_suffix>` (по
+умолчанию `.<имя>.md`, метка `artifact_type=<имя>`); независимые пресеты идут
+параллельно. Конфиг-пресеты переопределяют встроенные по полям, добавляют новые и
+отключают встроенный через `enabled: false`. Дефолтная цепочка
+`transcript-cleanup -> keypoints + action-items` работает из коробки.
+Идемпотентность - по
+пресетам: повторный прогон делает только недостающие артефакты.
+
+**Откуда берётся промпт пресета (приоритет).** `instructions` (inline в YAML) >
+`prompt_file` (`.md`: как есть -> относительно папки конфига -> упакованный ассет
+по имени) > ошибка, если нет ни того, ни другого. Пустой/нечитаемый/отсутствующий
+`prompt_file` - тоже ошибка. Скрытого промпта в Python нет: дефолты живут в
+`.md`-ассетах (`prompts/keypoints.md` и т.д.) рядом с конфигом.
+
+**Как добавить новую стадию DAG (без правок Python).** Добавь запись в `presets:`:
+`instructions` или `prompt_file`, `depends_on` (цепочка), при нужде
+`model`/`batch`/`artifact_suffix`. Вставить в середину - перенаправь `depends_on`
+нижестоящих на новую стадию.
+
+```yaml
+presets:
+  transcript-cleanup: { prompt_file: prompts/transcript-cleanup.md }
+  keypoints: { depends_on: [transcript-cleanup] }   # переопределяет встроенный
+  action-items:
+    depends_on: [transcript-cleanup]
+    prompt_file: prompts/action-items.md
+```
+
+**Конфликты (валидация на загрузке).** Дубль-ключи в YAML (в т.ч. два пресета под
+одним именем) отвергаются; `artifact_suffix` включённых пресетов уникальны (иначе
+коллизия на диске); `prompt_file` - читаемый непустой файл; `depends_on` на
+неизвестный/отключённый пресет и циклы в DAG отвергаются.
+
+**Batch - дешевле и медленнее, не «качественнее».** `openai.batch: true` шлёт
+проход через Batch API (~на 50% дешевле ценой задержки), на качество не влияет.
+Рекомендация: глобально `openai.batch: true`, но `transcript-cleanup.batch: false`
+- batch на вышестоящей стадии задерживает все нижестоящие (ждут её артефакт). По
+умолчанию `openai.batch_wait: true` (синхронно ждём batch; асинхронного пути нет).
+Пер-пресетные `model`/`batch`/`batch_wait` переопределяют глобальные `openai.*`.
 
 ## Vault-интеграция (опционально)
 
@@ -269,23 +377,23 @@ Deepgram (и, при `OPENAI_KEYPOINTS=true`, OpenAI): `run`, `run-once`, `proce
   (если явно не сказано не спрашивать).
 - `--max-size` опционален и по умолчанию выключен. Не выдумывай глобальный порог.
   `--confirm-large` добавляй только после явного одобрения человеком.
-- `--reprocess-txt` повторно гоняет STT и намеренно перезаписывает привязанный TXT.
-- У `run` нет превью-режима. Используй только после того, как контролируемые
-  проверки совпали с ожиданиями.
+- `--reprocess-txt` и `reprocess` тратят кредиты: stage `0` повторно гоняет STT и
+  перезаписывает TXT, stage `1..N` — повторный OpenAI по выбранным пресетам.
+  Сначала `--dry-run`; номера стадий бери из `gdstt doctor`.
+- У `run` нет превью-режима — используй после контролируемых проверок. Пауза -
+  `gdstt stop` (sticky, переживает рестарт), возобновление - `gdstt start`/`gdstt run`.
+- Docker config-only (`GDSTT_HOME=/app/data`, том `./data:/app/data`): сначала `mkdir -p data`, потом `docker compose run --rm google-drive-video-stt gdstt config init --force`, затем заполни `./data/config.yml` и `docker compose up -d --build`.
 - Пустые транскрипты падают намеренно; никогда не принимай пустой TXT за успех.
 - Никогда не печатай API-ключи, OAuth-токены, `credentials.json`, `token.json`.
 
 ## Ключевые заметки
 
-- Deepgram - единственный STT-провайдер; `STT_PROVIDER=""` оставляет режим
-  только-MP3.
-- Идемпотентность - через `appProperties.source_video_id` и совпадение по стему
-  как legacy-fallback; существующие соседние файлы обновляются на месте, не
-  дублируются.
+- Deepgram - единственный STT-провайдер; `stt.provider=""` оставляет режим только-MP3.
+- Идемпотентность - через `appProperties.source_video_id`, пер-артефактный
+  `appProperties.artifact_type` (каждый пресет детектится отдельно через `artifact_ids`
+  в `list_folder_state`) и совпадение по стему (legacy); соседние файлы обновляются на месте.
 - Транзиентные чтения метаданных Drive, состояния папки и загрузки повторяются до
   отказа цикла. Загрузки автоматически не повторяются.
-- `process_item` логирует провайдера, исход, число повторов и длительность;
-  `run-once` логирует сводку по папке и одну сводку цикла
-  (pending/processed/failed).
-- `OUTPUT_TARGET=drive` пишет артефакты как соседние файлы Drive;
-  `OUTPUT_TARGET=folder` пишет их в `OUTPUT_DIR`.
+- `process_item` логирует провайдера, исход, повторы и длительность; `run-once` -
+  сводку по папке и сводку цикла (pending/processed/failed).
+- `output.target=drive` пишет артефакты как соседние файлы Drive; `output.target=folder` - в `output.dir`.
