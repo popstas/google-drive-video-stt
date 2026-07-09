@@ -45,6 +45,9 @@ gdstt config init [--force]     # create config.yml + prompts/ under GDSTT_HOME 
 gdstt --config PATH <command>   # one-shot override against a non-default config.yml
 docker compose up -d --build # containerized deployment (mounts ./data, GDSTT_HOME=/app/data)
 scripts/docker-smoke.sh      # manual/CI: clean config-only Docker smoke
+scripts/release.sh [patch|minor|major]  # bump version, regen CHANGELOG, commit + tag
+uv run bump-my-version show current_version   # read the current release version
+uv run git-cliff --tag vX.Y.Z -o CHANGELOG.md # regenerate the changelog for a tag
 ```
 
 `ffmpeg` must be on PATH for local runs (bundled in the Docker image).
@@ -73,6 +76,24 @@ The deployment is config-owned and persists everything in the mounted volume:
   initializes a clean `/app/data` volume via `gdstt config init`, runs `gdstt doctor`,
   validates provider config, and loads the packaged `keypoints` prompt inside the
   container.
+
+## CI & releases
+
+- **Tests** (`.github/workflows/tests.yml`): runs on pushes to `main` and on PRs.
+  It installs deps with `uv sync --extra dev`, then runs `uv run ruff check` and
+  `uv run pytest` on Python 3.11 and 3.12. Tests mock all external services and
+  hit no network, so the job needs no secrets. Keep both commands green locally
+  before pushing.
+- **Release** (`scripts/release.sh` + `.github/workflows/release.yml`): the version
+  lives only in `pyproject.toml`, bumped by `bump-my-version` (`[tool.bumpversion]`
+  there — `commit`/`tag` are disabled so the script owns them). `scripts/release.sh
+  [patch|minor|major]` bumps the version, regenerates `CHANGELOG.md` via `git-cliff
+  --tag vX.Y.Z` (see `cliff.toml`), commits both as `chore: release vX.Y.Z`, and
+  creates the tag. Push with `git push && git push --tags`; the tag push triggers
+  `release.yml`, which publishes a GitHub Release with git-cliff notes for that tag.
+- **Changelog**: `cliff.toml` drives grouping/ordering; a local pre-commit hook
+  (`.pre-commit-config.yaml`) regenerates `CHANGELOG.md`. `chore: release …` and
+  `task`/`todo`/`wip` commits are filtered out of the changelog.
 
 ## Architecture
 
