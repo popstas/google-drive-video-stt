@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 from pathlib import Path
 
 from src import cli
@@ -93,17 +94,39 @@ def test_skill_is_a_single_compact_file():
     assert other_files == [], f"unexpected bundled resources remain: {other_files}"
 
 
-def test_repository_tracks_one_installable_skill_bundle():
-    forbidden_paths = (
-        REPO_ROOT / ".agents" / "skills",
-        REPO_ROOT / ".claude" / "skills",
-        REPO_ROOT / "docs" / "skills",
-        REPO_ROOT / "scripts" / "sync-agent-skills.py",
+def _git_tracked_paths() -> set[str]:
+    """Repo-relative posix paths of files tracked by git."""
+    result = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
     )
+    return {entry for entry in result.stdout.split("\0") if entry}
+
+
+def test_repository_tracks_one_installable_skill_bundle():
+    # Guard the layering policy against *committed* duplicates only. A locally
+    # installed, gitignored ``.claude/skills`` (an operator's own skill install)
+    # must not fail this — so check git-tracked paths, not the raw filesystem.
+    forbidden_prefixes = (
+        ".agents/skills",
+        ".claude/skills",
+        "docs/skills",
+    )
+    forbidden_files = ("scripts/sync-agent-skills.py",)
 
     assert SKILL_PATH.exists()
-    for path in forbidden_paths:
-        assert not path.exists(), f"obsolete duplicate skill surface remains: {path}"
+
+    tracked = _git_tracked_paths()
+    offenders = sorted(
+        path
+        for path in tracked
+        if path in forbidden_files
+        or any(path == prefix or path.startswith(prefix + "/") for prefix in forbidden_prefixes)
+    )
+    assert not offenders, f"obsolete duplicate skill surface tracked in git: {offenders}"
 
 
 def test_documented_commands_match_registered_subcommands():

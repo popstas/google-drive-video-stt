@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+
+### Build
+
+- Add git-cliff changelog generation
+
 ## v0.2.0 - 2026-07-09
 
 ### Features
