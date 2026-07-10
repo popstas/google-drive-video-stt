@@ -3,7 +3,7 @@ repos:
     hooks:
       - id: generate-changelog
         name: Generate changelog
-        entry: git-cliff -o CHANGELOG.md
+        entry: .venv/bin/git-cliff -o CHANGELOG.md
         language: system
         pass_filenames: false
         stages: [pre-commit]
