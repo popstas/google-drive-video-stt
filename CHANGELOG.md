@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+
+### Build
+
+- Point pre-commit changelog hook at .venv/bin/git-cliff
+
 ## v0.2.1 - 2026-07-09
 
 ### Build
