@@ -42,6 +42,8 @@ class _ProcessTelemetry:
     txt_uploaded: bool = False
     cost_usd: dict[str, float | None] = field(default_factory=dict)
     usage: dict[str, dict[str, int]] = field(default_factory=dict)
+    transcript: str = ""
+    artifacts: dict[str, str] = field(default_factory=dict)
 
 
 def _http_status_code(exc: Exception) -> int | None:
@@ -160,8 +162,12 @@ def _run_preset_stage(
     usage: dict[str, dict[str, int]],
     local_artifact_paths: dict[str, Path] | None = None,
     only_presets: list[str] | None = None,
-) -> None:
+) -> dict[str, str]:
     """Run the enabled preset DAG over a transcript and persist each new artifact.
+
+    Returns each preset's text keyed by preset name — freshly produced ones plus the
+    dependency artifacts re-fed from an earlier cycle — so callers (the completion
+    webhook) can ship the outputs without re-downloading them.
 
     Only presets still missing an artifact are produced (``reprocess`` re-runs them
     all, overwriting in place). Successful, non-empty outputs are written as soon as
@@ -173,7 +179,7 @@ def _run_preset_stage(
     """
     preset_by_name = {preset.name: preset for preset in config.presets}
     if not preset_by_name:
-        return
+        return {}
     local_artifact_paths = local_artifact_paths or {}
     existing_names = set(artifact_ids) | set(local_artifact_paths)
     if only_presets is not None:
@@ -185,7 +191,7 @@ def _run_preset_stage(
     else:
         missing = [name for name in preset_by_name if name not in existing_names]
     if not missing:
-        return
+        return {}
 
     # Reuse dependency artifacts already persisted on Drive so a retry re-runs
     # only the still-missing presets (per the plan): a dependency that completed
@@ -245,6 +251,12 @@ def _run_preset_stage(
     aggregated = preset_pipeline.aggregate_error(results)
     if aggregated:
         raise RuntimeError(aggregated)
+
+    return {
+        name: result.text
+        for name, result in results.items()
+        if result.ok and result.text.strip()
+    }
 
 
 def _prepare_deepgram_audio(mp4_path: Path, config: Config) -> Path:
@@ -445,6 +457,8 @@ def process_item(
     usage: dict[str, dict[str, int]] = {}
     mp3_uploaded = False
     txt_uploaded = False
+    transcript = ""
+    artifacts: dict[str, str] = {}
 
     try:
         with tempfile.TemporaryDirectory(prefix="gd-stt-") as tmp:
@@ -507,8 +521,9 @@ def process_item(
                     txt_id=item.get("txt_id"),
                 )
                 txt_uploaded = True
+                transcript = text
 
-                _run_preset_stage(
+                artifacts = _run_preset_stage(
                     service,
                     file_id,
                     file_name,
@@ -535,8 +550,9 @@ def process_item(
                     )
                 else:
                     text = Path(item["local_txt_path"]).read_text(encoding="utf-8")
+                transcript = text
                 speaker_names = _speaker_names_from_file_info(file_info)
-                _run_preset_stage(
+                artifacts = _run_preset_stage(
                     service,
                     file_id,
                     file_name,
@@ -581,6 +597,8 @@ def process_item(
         txt_uploaded=txt_uploaded,
         cost_usd=cost_usd,
         usage=usage,
+        transcript=transcript,
+        artifacts=artifacts,
     )
 
 

@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add the meta preset (topic + tags) with allow-list injection
 - Read tags.allowed into Config and stop dropping it
 - Wire folders through the runtime and CLI
 - Replace folder_ids with folders in Config

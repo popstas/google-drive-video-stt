@@ -2199,3 +2199,153 @@ def test_run_preset_stage_forces_only_selected(mocker):
     kwargs = run_presets.call_args.kwargs
     assert kwargs["only"] == ["action-items"]
     assert kwargs["precomputed"] == {"transcript-cleanup": "cleanup text"}
+
+
+def test_process_item_telemetry_carries_preset_artifacts(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "transcript-cleanup": PresetResult(
+                name="transcript-cleanup", text="Alice: hi"
+            ),
+            "keypoints": PresetResult(name="keypoints", text="## Задачи"),
+            "expertizeme-managers": PresetResult(
+                name="expertizeme-managers", text="notes"
+            ),
+        },
+    )
+
+    telemetry = main.process_item(
+        service, _item("fid", "video.mp4"), "folderX", _two_preset_config()
+    )
+
+    assert telemetry is not None
+    assert telemetry.transcript == "Speaker 1: hi"
+    assert telemetry.artifacts == {
+        "transcript-cleanup": "Alice: hi",
+        "keypoints": "## Задачи",
+        "expertizeme-managers": "notes",
+    }
+
+
+def test_process_item_telemetry_omits_empty_preset_artifacts(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "transcript-cleanup": PresetResult(
+                name="transcript-cleanup", text="Alice: hi"
+            ),
+            "keypoints": PresetResult(name="keypoints", text="   "),
+        },
+    )
+
+    telemetry = main.process_item(
+        service, _item("fid", "video.mp4"), "folderX", _two_preset_config()
+    )
+
+    assert telemetry is not None
+    assert telemetry.artifacts == {"transcript-cleanup": "Alice: hi"}
+
+
+def test_process_item_telemetry_artifacts_empty_without_presets(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+
+    cfg = make_config(
+        stt_provider="deepgram",
+        deepgram_api_key="dg-x",
+        deepgram_audio_source="mp3_96k",
+        drive_mp3_artifact=False,
+    )
+    telemetry = main.process_item(service, _item("fid", "video.mp4"), "folderX", cfg)
+
+    assert telemetry is not None
+    assert telemetry.artifacts == {}
+    assert telemetry.transcript == "Speaker 1: hi"
+
+
+def test_process_item_telemetry_carries_artifacts_on_preset_refeed(mocker, tmp_path):
+    service = MagicMock()
+    mocker.patch(
+        "src.main.drive.download_text",
+        side_effect=lambda svc, file_id: (
+            "existing transcript" if file_id == "t1" else "Alice: hi"
+        ),
+    )
+    mocker.patch("src.main.transcribe_file")
+    mocker.patch("src.main.drive.upload")
+    mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "transcript-cleanup": PresetResult(
+                name="transcript-cleanup", text="Alice: hi"
+            ),
+            "expertizeme-managers": PresetResult(
+                name="expertizeme-managers", text="notes"
+            ),
+        },
+    )
+
+    item = _item(
+        "fid",
+        "video.mp4",
+        has_txt=True,
+        txt_id="t1",
+        artifact_ids={"transcript-cleanup": "c1", "keypoints": "k1"},
+    )
+    telemetry = main.process_item(service, item, "folderX", _two_preset_config())
+
+    assert telemetry is not None
+    # The re-fed transcript, not a fresh STT pass.
+    assert telemetry.transcript == "existing transcript"
+    assert telemetry.artifacts == {
+        "transcript-cleanup": "Alice: hi",
+        "expertizeme-managers": "notes",
+    }
+
+
+def test_process_summary_log_omits_artifact_text(mocker, tmp_path, caplog):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: secret words")
+    mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "transcript-cleanup": PresetResult(
+                name="transcript-cleanup", text="Alice: confidential"
+            ),
+        },
+    )
+
+    with caplog.at_level("INFO"):
+        main.process_item(
+            service, _item("fid", "video.mp4"), "folderX", _two_preset_config()
+        )
+
+    summary = [r.getMessage() for r in caplog.records if "Process summary" in r.msg]
+    assert len(summary) == 1
+    assert "confidential" not in summary[0]
+    assert "secret words" not in summary[0]

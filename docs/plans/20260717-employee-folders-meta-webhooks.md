@@ -278,17 +278,24 @@ preset is enabled" gate); `tests/test_main.py`'s `make_config` now defaults to t
 
 ### Task 6: Return preset outputs from `_run_preset_stage` to `process_item`
 
-- [ ] write a failing test in `tests/test_main.py` that `process_item` telemetry carries each
+- [x] write a failing test in `tests/test_main.py` that `process_item` telemetry carries each
       enabled preset's text keyed by preset name
-- [ ] change `_run_preset_stage` (`src/main.py:229-243`) to return
+      (➕ plus an empty/blank-text preset omitted from the map, and a preset-less config
+      yielding `{}` — a webhook must not ship an `artifacts` key with empty values)
+- [x] change `_run_preset_stage` (`src/main.py:229-243`) to return
       `dict[str, str]` of preset name → artifact text instead of discarding them
-- [ ] add an `artifacts: dict[str, str]` field (default empty) plus `transcript: str` to
+      (➕ the map carries the freshly produced presets **and** the dependency artifacts
+      re-fed from `precomputed` — `run_presets` seeds both into its results, and the webhook
+      payload wants the reused `transcript-cleanup` output as much as the new ones)
+- [x] add an `artifacts: dict[str, str]` field (default empty) plus `transcript: str` to
       `_ProcessTelemetry` (`:35-44`) and populate them in both producing branches (the
       `needs_txt` branch at `:483-525` and the `needs_presets` re-feed branch at `:526-553`)
-- [ ] confirm the `finally` summary log at `:558-573` stays unchanged — no artifact text in logs
-- [ ] write tests for the re-feed branch (existing transcript, presets rerun) carrying
+- [x] confirm the `finally` summary log at `:558-573` stays unchanged — no artifact text in logs
+      (guarded by `test_process_summary_log_omits_artifact_text`)
+- [x] write tests for the re-feed branch (existing transcript, presets rerun) carrying
       artifacts too
-- [ ] run `uv run pytest && uv run ruff check` — must pass before Task 7
+- [x] run `uv run pytest && uv run ruff check` — must pass before Task 7
+      (619 passed, 2 skipped; ruff clean)
 
 ### Task 7: Add the completion webhook
 
