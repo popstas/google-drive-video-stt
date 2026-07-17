@@ -225,28 +225,56 @@ helpers now build `folders=`, and the full suite is green again (582 passed, 2 s
 
 ### Task 5: Add the `meta` preset (topic + tags) with allow-list injection
 
-- [ ] write a failing test in `tests/test_config.py` that a preset prompt containing
+- [x] write a failing test in `tests/test_config.py` that a preset prompt containing
       `{{allowed_tags}}` is rendered with the config's `tags.allowed` list at load time, and
       that a prompt without the placeholder is untouched
-- [ ] write a failing test in `tests/test_presets.py` that `meta` is a built-in with
+      (➕ also: inline-`instructions` rendering, and an empty allow-list rendering an explicit
+      "none configured — return an empty tags list" line rather than a blank section a model
+      might fill by inventing tags)
+- [x] write a failing test in `tests/test_presets.py` that `meta` is a built-in with
       `artifact_suffix=".meta.md"` and `prompt_file="meta.md"`
-- [ ] add `src/assets/prompts/meta.md` instructing a YAML frontmatter reply — `topic:` (one
+- [x] add `src/assets/prompts/meta.md` instructing a YAML frontmatter reply — `topic:` (one
       sentence) and `tags:` (a list drawn **only** from the `{{allowed_tags}}` placeholder,
       empty list when nothing fits)
-- [ ] register `meta.md` in `PACKAGED_PROMPT_ASSETS` (`src/presets.py:32-36`) and confirm
-      `pyproject.toml:38` already globs it
-- [ ] add the `meta` entry to `BUILTIN_PRESETS` (`:109-116`) with
-      `depends_on=("transcript-cleanup",)` — matching how `keypoints` is wired in
-      `data/config.yml`
-- [ ] render the `{{allowed_tags}}` placeholder inside `_resolve_prompt_text`
+- [x] register `meta.md` in `PACKAGED_PROMPT_ASSETS` (`src/presets.py:32-36`) and confirm
+      `pyproject.toml:38` already globs it (it does: `src/assets/prompts/*.md`)
+- [x] add the `meta` entry to `BUILTIN_PRESETS` (`:109-116`)
+      (⚠️ **scope deviation**: the built-in carries `depends_on=()`, **not**
+      `depends_on=("transcript-cleanup",)` as planned. `transcript-cleanup` is a *config*
+      preset, not a built-in, so a hardcoded dependency makes `validate_dag` reject every
+      config that omits it — including `merge_presets(BUILTIN_PRESETS, None)`. `keypoints`
+      has the same shape for the same reason. The chain is wired where `keypoints`' is:
+      `_default_config_dict` now emits `meta` with `depends_on: [transcript-cleanup]`, so a
+      generated config still runs `transcript-cleanup -> keypoints + action-items + meta`.)
+- [x] render the `{{allowed_tags}}` placeholder inside `_resolve_prompt_text`
       (`src/config.py:126-162`) from `tags_allowed`
-- [ ] add `src/meta.py` with `parse_meta(text) -> Meta(topic: str, tags: tuple[str, ...])`
+      (➕ via `_render_prompt_placeholders`/`_render_allowed_tags`; `_resolve_presets` and
+      `_resolve_prompt_text` take `tags_allowed`, applied to inline, file, and packaged
+      prompts alike so no unrendered prompt can reach the pipeline)
+- [x] add `src/meta.py` with `parse_meta(text) -> Meta(topic: str, tags: tuple[str, ...])`
       reading the YAML frontmatter, tolerating a missing/garbled block, and **dropping tags
       not in the allow-list**
-- [ ] write `tests/test_meta.py`: well-formed frontmatter; no frontmatter; malformed YAML;
-      unknown tag dropped; empty tags list
-- [ ] extend `tests/test_preset_dag_e2e.py` so the mocked DAG run writes a `.meta.md` artifact
-- [ ] run `uv run pytest && uv run ruff check` — must pass before Task 6
+      (➕ signature is `parse_meta(text, allowed=None)`: `None` skips filtering, an explicit
+      collection filters, so an empty `tags.allowed` drops every tag rather than passing
+      invented ones through)
+- [x] write `tests/test_meta.py`: well-formed frontmatter; no frontmatter; malformed YAML;
+      unknown tag dropped; empty tags list (17 tests — plus block-style tags, trailing body,
+      non-mapping frontmatter, dedupe, scalar `tags:`, BOM, and coercion)
+- [x] extend `tests/test_preset_dag_e2e.py` so the DAG run writes a `.meta.md` artifact
+      (⚠️ this file is the **network/credit-gated** e2e, not a mocked run as the plan's
+      Testing Strategy says — it stays skipped unless `RUN_PRESET_DAG_E2E=1`. Extended in
+      place: `meta` joins the DAG, the artifact is asserted, and it is parsed back through
+      `parse_meta` to assert its tags come from the configured allow-list.)
+- [x] run `uv run pytest && uv run ruff check` — must pass before Task 6
+      (614 passed, 2 skipped; ruff clean)
+
+➕ **Built-in-set fallout (Task 5)**: `meta` joining `BUILTIN_PRESETS` broke 32 tests that
+assumed `keypoints` was the only built-in. Fixed at the choke points rather than per-site:
+`tests/test_presets.py` derives `_BUILTIN_NAMES` from the registry; `tests/test_config.py`
+gained `_disabled_builtins()` (used by the deepgram/google tests, which carry no
+`openai.api_key` and would otherwise fail the "openai.api_key is required when any OpenAI
+preset is enabled" gate); `tests/test_main.py`'s `make_config` now defaults to the
+`keypoints` built-in alone, matching the legacy-gate intent its docstring already stated.
 
 ### Task 6: Return preset outputs from `_run_preset_stage` to `process_item`
 

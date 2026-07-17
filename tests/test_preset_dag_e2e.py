@@ -8,6 +8,7 @@ import yaml
 
 from src import cli
 from src.config import _load_deepgram_api_key
+from src.meta import parse_meta
 
 # Marked, network/credit end-to-end test. It is excluded from the default
 # `uv run pytest` run: it stays skipped unless RUN_PRESET_DAG_E2E=1 is set, and it
@@ -15,9 +16,9 @@ from src.config import _load_deepgram_api_key
 #
 # It runs `gdstt process <file-id>` with output.target=folder pointing at a temp
 # dir (no Drive writes), driving a preset DAG of
-# `transcript-cleanup -> keypoints + expertizeme-managers`, and asserts the .txt
-# transcript plus each enabled preset artifact were produced and that the two
-# parallel branches (keypoints + expertizeme-managers) both ran.
+# `transcript-cleanup -> keypoints + expertizeme-managers + meta`, and asserts the
+# .txt transcript plus each enabled preset artifact were produced and that the
+# parallel branches (keypoints + expertizeme-managers + meta) all ran.
 
 # Drive id "Oksana and Andrei Smirnov" (~5.7 min, ~7.8 MB): a short
 # two-named-speaker recording that exercises speaker-named presets cheaply.
@@ -33,6 +34,9 @@ _MANAGERS_INSTRUCTIONS = (
     "responsible, in the transcript's own language. Return only a short Markdown "
     "list, no preamble."
 )
+# The allow-list handed to the built-in `meta` prompt. Deliberately broad enough
+# that a real conversation matches at least one tag.
+_E2E_ALLOWED_TAGS = ["клиентская-консультация", "интервью", "статус-встреча"]
 
 
 def _require_e2e_env() -> tuple[str, Path]:
@@ -81,6 +85,7 @@ def test_preset_dag_end_to_end_writes_each_artifact(tmp_path, monkeypatch):
             "model": os.environ.get("OPENAI_MODEL", "gpt-5.4-mini"),
             "max_parallel": 4,
         },
+        "tags": {"allowed": _E2E_ALLOWED_TAGS},
         "presets": {
             "transcript-cleanup": {"instructions": _CLEANUP_INSTRUCTIONS},
             "keypoints": {"depends_on": ["transcript-cleanup"]},
@@ -88,6 +93,9 @@ def test_preset_dag_end_to_end_writes_each_artifact(tmp_path, monkeypatch):
                 "depends_on": ["transcript-cleanup"],
                 "instructions": _MANAGERS_INSTRUCTIONS,
             },
+            # Built-in prompt; the `{{allowed_tags}}` placeholder is rendered from
+            # the `tags.allowed` block above at config load.
+            "meta": {"depends_on": ["transcript-cleanup"]},
         },
     }
     config_file = tmp_path / "config.yml"
@@ -103,9 +111,17 @@ def test_preset_dag_end_to_end_writes_each_artifact(tmp_path, monkeypatch):
     cleanup = list(output_dir.glob("*.transcript-cleanup.md"))
     keypoints = list(output_dir.glob("*.keypoints.md"))
     managers = list(output_dir.glob("*.expertizeme-managers.md"))
+    meta_files = list(output_dir.glob("*.meta.md"))
 
     assert len(cleanup) == 1, f"expected transcript-cleanup artifact, got {cleanup}"
     assert cleanup[0].read_text(encoding="utf-8").strip(), "transcript-cleanup output empty"
-    # Both parallel branches fed by transcript-cleanup must have run.
+    # Every parallel branch fed by transcript-cleanup must have run.
     assert len(keypoints) == 1, f"expected keypoints artifact, got {keypoints}"
     assert len(managers) == 1, f"expected expertizeme-managers artifact, got {managers}"
+    assert len(meta_files) == 1, f"expected meta artifact, got {meta_files}"
+
+    # The meta artifact must parse back into a topic, and any tags it carries must
+    # come from the configured allow-list.
+    parsed = parse_meta(meta_files[0].read_text(encoding="utf-8"), allowed=_E2E_ALLOWED_TAGS)
+    assert parsed.topic, "meta artifact carried no topic"
+    assert set(parsed.tags) <= set(_E2E_ALLOWED_TAGS)

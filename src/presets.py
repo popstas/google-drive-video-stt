@@ -33,6 +33,7 @@ PACKAGED_PROMPT_ASSETS: tuple[str, ...] = (
     "keypoints.md",
     "transcript-cleanup.md",
     "action-items.md",
+    "meta.md",
 )
 
 
@@ -70,6 +71,13 @@ def load_packaged_prompt(name: str) -> str:
 # asset ``src/assets/prompts/keypoints.md``; ``openai_pipeline`` imports this str.
 INSTRUCTIONS = load_packaged_prompt("keypoints.md")
 
+# Built-in `meta` preset prompt: describe the conversation with a one-sentence
+# topic and tags picked only from the config's `tags.allowed` list, returned as a
+# YAML frontmatter block so `meta.parse_meta` can read it back into structured
+# fields for the completion webhook. The `{{allowed_tags}}` placeholder in the
+# asset is rendered from `Config.tags_allowed` at load time (`config.py`).
+META_INSTRUCTIONS = load_packaged_prompt("meta.md")
+
 
 def default_artifact_suffix(name: str) -> str:
     """Derive the default sibling-artifact suffix for a preset (``.<name>.md``)."""
@@ -106,12 +114,23 @@ class Preset:
 
 
 # Code-shipped presets. Config presets merge over these by name.
+#
+# Neither built-in declares `depends_on`: `transcript-cleanup` lives in the config,
+# not in code, so a hardcoded dependency here would make `validate_dag` reject
+# every config that omits it. The generated config wires the chain instead (see
+# `_default_config_dict`).
 BUILTIN_PRESETS: tuple[Preset, ...] = (
     Preset(
         name="keypoints",
         instructions=INSTRUCTIONS,
         artifact_suffix=".keypoints.md",
         prompt_file="keypoints.md",
+    ),
+    Preset(
+        name="meta",
+        instructions=META_INSTRUCTIONS,
+        artifact_suffix=".meta.md",
+        prompt_file="meta.md",
     ),
 )
 

@@ -5,6 +5,7 @@
 
 ### Features
 
+- Read tags.allowed into Config and stop dropping it
 - Wire folders through the runtime and CLI
 - Replace folder_ids with folders in Config
 - Fix ExpertizeMe filename parsing in extract_interlocutor_names

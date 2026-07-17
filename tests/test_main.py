@@ -13,6 +13,8 @@ from src.presets import BUILTIN_PRESETS, Preset
 from src.preset_pipeline import PresetResult
 from src.stt.base import STTError
 
+_KEYPOINTS_BUILTIN = next(p for p in BUILTIN_PRESETS if p.name == "keypoints")
+
 
 def _as_folders(entries) -> tuple[EmployeeFolder, ...]:
     """Accept ids or EmployeeFolders, so folder-agnostic tests stay short."""
@@ -41,8 +43,10 @@ def make_config(
 ) -> Config:
     if presets is None:
         # Mirror the legacy keypoints gate: the built-in keypoints pass is the only
-        # enabled preset when requested, and none otherwise.
-        presets = BUILTIN_PRESETS if openai_keypoints else ()
+        # enabled preset when requested, and none otherwise. Deliberately not the
+        # whole BUILTIN_PRESETS tuple — `meta` is a built-in too, and pulling it in
+        # here would silently widen every openai_keypoints=True test to two passes.
+        presets = (_KEYPOINTS_BUILTIN,) if openai_keypoints else ()
     return Config(
         folders=_as_folders(folders if folders is not None else ["folderA"]),
         poll_interval=poll_interval,

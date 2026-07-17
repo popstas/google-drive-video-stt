@@ -21,7 +21,7 @@ from src.config import (
     resolve_config_file_path,
     use_google_files,
 )
-from src.presets import PACKAGED_PROMPT_ASSETS
+from src.presets import BUILTIN_PRESETS, PACKAGED_PROMPT_ASSETS
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch, tmp_path):
@@ -43,15 +43,28 @@ def _load_config(tmp_path, data, *, validate_providers=False):
     return load_config(config_path=config_file, validate_providers=validate_providers)
 
 
+_BUILTIN_NAMES = {preset.name for preset in BUILTIN_PRESETS}
+
+
+def _disabled_builtins():
+    """Disable every built-in preset.
+
+    Derived from the registry rather than spelled out, so adding a built-in doesn't
+    silently re-enable OpenAI in the deepgram-only tests (which carry no
+    openai.api_key and would fail provider validation).
+    """
+    return {preset.name: {"enabled": False} for preset in BUILTIN_PRESETS}
+
+
 def _deepgram_data(deepgram=None, *, stt_extra=None):
-    """Build a deepgram-only config dict (keypoints preset disabled, keyterms off)."""
+    """Build a deepgram-only config dict (built-in presets disabled, keyterms off)."""
     dg = {"api_key": "dg-test", "keyterms_enabled": False}
     if deepgram:
         dg.update(deepgram)
     stt = {"provider": "deepgram", "deepgram": dg}
     if stt_extra:
         stt.update(stt_extra)
-    return {"stt": stt, "presets": {"keypoints": {"enabled": False}}}
+    return {"stt": stt, "presets": _disabled_builtins()}
 
 
 def test_defaults_when_config_minimal(tmp_path):
@@ -319,6 +332,95 @@ def test_config_to_yaml_dict_round_trips_tags_allowed(tmp_path):
     assert reloaded.tags_allowed == ("клиентская-консультация", "EB-1")
 
 
+# --- {{allowed_tags}} prompt rendering ---------------------------------------
+
+
+def _preset_by_name(cfg, name):
+    return next(p for p in cfg.presets if p.name == name)
+
+
+def test_allowed_tags_placeholder_rendered_at_load(tmp_path):
+    prompt = tmp_path / "tagged.md"
+    prompt.write_text("Pick from:\n\n{{allowed_tags}}\n", encoding="utf-8")
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "tags": {"allowed": ["клиентская-консультация", "O-1"]},
+            "presets": {
+                "keypoints": {"enabled": False},
+                "tagger": {"prompt_file": str(prompt)},
+            },
+        },
+    )
+    instructions = _preset_by_name(cfg, "tagger").instructions
+    assert "{{allowed_tags}}" not in instructions
+    assert "- клиентская-консультация" in instructions
+    assert "- O-1" in instructions
+
+
+def test_allowed_tags_placeholder_rendered_in_inline_instructions(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "tags": {"allowed": ["O-1"]},
+            "presets": {
+                "keypoints": {"enabled": False},
+                "tagger": {"instructions": "Tags:\n{{allowed_tags}}"},
+            },
+        },
+    )
+    assert _preset_by_name(cfg, "tagger").instructions == "Tags:\n- O-1"
+
+
+def test_prompt_without_placeholder_is_untouched(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "tags": {"allowed": ["O-1"]},
+            "presets": {
+                "keypoints": {"enabled": False},
+                "plain": {"instructions": "No placeholder here."},
+            },
+        },
+    )
+    assert _preset_by_name(cfg, "plain").instructions == "No placeholder here."
+
+
+def test_empty_allow_list_renders_explicit_none(tmp_path):
+    # With no tags configured the model must be told to return an empty list rather
+    # than being handed a blank section it might fill by inventing tags.
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {
+                "keypoints": {"enabled": False},
+                "tagger": {"instructions": "Tags:\n{{allowed_tags}}"},
+            },
+        },
+    )
+    instructions = _preset_by_name(cfg, "tagger").instructions
+    assert "{{allowed_tags}}" not in instructions
+    assert "none" in instructions.lower()
+
+
+def test_meta_builtin_prompt_renders_allowed_tags(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "tags": {"allowed": ["клиентская-консультация", "EB-1"]},
+        },
+    )
+    instructions = _preset_by_name(cfg, "meta").instructions
+    assert "{{allowed_tags}}" not in instructions
+    assert "- клиентская-консультация" in instructions
+    assert "- EB-1" in instructions
+
+
 def test_custom_poll_interval(tmp_path):
     cfg = _load_config(tmp_path, {"poll_interval": 120, "stt": {"provider": "disabled"}})
     assert cfg.poll_interval == 120
@@ -575,7 +677,7 @@ def test_stt_deepgram_key_file_is_ignored_when_transcription_disabled(tmp_path):
         tmp_path,
         {
             "stt": {"provider": "disabled", "deepgram": {"api_key_file": str(missing_key_file)}},
-            "presets": {"keypoints": {"enabled": False}},
+            "presets": _disabled_builtins(),
         },
         validate_providers=True,
     )
@@ -713,11 +815,11 @@ def test_generated_yaml_emits_batch_wait_when_disabled(tmp_path):
 
 def test_yaml_disabled_provider_is_mp3_only(tmp_path):
     config_file = tmp_path / "config.yml"
-    # Disabling the built-in keypoints preset keeps this a pure mp3-only setup; with
-    # any enabled preset, an openai.api_key would be required.
+    # Disabling the built-in presets keeps this a pure mp3-only setup; with any
+    # enabled preset, an openai.api_key would be required.
     _write_yaml(
         config_file,
-        {"stt": {"provider": "disabled"}, "presets": {"keypoints": {"enabled": False}}},
+        {"stt": {"provider": "disabled"}, "presets": _disabled_builtins()},
     )
 
     cfg = load_config(config_path=config_file)
@@ -915,7 +1017,7 @@ def test_yaml_presets_merge_over_builtins(tmp_path):
     cfg = load_config(config_path=config_file, validate_providers=False)
 
     by_name = {p.name: p for p in cfg.presets}
-    assert set(by_name) == {"keypoints", "transcript-cleanup"}
+    assert set(by_name) == _BUILTIN_NAMES | {"transcript-cleanup"}
     assert by_name["keypoints"].depends_on == ("transcript-cleanup",)
     # The built-in instructions are preserved when only depends_on is overridden.
     assert by_name["keypoints"].artifact_suffix == ".keypoints.md"
@@ -927,7 +1029,7 @@ def test_yaml_presets_default_to_builtins_when_absent(tmp_path):
 
     cfg = load_config(config_path=config_file, validate_providers=False)
 
-    assert {p.name for p in cfg.presets} == {"keypoints"}
+    assert {p.name for p in cfg.presets} == _BUILTIN_NAMES
 
 
 def test_yaml_presets_can_disable_builtin(tmp_path):
@@ -939,7 +1041,7 @@ def test_yaml_presets_can_disable_builtin(tmp_path):
 
     cfg = load_config(config_path=config_file, validate_providers=False)
 
-    assert cfg.presets == ()
+    assert "keypoints" not in {p.name for p in cfg.presets}
 
 
 def test_yaml_presets_invalid_dag_raises(tmp_path):
@@ -1125,7 +1227,7 @@ def test_yaml_duplicate_artifact_suffix_ignored_when_disabled(tmp_path):
 
     cfg = load_config(config_path=config_file, validate_providers=False)
 
-    assert {p.name for p in cfg.presets} == {"keypoints", "first"}
+    assert {p.name for p in cfg.presets} == _BUILTIN_NAMES | {"first"}
 
 
 def test_yaml_shared_prompt_file_distinct_names_and_suffixes_allowed(tmp_path):
@@ -1259,15 +1361,23 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     assert data["presets"]["keypoints"]["enabled"] is True
     assert data["presets"]["keypoints"]["prompt_file"] == "prompts/keypoints.md"
     # The full default chain is enabled out of the box, with transcript-cleanup
-    # written above keypoints and both downstream presets depending on it.
-    assert list(data["presets"]) == ["transcript-cleanup", "keypoints", "action-items"]
+    # written above keypoints and every downstream preset depending on it.
+    assert list(data["presets"]) == [
+        "transcript-cleanup",
+        "keypoints",
+        "action-items",
+        "meta",
+    ]
     assert [name for name, p in data["presets"].items() if p["enabled"]] == [
         "transcript-cleanup",
         "keypoints",
         "action-items",
+        "meta",
     ]
     assert data["presets"]["keypoints"]["depends_on"] == ["transcript-cleanup"]
     assert data["presets"]["action-items"]["depends_on"] == ["transcript-cleanup"]
+    assert data["presets"]["meta"]["depends_on"] == ["transcript-cleanup"]
+    assert data["presets"]["meta"]["prompt_file"] == "prompts/meta.md"
     # Batch and the run flag are on by default in a generated config.
     assert data["openai"]["batch"] is True
     assert data["run"]["enabled"] is True
@@ -1277,6 +1387,7 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     assert (tmp_path / "prompts" / "keypoints.md").is_file()
     assert (tmp_path / "prompts" / "transcript-cleanup.md").is_file()
     assert (tmp_path / "prompts" / "action-items.md").is_file()
+    assert (tmp_path / "prompts" / "meta.md").is_file()
     assert (tmp_path / "config" / "deepgram-keyterms.txt").is_file()
     # The generated config loads back without provider secrets and yields the chain.
     cfg = load_config(config_path=config_file, validate_providers=False)
@@ -1285,6 +1396,7 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
         "transcript-cleanup",
         "keypoints",
         "action-items",
+        "meta",
     }
 
 
@@ -1590,7 +1702,7 @@ def test_yaml_google_inline_credentials_and_token(tmp_path):
         config_file,
         {
             "stt": {"provider": "disabled"},
-            "presets": {"keypoints": {"enabled": False}},
+            "presets": _disabled_builtins(),
             "google": {
                 "credentials": {"installed": {"client_id": "cid", "client_secret": "x"}},
                 "token": {"token": "t", "refresh_token": "r"},
@@ -1615,7 +1727,7 @@ def test_yaml_google_file_paths_resolve_relative(tmp_path):
         config_file,
         {
             "stt": {"provider": "disabled"},
-            "presets": {"keypoints": {"enabled": False}},
+            "presets": _disabled_builtins(),
             "google": {
                 "credentials_file": "secrets/creds.json",
                 "token_file": "/abs/token.json",
@@ -1637,7 +1749,7 @@ def test_yaml_google_back_compat_data_dir_fallback(tmp_path):
     config_file = tmp_path / "config.yml"
     _write_yaml(
         config_file,
-        {"stt": {"provider": "disabled"}, "presets": {"keypoints": {"enabled": False}}},
+        {"stt": {"provider": "disabled"}, "presets": _disabled_builtins()},
     )
 
     cfg = load_config(config_path=config_file)
@@ -1654,7 +1766,7 @@ def test_yaml_google_credentials_both_inline_and_file_fails(tmp_path):
         config_file,
         {
             "stt": {"provider": "disabled"},
-            "presets": {"keypoints": {"enabled": False}},
+            "presets": _disabled_builtins(),
             "google": {
                 "credentials": {"installed": {"client_id": "cid"}},
                 "credentials_file": "creds.json",
@@ -1672,7 +1784,7 @@ def test_yaml_google_token_both_inline_and_file_fails(tmp_path):
         config_file,
         {
             "stt": {"provider": "disabled"},
-            "presets": {"keypoints": {"enabled": False}},
+            "presets": _disabled_builtins(),
             "google": {
                 "token": {"token": "t"},
                 "token_file": "token.json",

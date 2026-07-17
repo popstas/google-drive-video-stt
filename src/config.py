@@ -41,6 +41,10 @@ DEEPGRAM_DEFAULT_KEYTERMS_FILE = Path("config/deepgram-keyterms.txt")
 DEEPGRAM_KEYTERMS_ASSET = "deepgram-keyterms.txt"
 DEEPGRAM_MAX_KEYTERMS = 100
 
+# Placeholder a preset prompt may carry to receive the config's ``tags.allowed``
+# list at load time. The built-in ``meta`` prompt uses it; any prompt may.
+ALLOWED_TAGS_PLACEHOLDER = "{{allowed_tags}}"
+
 
 FOLDER_IDS_MIGRATION_ERROR = (
     "folder_ids is no longer supported; use\n"
@@ -198,7 +202,35 @@ def _parse_tags_allowed(raw: object) -> tuple[str, ...]:
     return tuple(tag for tag in (_yaml_str(entry) for entry in raw) if tag)
 
 
-def _resolve_prompt_text(preset: Preset, config_file: Path | None) -> str:
+def _render_allowed_tags(tags_allowed: tuple[str, ...]) -> str:
+    """Render ``tags.allowed`` as the bullet list that replaces the placeholder.
+
+    An empty allow-list renders an explicit "none" line rather than a blank
+    section, so a prompt handed no tags tells the model to return an empty list
+    instead of leaving it free to invent one.
+    """
+    if not tags_allowed:
+        return "(none configured — return an empty tags list)"
+    return "\n".join(f"- {tag}" for tag in tags_allowed)
+
+
+def _render_prompt_placeholders(text: str, tags_allowed: tuple[str, ...]) -> str:
+    """Substitute the supported ``{{...}}`` placeholders in a resolved prompt.
+
+    Today that is only ``{{allowed_tags}}`` (the ``meta`` preset's tag allow-list).
+    A prompt without the placeholder is returned unchanged, so this is safe to run
+    over every preset's text.
+    """
+    if ALLOWED_TAGS_PLACEHOLDER not in text:
+        return text
+    return text.replace(ALLOWED_TAGS_PLACEHOLDER, _render_allowed_tags(tags_allowed))
+
+
+def _resolve_prompt_text(
+    preset: Preset,
+    config_file: Path | None,
+    tags_allowed: tuple[str, ...] = (),
+) -> str:
     """Resolve a preset's final prompt text from instructions or prompt_file.
 
     Resolution priority: inline ``instructions`` win; otherwise ``prompt_file`` is
@@ -207,9 +239,12 @@ def _resolve_prompt_text(preset: Preset, config_file: Path | None) -> str:
     config file exists), then the packaged asset by base name. A ``prompt_file``
     that resolves but is missing/unreadable/empty raises ``ValueError``; a preset
     with neither instructions nor prompt_file also raises.
+
+    The resolved text has its ``{{...}}`` placeholders rendered from ``tags_allowed``
+    before it is returned, so the pipeline never sees an unrendered prompt.
     """
     if preset.instructions.strip():
-        return preset.instructions
+        return _render_prompt_placeholders(preset.instructions, tags_allowed)
     if not preset.prompt_file:
         raise ValueError(
             f"preset {preset.name!r} must define instructions or prompt_file"
@@ -226,25 +261,30 @@ def _resolve_prompt_text(preset: Preset, config_file: Path | None) -> str:
                     f"preset {preset.name!r} prompt_file {preset.prompt_file!r} "
                     f"is empty: {candidate}"
                 )
-            return text
+            return _render_prompt_placeholders(text, tags_allowed)
 
     try:
-        return load_packaged_prompt(os.path.basename(preset.prompt_file))
+        text = load_packaged_prompt(os.path.basename(preset.prompt_file))
     except ValueError as exc:
         raise ValueError(
             f"preset {preset.name!r} prompt_file {preset.prompt_file!r} "
             f"could not be resolved: {exc}"
         ) from exc
+    return _render_prompt_placeholders(text, tags_allowed)
 
 
 def _resolve_presets(
     config_presets: dict | None,
     config_file: Path | None = None,
+    tags_allowed: tuple[str, ...] = (),
 ) -> tuple[Preset, ...]:
     """Merge config presets over built-ins, resolve prompts, validate, and freeze."""
     merged = merge_presets(BUILTIN_PRESETS, config_presets)
     resolved = {
-        name: replace(preset, instructions=_resolve_prompt_text(preset, config_file))
+        name: replace(
+            preset,
+            instructions=_resolve_prompt_text(preset, config_file, tags_allowed),
+        )
         for name, preset in merged.items()
     }
     validate_dag(resolved)
@@ -532,7 +572,7 @@ def _config_from_yaml(
     openai_batch = _yaml_bool(openai.get("batch"), default=False)
     openai_batch_wait = _yaml_bool(openai.get("batch_wait"), default=True)
     openai_max_parallel = _parse_max_parallel(openai.get("max_parallel"), default=4)
-    presets = _resolve_presets(config_presets, config_file)
+    presets = _resolve_presets(config_presets, config_file, tags_allowed)
 
     deepgram_api_key = ""
     deepgram_model = _yaml_str(deepgram.get("model"), "nova-3") or "nova-3"
@@ -737,8 +777,9 @@ def _default_config_dict(
 ) -> dict:
     """Build a full default ``config.yml`` mapping for ``config init``/``link``.
 
-    The default preset chain is ``transcript-cleanup -> keypoints + action-items``
-    with all three presets enabled; every prompt_file uses ``/``-style relative
+    The default preset chain is
+    ``transcript-cleanup -> keypoints + action-items + meta`` with all four presets
+    enabled; every prompt_file uses ``/``-style relative
     paths so the generated YAML is portable. ``prompt_dir`` (when given) is a
     ``/``-joined path the prompts were copied to and that the prompt_file entries
     point at; otherwise the default ``prompts/<name>.md`` layout is used.
@@ -750,8 +791,8 @@ def _default_config_dict(
         return _default_prompt_file(name)
 
     # Default chain (all enabled out of the box): transcript-cleanup runs first and
-    # both keypoints and action-items depend on it. Order matters in the generated
-    # YAML, so transcript-cleanup is written above keypoints.
+    # keypoints, action-items, and meta all depend on it. Order matters in the
+    # generated YAML, so transcript-cleanup is written above its dependents.
     presets: dict[str, dict] = {
         "transcript-cleanup": {
             "enabled": True,
@@ -766,6 +807,11 @@ def _default_config_dict(
             "enabled": True,
             "depends_on": ["transcript-cleanup"],
             "prompt_file": prompt_path("action-items"),
+        },
+        "meta": {
+            "enabled": True,
+            "depends_on": ["transcript-cleanup"],
+            "prompt_file": prompt_path("meta"),
         },
     }
 
@@ -1049,7 +1095,7 @@ def init_config(
     the runtime reads: an explicit ``config_path`` wins; otherwise the active
     config is ``<GDSTT_HOME>/config.yml`` when ``GDSTT_HOME`` is set, falling back
     to ``./data/config.yml`` when it is unset. The default preset chain is
-    ``transcript-cleanup -> keypoints + action-items`` with all three presets
+    ``transcript-cleanup -> keypoints + action-items + meta`` with all four presets
     enabled. Prompt assets are always copied beside the config: into
     ``prompt_dir`` when given (and the ``prompt_file`` entries point there), else
     into ``<config_dir>/prompts/``.
