@@ -45,6 +45,64 @@ def test_extract_names_preserves_slash_before_date_cut():
     assert names and names[0].startswith("Call")
 
 
+# --- name extraction: real ExpertizeMe recording names ---------------------
+
+def test_extract_names_strips_duration_prefix_and_parenthetical():
+    names = postprocess.extract_interlocutor_names(
+        "30-минутная онлайн-встреча Viktoria Tolstikova(ExpertizeMe) и Oleg"
+        " - 2026_03_13 19_30 GMT+05_00 – Recording.mp4"
+    )
+    assert names == ["Viktoria Tolstikova", "Oleg"]
+
+
+def test_extract_names_strips_duration_prefix_with_double_spaces():
+    names = postprocess.extract_interlocutor_names(
+        "30-минутная онлайн-встреча Angelica Munkueva(ExpertizeMe) и Mariia "
+        " - 2026_07_08 18_59 CEST - Recording.mp4"
+    )
+    assert names == ["Angelica Munkueva", "Mariia"]
+
+
+def test_extract_names_english_duration_prefix():
+    names = postprocess.extract_interlocutor_names(
+        "30-minute online meeting Alice Smith(ExpertizeMe) and Bob - 2026_07_08.mp4"
+    )
+    assert names == ["Alice Smith", "Bob"]
+
+
+def test_extract_names_cyrillic_ha_separator_drops_org_token():
+    names = postprocess.extract_interlocutor_names(
+        "Ольга х ExpertizeMe - 2026_07_08 12_00 GMT+04_00 – Recording.mp4"
+    )
+    assert names == ["Ольга"]
+
+
+def test_extract_names_latin_x_separator_drops_org_token():
+    names = postprocess.extract_interlocutor_names("Olga x ExpertizeMe - 2026_07_08.mp4")
+    assert names == ["Olga"]
+
+
+def test_extract_names_and_separator_regression_guard():
+    names = postprocess.extract_interlocutor_names(
+        "Aleksandr Tikhonov and Oksana Ciciarelli - 2026_05_20 16_55 CEST - Recording.mp4"
+    )
+    assert names == ["Aleksandr Tikhonov", "Oksana Ciciarelli"]
+
+
+def test_extract_names_rejects_meet_code_stem():
+    names = postprocess.extract_interlocutor_names("zkn-jdcd-cxc (2026-06-16 22_09 GMT+4).mp4")
+    assert names == []
+
+
+def test_extract_names_underscore_date_is_trimmed():
+    names = postprocess.extract_interlocutor_names("Иван и Пётр 2026_05_28.mp4")
+    assert names == ["Иван", "Пётр"]
+
+
+def test_extract_names_org_only_stem_yields_nothing():
+    assert postprocess.extract_interlocutor_names("ExpertizeMe - 2026_07_08.mp4") == []
+
+
 # --- cleaning --------------------------------------------------------------
 
 def test_clean_collapses_blank_lines_and_trailing_space():

@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Documentation
+
+- Add plan for employee folders, meta preset, and webhooks
+
 ### Build
 
 - Point pre-commit changelog hook at .venv/bin/git-cliff

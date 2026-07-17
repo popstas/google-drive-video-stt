@@ -12,25 +12,52 @@ _SPEAKER_LINE_RE = re.compile(
     r"^(?P<prefix>\[[^\]]*\]\s*)?Speaker\s+(?P<num>\d+)\s*:\s*(?P<text>.*)$"
 )
 
-# A date embedded in a meeting / recording file name (2026/05/28, 2026-05-28, 28.05.2026).
-_DATE_RE = re.compile(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}")
+# A date embedded in a meeting / recording file name (2026/05/28, 2026-05-28, 28.05.2026,
+# 2026_05_28 — Google Meet writes the underscore form).
+_DATE_RE = re.compile(r"\d{4}[-/._]\d{1,2}[-/._]\d{1,2}|\d{1,2}[-/._]\d{1,2}[-/._]\d{2,4}")
 
 # Separators that split a meeting title ("Alice and Bob - Weekly sync").
 _TITLE_SEP_RE = re.compile(r"\s+[-–—|]\s+")
 
-# Conjunctions that join participant names ("Alice and Bob", "Alice, Bob", "Alice и Bob").
-_NAME_SEP_RE = re.compile(r"\s*,\s*|\s+&\s+|\s+and\s+|\s+и\s+", re.IGNORECASE)
+# Conjunctions that join participant names ("Alice and Bob", "Alice, Bob", "Alice и Bob",
+# "Ольга х ExpertizeMe").
+_NAME_SEP_RE = re.compile(
+    r"\s*,\s*|\s+&\s+|\s+and\s+|\s+и\s+|\s+х\s+|\s+x\s+", re.IGNORECASE
+)
+
+# A calendar-generated duration prefix ("30-минутная онлайн-встреча Alice ...",
+# "30-minute online meeting Alice ...").
+_DURATION_PREFIX_RE = re.compile(
+    r"^\s*\d+\s*[-–—]?\s*"
+    r"(?:минутн\w*\s+(?:онлайн-)?(?:встреча|созвон|звонок)\w*"
+    r"|minute\s+(?:online\s+)?(?:meeting|call))"
+    r"\s+",
+    re.IGNORECASE,
+)
+
+# A parenthetical qualifier attached to a name ("Alice Smith(ExpertizeMe)").
+_PARENTHETICAL_RE = re.compile(r"\([^()]*\)")
+
+# Organization names that are never a person.
+_ORG_TOKENS = {"expertizeme"}
+
+# A Google Meet room code ("zkn-jdcd-cxc") — lowercase, hyphenated, never a person.
+_MEET_CODE_RE = re.compile(r"^[a-z]{2,5}(?:-[a-z]{2,5}){2}$")
 
 
 def extract_interlocutor_names(file_name: str, limit: int = 2) -> list[str]:
     """Best-effort extraction of interlocutor names from a recording file name.
 
     Recording names commonly look like ``Alice and Bob - 2026/05/28 ...``; the
-    participant list precedes any date or topic separator. This trims the date and
-    keeps the first title segment, then splits it on common name conjunctions.
-    Returns at most ``limit`` distinct names (possibly fewer, or empty).
+    participant list precedes any date or topic separator. This drops any calendar
+    duration prefix and parenthetical qualifiers, trims the date, keeps the first
+    title segment, then splits it on common name conjunctions. Organization tokens
+    and Meet room codes are discarded. Returns at most ``limit`` distinct names
+    (possibly fewer, or empty).
     """
     stem = os.path.splitext(file_name)[0]
+    stem = _PARENTHETICAL_RE.sub(" ", stem)
+    stem = _DURATION_PREFIX_RE.sub("", stem)
 
     date_match = _DATE_RE.search(stem)
     if date_match:
@@ -40,7 +67,9 @@ def extract_interlocutor_names(file_name: str, limit: int = 2) -> list[str]:
     names: list[str] = []
     for part in _NAME_SEP_RE.split(head):
         part = part.strip()
-        if part and part not in names:
+        if not part or part.lower() in _ORG_TOKENS or _MEET_CODE_RE.match(part):
+            continue
+        if part not in names:
             names.append(part)
         if len(names) >= limit:
             break

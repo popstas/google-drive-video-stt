@@ -135,20 +135,24 @@ Two bugs surfaced during discovery that are **not** in the TODO text but are in 
 
 ### Task 1: Fix ExpertizeMe filename parsing in `extract_interlocutor_names`
 
-- [ ] write failing tests in `tests/test_postprocess.py` for every row of the "Real filenames"
+- [x] write failing tests in `tests/test_postprocess.py` for every row of the "Real filenames"
       table above (duration prefix, `(ExpertizeMe)` parenthetical, `" х "` separator,
       Meet-code stem, plus the existing `and` case as a regression guard)
-- [ ] add `_DURATION_PREFIX_RE` to `src/postprocess.py` matching a leading
+- [x] add `_DURATION_PREFIX_RE` to `src/postprocess.py` matching a leading
       `N-минутная онлайн-встреча` / `N-minute meeting` style prefix, and strip it from the stem
-- [ ] add `_PARENTHETICAL_RE` and strip `(...)` groups from each candidate part
-- [ ] extend `_NAME_SEP_RE` with the `" х "` (Cyrillic ha) and `" x "` separators
-- [ ] add `_` to `_DATE_RE`'s separator class so `2026_07_08` trims
-- [ ] add `_ORG_TOKENS = {"expertizeme"}` and drop parts that are only an org token, so
+- [x] add `_PARENTHETICAL_RE` and strip `(...)` groups from each candidate part
+      (➕ applied to the whole stem *before* the date trim rather than per part — same result
+      for every table row, and it also disposes of the unbalanced `(` the Meet-code stem
+      would otherwise leave behind after the date cut)
+- [x] extend `_NAME_SEP_RE` with the `" х "` (Cyrillic ha) and `" x "` separators
+- [x] add `_` to `_DATE_RE`'s separator class so `2026_07_08` trims
+- [x] add `_ORG_TOKENS = {"expertizeme"}` and drop parts that are only an org token, so
       `Ольга х ExpertizeMe` yields `["Ольга"]`
-- [ ] reject Meet-code-like parts (no spaces, lowercase, `xxx-xxxx-xxx` shape) so
+- [x] reject Meet-code-like parts (no spaces, lowercase, `xxx-xxxx-xxx` shape) so
       `zkn-jdcd-cxc` yields `[]`
-- [ ] run `uv run pytest tests/test_postprocess.py` — all pass
-- [ ] run `uv run pytest && uv run ruff check` — must pass before Task 2
+- [x] run `uv run pytest tests/test_postprocess.py` — all pass (30 passed)
+- [x] run `uv run pytest && uv run ruff check` — must pass before Task 2
+      (572 passed, 2 skipped; ruff clean)
 
 ### Task 2: Replace `folder_ids` with `folders` in `Config`
 
