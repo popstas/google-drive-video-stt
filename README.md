@@ -209,9 +209,9 @@ Invoke-RestMethod `
   -Body $body
 ```
 
-Copy the returned `id` into `config.yml` as `folder_ids: [<folder-id>]` (or use
-`gdstt config set folder_ids <folder-id>`). For an existing Drive folder, the
-folder id is the last path segment in the browser URL:
+Copy the returned `id` into `config.yml` as an entry under `folders:` (see
+[Configuration](#configuration)). For an existing Drive folder, the folder id is
+the last path segment in the browser URL:
 `https://drive.google.com/drive/folders/<folder-id>`.
 
 ## Configuration
@@ -223,7 +223,11 @@ There is no auto-generation: create the file with `gdstt config init` (or by han
 then edit it. Resolve a one-shot non-default file with `gdstt --config PATH ...`.
 
 ```yaml
-folder_ids: [abc, def]
+folders:                 # one entry per employee folder
+  - folder_id: abc
+    name: Олег Иванов    # optional; sent in the completion webhook
+    email: oleg@example.com   # optional
+  - folder_id: def
 poll_interval: 600
 bitrate: 96k
 data_dir: .
@@ -249,13 +253,18 @@ stt:
     audio_source: m4a_copy
     txt_formatter: word_speaker
     keyterms_enabled: true
-    keyterms_file: config/deepgram-keyterms.txt
+    keyterms_file: deepgram-keyterms-example.txt
 openai:
   api_key: "..."
   model: gpt-5.4-mini    # global default model for presets
   batch: false           # global default batch mode for presets
   batch_wait: true       # wait synchronously for batch results (default)
   max_parallel: 4        # cap on presets run concurrently
+tags:
+  allowed: [клиентская-консультация, O-1, EB-1]   # the only tags `meta` may pick
+webhook:
+  url: ""                # empty => no completion webhook is sent
+  token: ""              # optional; sent as "Authorization: Bearer <token>"
 google: {}               # inline-first auth; empty => data_dir fallback
 presets:
   transcript-cleanup:
@@ -263,6 +272,8 @@ presets:
     batch: false                                 # keep an upstream stage off batch (see below)
   keypoints:
     depends_on: [transcript-cleanup]   # overrides the built-in keypoints preset
+  meta:
+    depends_on: [transcript-cleanup]   # overrides the built-in meta preset
   action-items:
     depends_on: [transcript-cleanup]
     instructions: "Extract per-manager action items..."   # inline prompt instead of a file
@@ -276,7 +287,7 @@ variable is read at runtime:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `folder_ids` | (required) | Google Drive folder IDs to monitor |
+| `folders` | (required) | Google Drive folders to monitor, one entry per employee: `{folder_id, name, email}`. `name`/`email` are optional and default to empty; they identify the employee in the completion webhook |
 | `poll_interval` | `600` | Seconds between poll cycles |
 | `bitrate` | `96k` | MP3 audio bitrate passed to ffmpeg |
 | `stt.drive_mp3_artifact` | auto | Upload an MP3 artifact to Drive. Defaults to `false` for `stt.deepgram.audio_source=m4a_copy`; `true` otherwise |
@@ -301,7 +312,10 @@ variable is read at runtime:
 | `stt.deepgram.audio_source` | `m4a_copy` | Audio sent to Deepgram: `m4a_copy`, `mp3_96k`, or `mp3_192k` |
 | `stt.deepgram.txt_formatter` | `word_speaker` | Deepgram TXT formatter: `word_speaker` or `utterance` |
 | `stt.deepgram.keyterms_enabled` | `true` | Enables Nova-3 keyterm prompting |
-| `stt.deepgram.keyterms_file` | `config/deepgram-keyterms.txt` | Keyterms file, one term per line, max 100 |
+| `stt.deepgram.keyterms_file` | `deepgram-keyterms-example.txt` | Keyterms file, one term per line, max 100. Resolved beside `config.yml`; point it at your own list (e.g. `data/deepgram-keyterms.txt`) |
+| `tags.allowed` | (empty) | Allow-list the `meta` preset picks conversation tags from. Empty means `meta` returns no tags |
+| `webhook.url` | (empty) | Completion webhook endpoint. Empty disables it; a failure never fails the file |
+| `webhook.token` | (empty) | Optional bearer token sent as `Authorization: Bearer <token>` |
 
 ## Speech-to-text
 
@@ -341,7 +355,7 @@ stt:
     audio_source: m4a_copy  # m4a_copy, mp3_96k, or mp3_192k
     txt_formatter: word_speaker
     keyterms_enabled: true
-    keyterms_file: config/deepgram-keyterms.txt
+    keyterms_file: deepgram-keyterms-example.txt
 ```
 
 `m4a_copy` extracts a temporary AAC/M4A audio copy from the source MP4 for
@@ -358,6 +372,11 @@ Set `stt.deepgram.txt_formatter=utterance` to use the older utterance-level form
 Keyterms are read from `stt.deepgram.keyterms_file`, one term per line. Blank lines and
 lines beginning with `#` are ignored. At most 100 keyterms are allowed, and they
 are sent only when `stt.deepgram.model=nova-3`.
+
+`gdstt config init` copies a short `deepgram-keyterms-example.txt` beside the
+config as a starting point — it is only an illustration, not a curated list. Keep
+your real keyterms machine-local and out of git (the repo gitignores
+`data/deepgram-keyterms.txt`), then point `stt.deepgram.keyterms_file` at it.
 
 Sample output:
 
@@ -401,14 +420,16 @@ none, and writes its own sibling artifact `<base><artifact_suffix>` (default
 to `openai.max_parallel`, and each preset may set its own `model`/`batch`, falling
 back to the `openai` defaults.
 
-A built-in `keypoints` preset ships with the code and produces a `<base>.keypoints.md`
-document containing `## Задачи` (grouped by `### Ответственный`), `## Тезисы`, and
-`## Открытые вопросы` in plain text. A generated config enables the full chain
-`transcript-cleanup -> keypoints + action-items` out of the box (with
-`openai.batch: true`); `transcript-cleanup` is written above `keypoints`. Config
-presets override built-ins field-by-field, add new presets, and disable a built-in
-with `enabled: false`. Running any enabled preset requires `openai.api_key` and
-honors `proxy_url`.
+Two built-in presets ship with the code. `keypoints` produces a
+`<base>.keypoints.md` document containing `## Задачи` (grouped by
+`### Ответственный`), `## Тезисы`, and `## Открытые вопросы` in plain text.
+`meta` produces a `<base>.meta.md` YAML-frontmatter artifact describing the call
+(see [Conversation meta](#conversation-meta-topic-and-tags)). A generated config
+enables the full chain `transcript-cleanup -> keypoints + action-items + meta` out
+of the box (with `openai.batch: true`); `transcript-cleanup` is written above its
+dependents. Config presets override built-ins field-by-field, add new presets, and
+disable a built-in with `enabled: false`. Running any enabled preset requires
+`openai.api_key` and honors `proxy_url`.
 
 **Prompt source priority.** Each preset's instructions are resolved as
 `instructions` (inline text in the YAML) > `prompt_file` > error. A `prompt_file`
@@ -416,8 +437,15 @@ is resolved in order: the path as written, then relative to the config file's
 directory, then the packaged asset by base name. A `prompt_file` that is missing,
 unreadable, or empty is an error, and a preset that defines neither `instructions`
 nor `prompt_file` is an error. The packaged prompt assets (`keypoints.md`,
-`transcript-cleanup.md`, `action-items.md`) are copied into `<config_dir>/prompts/`
-beside the config — there is no hidden runtime prompt in Python.
+`transcript-cleanup.md`, `action-items.md`, `meta.md`) are copied into
+`<config_dir>/prompts/` beside the config — there is no hidden runtime prompt in
+Python.
+
+A prompt may contain the `{{allowed_tags}}` placeholder; it is rendered at config
+load time with the `tags.allowed` list (and with an explicit "none configured" line
+when the list is empty, so a model is never invited to invent tags). The packaged
+`meta.md` uses it; the placeholder works in inline `instructions` and in any
+`prompt_file` too.
 
 **Adding a DAG stage (no Python changes).** Add an entry under `presets:` with an
 `instructions` or `prompt_file`, a `depends_on` chain, and optionally
@@ -450,6 +478,62 @@ DAG (names, dependencies, enabled state).
 For an agent-driven path (reason about speakers, confirm the mapping, relabel
 deterministically, and write the Keypoints document by hand), see
 [`skills/gdstt-cli/SKILL.md`](skills/gdstt-cli/SKILL.md).
+
+### Conversation meta (topic and tags)
+
+The built-in `meta` preset summarizes what a call was about in one OpenAI pass and
+writes a `<base>.meta.md` artifact holding nothing but YAML frontmatter:
+
+```markdown
+---
+topic: Консультация по визе O-1 для research-профиля
+tags: [клиентская-консультация, O-1, рекомендательные-письма]
+---
+```
+
+`topic` is a single sentence. `tags` are drawn **only** from `tags.allowed` in
+`config.yml`, which is injected into the prompt through `{{allowed_tags}}`; an
+empty allow-list means an empty tags list. The model is asked to constrain itself,
+and `src/meta.py` enforces it independently: `parse_meta` intersects the reply's
+tags with the allow-list and drops anything invented. A missing or malformed
+frontmatter block degrades to an empty topic and no tags rather than failing the
+file — a bad LLM reply must never cost you a processed recording.
+
+Tune the vocabulary by editing `tags.allowed`; no code change is needed.
+
+### Completion webhook
+
+When `webhook.url` is set, the service POSTs a JSON body once per file, on the
+success path only, after every artifact has been written:
+
+```json
+{
+  "file": {"id": "1a2b", "name": "Ольга х ExpertizeMe - ....mp4", "folder_id": "1D0E"},
+  "employee": {"name": "Олег Иванов", "email": "oleg@example.com"},
+  "transcript": "Ольга: ...",
+  "artifacts": {
+    "meta": {"topic": "...", "tags": ["клиентская-консультация"]},
+    "keypoints": "## Задачи\n...",
+    "action-items": "..."
+  }
+}
+```
+
+The employee comes from the `folders` entry the file was found in; a folder with no
+`name`/`email` sends empty strings rather than omitting the key. Every enabled
+preset's output appears under `artifacts` keyed by preset name — raw text, except
+`meta`, which is parsed into `{topic, tags}`. Adding a preset to `config.yml`
+therefore extends the payload with no code change, so a consumer must tolerate new
+keys appearing.
+
+Set `webhook.token` to have the request carry `Authorization: Bearer <token>`.
+Delivery is **fire-and-forget**: an unreachable endpoint, a 4xx/5xx, or a timeout
+(10s) is logged as a warning and the file still counts as processed. There is no
+retry. Failure logs record only the exception type, so the token and transcript
+never reach the log.
+
+The payload carries PII — the employee's email and the full transcript — so point
+`webhook.url` at an HTTPS endpoint and protect it with a token.
 
 ### Output destination
 
@@ -506,9 +590,9 @@ gdstt --config PATH <command>    # one-shot override against a non-default confi
 ```
 
 `process` auto-detects whether the ID is a file or a folder; pass `--folder` to
-force folder handling. `latest` resolves the folder from `--folder` or the first of
-`folder_ids` and processes the newest (most recently created) mp4. `list`/`status`
-defaults to the configured `folder_ids` when `--folder` is omitted.
+force folder handling. `latest` resolves the folder from `--folder` or the first
+configured `folders` entry and processes the newest (most recently created) mp4.
+`list`/`status` defaults to every configured folder when `--folder` is omitted.
 `--reprocess-txt` intentionally spends STT provider credits again and overwrites
 the linked `.txt` when one exists. `speakers set` affects future local
 post-processing; combine it with `process <file-id> --reprocess-txt` when an
@@ -521,11 +605,15 @@ transcript itself:
 ```text
 $ gdstt doctor
 ...
-Presets: 3 enabled (reprocess stages)
+folders: 1 configured
+  abc123: Олег Иванов <oleg@example.com>
+stt.provider: deepgram
+Presets: 4 enabled (reprocess stages)
   0. transcript (Deepgram base)
   1. transcript-cleanup <- transcript
   2. keypoints <- transcript-cleanup
-  3. action-items <- transcript-cleanup
+  3. meta <- transcript-cleanup
+  4. action-items <- transcript-cleanup
 ```
 
 `gdstt reprocess <id> [STAGES]` force-reruns those stages even when the artifact
@@ -536,7 +624,7 @@ already exists. `STAGES` is a single number, a range (`lo-hi`), or a comma list 
 gdstt reprocess <id>           # rerun every preset (1..N) from the existing transcript
 gdstt reprocess <id> 2         # rerun only stage 2 (keypoints)
 gdstt reprocess <id> 1-2       # rerun stages 1 and 2 (transcript-cleanup + keypoints)
-gdstt reprocess <id> 2,3       # rerun stages 2 and 3 (keypoints + action-items)
+gdstt reprocess <id> 2,4       # rerun stages 2 and 4 (keypoints + action-items)
 gdstt reprocess <id> 0         # re-transcribe (stage 0) and regenerate the whole chain
 gdstt reprocess <id> 2-3 --dry-run   # preview which stages would run, spend nothing
 ```
@@ -562,7 +650,8 @@ same-speaker turns, preserves each utterance's words (whitespace is normalized),
 and reports unmapped labels on stderr. It touches no Drive and spends nothing.
 
 Use `doctor` first when setting up a new agent or machine: it reports the resolved
-config path, credentials/token presence, the folder-id count, and STT provider without
+config path, credentials/token presence, each configured folder with its employee
+name and email, and the STT provider without
 validating provider secrets. Add `--drive` only when you want it to authenticate
 and list the configured folders. Use `--dry-run` on `run-once`, `latest`, or folder
 `process` to preview pending work without downloads, uploads, or STT calls.
@@ -587,7 +676,7 @@ when `GDSTT_HOME` is unset — so it writes exactly where the runtime will look
 
 To run more than one instance, give each its own directory and point `GDSTT_HOME`
 at it (`export GDSTT_HOME=/srv/gdstt-a`); the entire instance — `config.yml`,
-`prompts/`, `config/deepgram-keyterms.txt`, and credentials/token files — lives
+`prompts/`, the keyterms file, and credentials/token files — lives
 under that one home. Keep secrets (`openai.api_key`, `stt.deepgram.api_key`, inline
 `google.token`/`credentials`) out of any synced or shared home directory.
 
@@ -605,8 +694,9 @@ The runtime treats incomplete output as failure instead of silently uploading it
   bounded backoff. Uploads are not retried automatically.
 - Downloads are checked against Drive metadata size; mismatched partial temp files
   are removed before retry or recovery.
-- `folder_ids` containing only commas or whitespace fails configuration loading
-  instead of producing a misleading no-op run.
+- A `folders` entry without a `folder_id` fails configuration loading instead of
+  producing a misleading no-op run. A config still carrying the removed
+  `folder_ids` key fails loudly with the `folders` shape to migrate to.
 
 `run-once` logs one process summary per worked file, one folder summary per folder,
 and one cycle summary. The cycle summary includes pending, processed, failed,
@@ -658,7 +748,7 @@ docker compose up -d --build
 
 The image bakes `GDSTT_HOME=/app/data` and mounts `./data` there, so the config
 resolver keeps **all mutable state inside the volume**: `config.yml`,
-`prompts/`, `config/deepgram-keyterms.txt`, and credentials/token files are
+`prompts/`, the keyterms file, and credentials/token files are
 written under `./data` and survive restarts. The Compose file also sets
 `GDSTT_HOME=/app/data` explicitly for clarity, and a bare `docker run` is correct by
 default thanks to the image `ENV`. Logs are JSON-file with a 10 MB / 3-file
@@ -727,10 +817,12 @@ src/
   drive.py       List / download / upload helpers
   extractor.py   ffmpeg MP4 → MP3/M4A wrappers
   notify.py      Telegram error notifier
+  webhook.py     Fire-and-forget completion webhook
   main.py        Polling loop + on-demand process_target entry points
   cli.py         gdstt operator CLI (argparse subcommands)
   output.py      Output destination layer (Drive sibling or local folder)
   postprocess.py Local transcript cleanup + speaker-name mapping
+  meta.py        Parse the meta preset's frontmatter (topic + allow-listed tags)
   openai_pipeline.py OpenAI Responses keypoints generation (sync + batch)
   relabel_transcript.py Deterministic speaker relabeling from a MAP.json
   stt/

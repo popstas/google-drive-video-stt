@@ -416,15 +416,37 @@ outside `src/` was repointed — the mocked pytest suite could not see either bu
 
 ### Task 10: [Final] Update documentation
 
-- [ ] update `README.md:212-213,226,279,510-511,608` (`folder_ids` → `folders`, keyterms paths)
+- [x] update `README.md:212-213,226,279,510-511,608` (`folder_ids` → `folders`, keyterms paths)
       and document the `webhook` config block plus its payload shape
-- [ ] update `AGENTS.md:61,123` (keyterms path, `folders`), the core invariants list, and the
+      (➕ also two new sections — "Conversation meta (topic and tags)" and "Completion
+      webhook" — plus the `{{allowed_tags}}` placeholder under prompt-source priority,
+      `meta`/`webhook.py` in Project layout, and the `doctor`/`reprocess` stage examples
+      repointed: the real chain is now 4 stages with `meta` at 3 and `action-items` at 4,
+      verified by running `gdstt doctor` against a generated config rather than assumed)
+- [x] update `AGENTS.md:61,123` (keyterms path, `folders`), the core invariants list, and the
       preset list now that `meta` is a second built-in
-- [ ] update `skills/gdstt-cli/SKILL.md:101,129,185,193` and bump its `version` /
+      (➕ added a Completion-webhook paragraph to Architecture and recorded *why* built-ins
+      carry `depends_on=()` — the Task 5 deviation was only in this plan, not the repo docs)
+- [x] update `skills/gdstt-cli/SKILL.md:101,129,185,193` and bump its `version` /
       `last_updated` fields, per the AGENTS.md skill-layering policy
-- [ ] update `tests/test_skill_docs.py` for the changed operator surface
-- [ ] check off the five implemented items in `docs/TODO.md`, leaving the English-transcript
+      (2.5.2 → 2.6.0, `last_updated: 2026-07-17`)
+- [x] update `tests/test_skill_docs.py` for the changed operator surface
+      (➕ 4 new guards: the `folders` migration, the `meta` preset + webhook in the skill,
+      the same in README/AGENTS, and the single keyterms example. The `folder_ids` guard is
+      **paragraph**-scoped, not line-scoped — a line-based check broke on prose wrapping and
+      would have kept breaking on every re-flow)
+- [x] check off the five implemented items in `docs/TODO.md`, leaving the English-transcript
       comparison item open
+      (➕ the keyterms line was a bare `-`, not a checkbox — made it `[x]` since Task 8
+      shipped it; the English-transcript item is the only one left open, as planned)
+
+⚠️ **The skill's 400-line cap forced real trimming, not a cap bump.** `SKILL.md` was already
+at 399 lines, so the new `meta`/webhook/`folders` surface pushed it to 419 and
+`test_skill_is_a_single_compact_file` went red. Raising the cap would have defeated the
+guard's purpose (the layering policy's "single compact file"), so the additions were
+condensed and three genuine redundancies removed instead: the resolver `text` block that
+restated the paragraph directly above it, a duplicated placeholder row in the vault table,
+and the split bash/powershell run blocks. Final: 397 lines, back under the cap.
 
 *Note: ralphex automatically moves completed plans to `docs/plans/completed/`*
 

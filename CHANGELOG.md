@@ -5,6 +5,7 @@
 
 ### Features
 
+- Verify acceptance criteria and fix docker smoke fallout
 - Collapse the three deepgram-keyterms.txt copies into one example
 - Add the completion webhook
 - Return preset outputs from _run_preset_stage to process_item

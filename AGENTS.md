@@ -58,7 +58,7 @@ The deployment is config-owned and persists everything in the mounted volume:
 
 - The image bakes `ENV GDSTT_HOME=/app/data` and Compose mounts `./data:/app/data`,
   so the config resolver writes `config.yml`, prompt copies,
-  `config/deepgram-keyterms.txt`, and any file-mode `credentials.json`/`token.json`
+  `deepgram-keyterms-example.txt`, and any file-mode `credentials.json`/`token.json`
   under the volume. Without `GDSTT_HOME` the resolver defaults the home to `./data`
   (relative to the working directory) — keep `GDSTT_HOME=/app/data` set so the
   instance directory is the volume. `init_config()`'s default (no `--config`) target
@@ -120,7 +120,7 @@ it auto-detects file vs folder by `mimeType` (override with `is_folder`), then r
 without duplicating business logic.
 
 **`latest` command** (`src/cli.py` + `drive.find_newest_mp4`): resolves a folder
-(arg or first configured `folder_ids` entry), finds the newest mp4 by `createdTime desc`, and
+(arg or first configured `folders` entry), finds the newest mp4 by `createdTime desc`, and
 dispatches it through `process_target` (honoring `--dry-run`).
 
 **Post-processing** runs in `process_item` after `transcribe_file` and before the
@@ -135,11 +135,15 @@ Batch API per preset) whose input is its dependency outputs concatenated with a
 labeled separator, or the raw transcript when it has no dependencies. Independent
 presets run in parallel (a `ThreadPoolExecutor` capped at `openai.max_parallel`),
 and each non-empty output is written as `<base><artifact_suffix>` tagged
-`artifact_type=<preset-name>`. Built-in presets ship in `BUILTIN_PRESETS` (at least
-`keypoints`, producing `## Задачи` / `## Тезисы` / `## Открытые вопросы`, plain
-text); `config.yml` presets override built-ins field-by-field, add new presets, and
-disable a built-in with `enabled: false`. `validate_dag()` rejects unknown/disabled
-dependencies and cycles. If a preset fails, its dependents are skipped while
+`artifact_type=<preset-name>`. Built-in presets ship in `BUILTIN_PRESETS`:
+`keypoints` (producing `## Задачи` / `## Тезисы` / `## Открытые вопросы`, plain
+text) and `meta` (a `.meta.md` YAML-frontmatter artifact with a one-sentence
+`topic:` and `tags:` drawn from `tags.allowed`, parsed back by `src/meta.py`).
+Built-ins carry `depends_on=()` — a hardcoded dependency on a *config* preset like
+`transcript-cleanup` would make `validate_dag` reject every config that omits it;
+the default chain is wired in `_default_config_dict` instead. `config.yml` presets
+override built-ins field-by-field, add new presets, and disable a built-in with
+`enabled: false`. `validate_dag()` rejects unknown/disabled dependencies and cycles. If a preset fails, its dependents are skipped while
 independent branches still persist, then an aggregated error makes the file retry
 and re-run only the still-missing presets on a later cycle.
 
@@ -151,6 +155,16 @@ local `output.dir` (`output.target=folder`).
 For deterministic, agent-driven speaker correction, `src/relabel_transcript.py`
 (and the `gdstt relabel` command) rewrite `Speaker N` labels from a `MAP.json`
 while preserving each utterance's words (whitespace is normalized).
+
+**Completion webhook** (`src/webhook.py`): when `webhook.url` is set, `process_item`
+POSTs `{file, employee, transcript, artifacts}` once per file on the success path
+only, after every artifact is written. The employee comes from
+`config.folder_by_id(folder_id)`; `artifacts` carries each preset's raw text keyed
+by name, except `meta`, which `meta.parse_meta` turns into `{topic, tags}`.
+`notify_complete` mirrors `notify.notify_error`'s contract and never raises: a
+blank url is a `logger.debug` no-op, and any failure logs only the exception *type*
+so the token cannot leak. The whole block is additionally wrapped in `try/except` —
+a payload-build bug must not undo an already-uploaded file.
 
 **Error handling is tiered**: `RefreshError`/`AuthError` propagate up to `main()` and
 cause `SystemExit(1)` so the container restarts (after re-running `src.auth`); all other
@@ -207,6 +221,22 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
 - Enabled presets run after the transcript is produced and require `openai.api_key`;
   each writes a `<base><artifact_suffix>` document tagged `artifact_type=<name>`.
   Having no enabled presets replaces the old `openai.keypoints=false` gate.
+- Drive folders are configured as `folders: [{folder_id, name, email}]` — one entry
+  per employee, `name`/`email` optional. The old `folder_ids: [str]` is **removed**:
+  a config still carrying that key raises a setup `ValueError` quoting the `folders`
+  shape (the presence of the key is the trigger, so an empty `folder_ids: []` fails
+  too). `Config.folder_ids` survives as a read-only property for iteration sites,
+  and `Config.folder_by_id()` resolves an entry back to its `EmployeeFolder`.
+- `tags.allowed` is the only vocabulary the `meta` preset may tag with. It reaches
+  prompts through the `{{allowed_tags}}` placeholder rendered at load time by
+  `_resolve_prompt_text` (inline, file, and packaged prompts alike), and is enforced
+  again in `meta.parse_meta`, which drops tags outside the list. `parse_meta`
+  degrades to `Meta(topic="", tags=())` on a missing/malformed block — a bad LLM
+  reply must not fail the file.
+- The completion webhook (`webhook.url`, optional `webhook.token`) is
+  fire-and-forget: it fires once per file on the success path only, and any failure
+  is logged without failing the file. Its payload carries PII (employee email, full
+  transcript), so failure logs must never include the body or the token.
 - `output.target` selects where artifacts land: `drive` (siblings) or `folder`
   (`output.dir`, required when `folder`).
 - Idempotency relies on `appProperties.source_video_id`, the per-artifact
@@ -239,9 +269,9 @@ Today that means:
 
 - Deepgram is the default and only transcription path; `stt.provider=""` keeps
   MP3-only mode.
-- The OpenAI preset DAG (the `presets` map, with `keypoints` shipped as a built-in)
-  is documented as an optional layer on top of the transcript, independent of the
-  STT path.
+- The OpenAI preset DAG (the `presets` map, with `keypoints` and `meta` shipped as
+  built-ins) is documented as an optional layer on top of the transcript,
+  independent of the STT path.
 
 ## Conventions
 
