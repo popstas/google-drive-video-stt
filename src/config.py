@@ -106,6 +106,11 @@ class Config:
     # The tag allow-list the ``meta`` preset may pick from. Empty means the preset
     # has nothing to choose between and returns no tags.
     tags_allowed: tuple[str, ...] = ()
+    # Completion-webhook target. A blank URL disables the webhook; the token, when
+    # set, is sent as ``Authorization: Bearer <token>``. See ``webhook`` in the
+    # generated config.yml.
+    webhook_url: str = ""
+    webhook_token: str = ""
     presets: tuple[Preset, ...] = ()
     # Google OAuth is config-owned and inline-first. ``google_credentials``/
     # ``google_token`` hold inline mappings (the OAuth client JSON and the saved
@@ -517,6 +522,7 @@ def _config_from_yaml(
     notifications = _as_mapping(raw.get("notifications"), "notifications")
     telegram = _as_mapping(notifications.get("telegram"), "notifications.telegram")
     tags = _as_mapping(raw.get("tags"), "tags")
+    webhook = _as_mapping(raw.get("webhook"), "webhook")
     config_presets = _as_mapping(raw.get("presets"), "presets")
 
     run_enabled = _yaml_bool(run.get("enabled"), default=True)
@@ -525,6 +531,9 @@ def _config_from_yaml(
     telegram_chat_id = _yaml_str(telegram.get("chat_id"))
 
     tags_allowed = _parse_tags_allowed(tags.get("allowed"))
+
+    webhook_url = _yaml_str(webhook.get("url"))
+    webhook_token = _yaml_str(webhook.get("token"))
 
     (
         google_credentials,
@@ -678,6 +687,8 @@ def _config_from_yaml(
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
         tags_allowed=tags_allowed,
+        webhook_url=webhook_url,
+        webhook_token=webhook_token,
         presets=presets,
         google_credentials=google_credentials,
         google_token=google_token,
@@ -854,6 +865,8 @@ def _default_config_dict(
         },
         # Seeded empty: the `meta` preset picks tags only from this list.
         "tags": {"allowed": []},
+        # Seeded empty: a blank url disables the completion webhook.
+        "webhook": {"url": "", "token": ""},
         # Google auth is inline-first and config-owned. The generated config ships an
         # empty block (no *_file pointers) so the data_dir fallback applies until the
         # operator runs `gdstt auth import-credentials` / `auth use-files`.
@@ -995,6 +1008,7 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
         # The tag allow-list is operator-owned data with no other home: omitting it
         # here would drop it from the file on any whole-Config rewrite.
         "tags": {"allowed": list(config.tags_allowed)},
+        "webhook": {"url": config.webhook_url, "token": config.webhook_token},
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
         # the prompt text stays owned by the .md assets; disabled built-ins (e.g.

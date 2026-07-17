@@ -13,7 +13,7 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 import requests
 
-from src import drive, notify, output, postprocess, preset_pipeline
+from src import drive, meta as meta_module, notify, output, postprocess, preset_pipeline, webhook
 from src.auth import AuthError, build_drive_service
 from src.config import Config, is_run_enabled, load_config
 from src.extractor import extract_m4a_copy, extract_mp3
@@ -405,6 +405,39 @@ def _retry_count_from_exception(exc: Exception) -> int:
     return retry_count if isinstance(retry_count, int) else 0
 
 
+def _webhook_payload(
+    file_id: str,
+    file_name: str,
+    folder_id: str,
+    config: Config,
+    transcript: str,
+    artifacts: dict[str, str],
+) -> dict:
+    """Build the completion-webhook body.
+
+    Non-``meta`` presets pass through as raw text keyed by preset name, so adding a
+    preset to config.yml extends the payload with no code change. ``meta`` is parsed
+    into ``{topic, tags}`` (tags filtered to the configured allow-list). An unknown
+    employee sends empty strings rather than omitting the key.
+    """
+    employee = config.folder_by_id(folder_id)
+    payload_artifacts: dict[str, object] = dict(artifacts)
+    meta_text = artifacts.get("meta")
+    if meta_text is not None:
+        parsed = meta_module.parse_meta(meta_text, config.tags_allowed)
+        payload_artifacts["meta"] = {"topic": parsed.topic, "tags": list(parsed.tags)}
+
+    return {
+        "file": {"id": file_id, "name": file_name, "folder_id": folder_id},
+        "employee": {
+            "name": employee.name if employee else "",
+            "email": employee.email if employee else "",
+        },
+        "transcript": transcript,
+        "artifacts": payload_artifacts,
+    }
+
+
 def process_item(
     service: Any,
     item: dict,
@@ -587,6 +620,21 @@ def process_item(
             cost_usd,
             usage,
         )
+
+    # Success path only, after every artifact is written. Fire-and-forget: the whole
+    # block is guarded because a file that transcribed and uploaded must count as
+    # processed even if the payload or the receiver misbehaves.
+    try:
+        webhook.notify_complete(
+            url=config.webhook_url,
+            token=config.webhook_token,
+            proxy_url=config.proxy_url,
+            payload=_webhook_payload(
+                file_id, file_name, folder_id, config, transcript, artifacts
+            ),
+        )
+    except Exception as exc:
+        logger.warning("Completion webhook failed: %s", type(exc).__name__)
 
     return _ProcessTelemetry(
         provider=provider,

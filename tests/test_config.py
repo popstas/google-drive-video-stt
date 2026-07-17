@@ -9,6 +9,7 @@ from src.config import (
     CONFIG_FILE_NAME,
     EmployeeFolder,
     _config_to_yaml_dict,
+    _default_config_dict,
     config_get,
     config_set,
     config_unset,
@@ -330,6 +331,60 @@ def test_config_to_yaml_dict_round_trips_tags_allowed(tmp_path):
     _write_yaml(config_file, data)
     reloaded = load_config(config_path=config_file, validate_providers=False)
     assert reloaded.tags_allowed == ("клиентская-консультация", "EB-1")
+
+
+# --- webhook -----------------------------------------------------------------
+
+
+def test_webhook_parses_url_and_token(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "webhook": {"url": "https://example.com/hooks/gdstt", "token": "secret"},
+        },
+    )
+    assert cfg.webhook_url == "https://example.com/hooks/gdstt"
+    assert cfg.webhook_token == "secret"
+
+
+def test_missing_webhook_block_yields_blank_fields(tmp_path):
+    cfg = _load_config(tmp_path, {"stt": {"provider": "disabled"}})
+    assert cfg.webhook_url == ""
+    assert cfg.webhook_token == ""
+
+
+def test_webhook_non_mapping_rejected(tmp_path):
+    with pytest.raises(ValueError, match="webhook"):
+        _load_config(
+            tmp_path, {"stt": {"provider": "disabled"}, "webhook": ["https://x"]}
+        )
+
+
+def test_webhook_round_trips(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "webhook": {"url": "https://example.com/hooks/gdstt", "token": "secret"},
+        },
+    )
+
+    data = _config_to_yaml_dict(cfg)
+    assert data["webhook"] == {
+        "url": "https://example.com/hooks/gdstt",
+        "token": "secret",
+    }
+
+    config_file = tmp_path / "roundtrip-webhook.yml"
+    _write_yaml(config_file, data)
+    reloaded = load_config(config_path=config_file, validate_providers=False)
+    assert reloaded.webhook_url == "https://example.com/hooks/gdstt"
+    assert reloaded.webhook_token == "secret"
+
+
+def test_default_config_dict_seeds_empty_webhook_block():
+    assert _default_config_dict()["webhook"] == {"url": "", "token": ""}
 
 
 # --- {{allowed_tags}} prompt rendering ---------------------------------------
@@ -1634,6 +1689,25 @@ def test_config_get_single_secret_is_masked_by_default(tmp_path):
 
     # A single-key get of a secret leaf must not leak the value to stdout/logs.
     assert config_get("openai.api_key", config_path=config_file) == "***"
+
+
+def test_config_get_masks_webhook_token(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set("webhook.token", "hook-SECRET", config_path=config_file)
+
+    # The webhook token authenticates against the receiver and must be masked in
+    # both the whole-config dump and a single-key lookup.
+    whole = config_get(config_path=config_file)
+    assert "hook-SECRET" not in whole
+    assert "***" in whole
+    assert config_get("webhook.token", config_path=config_file) == "***"
+
+    # The URL is not a secret and stays visible.
+    config_set("webhook.url", "https://example.com/hooks/gdstt", config_path=config_file)
+    assert (
+        config_get("webhook.url", config_path=config_file)
+        == "https://example.com/hooks/gdstt"
+    )
 
 
 def test_config_get_masks_telegram_bot_token(tmp_path):

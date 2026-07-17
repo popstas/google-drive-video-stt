@@ -40,6 +40,9 @@ def make_config(
     output_dir=None,
     openai_keypoints=False,
     presets=None,
+    tags_allowed=(),
+    webhook_url="",
+    webhook_token="",
 ) -> Config:
     if presets is None:
         # Mirror the legacy keypoints gate: the built-in keypoints pass is the only
@@ -63,6 +66,9 @@ def make_config(
         openai_keypoints=openai_keypoints,
         deepgram_audio_source=deepgram_audio_source,
         drive_mp3_artifact=drive_mp3_artifact,
+        tags_allowed=tuple(tags_allowed),
+        webhook_url=webhook_url,
+        webhook_token=webhook_token,
         presets=tuple(presets),
     )
 
@@ -2321,6 +2327,169 @@ def test_process_item_telemetry_carries_artifacts_on_preset_refeed(mocker, tmp_p
         "transcript-cleanup": "Alice: hi",
         "expertizeme-managers": "notes",
     }
+
+
+# --- completion webhook ------------------------------------------------------
+
+
+_META_ARTIFACT = (
+    "---\n"
+    "topic: Консультация по визе O-1\n"
+    "tags: [O-1, клиентская-консультация, invented-tag]\n"
+    "---\n"
+)
+
+
+def _webhook_config(**overrides):
+    """A two-preset config whose DAG also produces a `meta` artifact."""
+    presets = (
+        Preset(name="transcript-cleanup", instructions="clean it"),
+        Preset(
+            name="keypoints",
+            instructions="summarize",
+            artifact_suffix=".keypoints.md",
+            depends_on=("transcript-cleanup",),
+        ),
+        Preset(
+            name="meta",
+            instructions="topic and tags",
+            artifact_suffix=".meta.md",
+            depends_on=("transcript-cleanup",),
+        ),
+    )
+    base = dict(
+        stt_provider="deepgram",
+        deepgram_api_key="dg-x",
+        deepgram_audio_source="mp3_96k",
+        openai_api_key="sk-x",
+        openai_keypoints=True,
+        drive_mp3_artifact=False,
+        presets=presets,
+        folders=[
+            EmployeeFolder("folderX", name="Олег Иванов", email="oleg@expertizeme.org")
+        ],
+        tags_allowed=("O-1", "клиентская-консультация"),
+        webhook_url="https://example.com/hooks/gdstt",
+        webhook_token="secret",
+    )
+    base.update(overrides)
+    return make_config(**base)
+
+
+def _mock_successful_run(mocker, tmp_path, *, meta_text=_META_ARTIFACT):
+    mocker.patch("src.main.drive.download", return_value=tmp_path / "video.mp4")
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "transcript-cleanup": PresetResult(
+                name="transcript-cleanup", text="Ольга: привет"
+            ),
+            "keypoints": PresetResult(name="keypoints", text="## Задачи"),
+            "meta": PresetResult(name="meta", text=meta_text),
+        },
+    )
+    return mocker.patch("src.main.webhook.notify_complete")
+
+
+def test_webhook_fired_once_with_employee_and_artifacts(mocker, tmp_path):
+    notify = _mock_successful_run(mocker, tmp_path)
+
+    main.process_item(
+        MagicMock(), _item("fid", "video.mp4"), "folderX", _webhook_config()
+    )
+
+    notify.assert_called_once()
+    kwargs = notify.call_args.kwargs
+    assert kwargs["url"] == "https://example.com/hooks/gdstt"
+    assert kwargs["token"] == "secret"
+    assert kwargs["payload"] == {
+        "file": {"id": "fid", "name": "video.mp4", "folder_id": "folderX"},
+        "employee": {"name": "Олег Иванов", "email": "oleg@expertizeme.org"},
+        "transcript": "Speaker 1: hi",
+        "artifacts": {
+            "transcript-cleanup": "Ольга: привет",
+            "keypoints": "## Задачи",
+            # `meta` is parsed into structured fields; `invented-tag` is outside the
+            # configured allow-list and must not reach the receiver.
+            "meta": {
+                "topic": "Консультация по визе O-1",
+                "tags": ["O-1", "клиентская-консультация"],
+            },
+        },
+    }
+
+
+def test_webhook_unknown_employee_sends_empty_strings(mocker, tmp_path):
+    notify = _mock_successful_run(mocker, tmp_path)
+
+    # The file's folder isn't in `folders` at all — the payload keeps the key.
+    main.process_item(
+        MagicMock(), _item("fid", "video.mp4"), "otherFolder", _webhook_config()
+    )
+
+    payload = notify.call_args.kwargs["payload"]
+    assert payload["employee"] == {"name": "", "email": ""}
+    assert payload["file"]["folder_id"] == "otherFolder"
+
+
+def test_webhook_malformed_meta_degrades_to_empty_fields(mocker, tmp_path):
+    notify = _mock_successful_run(mocker, tmp_path, meta_text="not frontmatter at all")
+
+    main.process_item(
+        MagicMock(), _item("fid", "video.mp4"), "folderX", _webhook_config()
+    )
+
+    artifacts = notify.call_args.kwargs["payload"]["artifacts"]
+    assert artifacts["meta"] == {"topic": "", "tags": []}
+
+
+def test_webhook_not_fired_when_file_skipped(mocker, tmp_path):
+    notify = mocker.patch("src.main.webhook.notify_complete")
+
+    # Nothing to do: mp3 and txt exist and no preset is configured.
+    cfg = make_config(
+        stt_provider="deepgram",
+        deepgram_api_key="dg-x",
+        webhook_url="https://example.com/hooks/gdstt",
+    )
+    telemetry = main.process_item(
+        MagicMock(),
+        _item("fid", "video.mp4", has_mp3=True, has_txt=True),
+        "folderA",
+        cfg,
+    )
+
+    assert telemetry is None
+    notify.assert_not_called()
+
+
+def test_webhook_not_fired_on_failure(mocker, tmp_path):
+    notify = _mock_successful_run(mocker, tmp_path)
+    mocker.patch("src.main.transcribe_file", side_effect=STTError("deepgram down"))
+
+    with pytest.raises(STTError):
+        main.process_item(
+            MagicMock(), _item("fid", "video.mp4"), "folderX", _webhook_config()
+        )
+
+    notify.assert_not_called()
+
+
+def test_webhook_exception_does_not_fail_the_file(mocker, tmp_path):
+    notify = _mock_successful_run(mocker, tmp_path)
+    notify.side_effect = RuntimeError("receiver exploded")
+
+    # notify_complete swallows its own errors, but a bug there must not undo a file
+    # that already transcribed and uploaded every artifact.
+    telemetry = main.process_item(
+        MagicMock(), _item("fid", "video.mp4"), "folderX", _webhook_config()
+    )
+
+    assert telemetry is not None
+    assert telemetry.txt_uploaded is True
 
 
 def test_process_summary_log_omits_artifact_text(mocker, tmp_path, caplog):

@@ -299,24 +299,41 @@ preset is enabled" gate); `tests/test_main.py`'s `make_config` now defaults to t
 
 ### Task 7: Add the completion webhook
 
-- [ ] write failing tests in `tests/test_webhook.py` (monkeypatching `webhook.requests.post`
+- [x] write failing tests in `tests/test_webhook.py` (monkeypatching `webhook.requests.post`
       like `tests/test_notify.py:8` does): blank URL → no POST; payload shape; token →
       `Authorization: Bearer` header; `requests` raising → logged, **never** re-raised;
       `raise_for_status` 4xx → logged, never re-raised
-- [ ] add `src/webhook.py` with `notify_complete(*, url, token, proxy_url, payload)` mirroring
+      (➕ also: proxy dict passed through, no auth header when the token is blank, and a
+      failure log asserted to omit **both** the token and the transcript)
+- [x] add `src/webhook.py` with `notify_complete(*, url, token, proxy_url, payload)` mirroring
       `notify.notify_error`'s contract: `REQUEST_TIMEOUT = 10`, blank-URL no-op via
       `logger.debug`, proxy dict, `try` + `raise_for_status`, failure → `logger.warning("...:
       %s", type(exc).__name__)` logging only the exception type
-- [ ] add `webhook: {url: "", token: ""}` to `Config` (`webhook_url`, `webhook_token`),
+- [x] add `webhook: {url: "", token: ""}` to `Config` (`webhook_url`, `webhook_token`),
       `_config_to_yaml_dict`, and `_default_config_dict`; write config tests for the round-trip
-- [ ] build the payload in `process_item` on the **success path only** (`src/main.py:575-584`):
+      (➕ `webhook.token` needed no new entry in `MASKED_KEY_PATHS`: `MASKED_LEAF_KEYS`
+      already masks a `token` leaf anywhere, so `config get` hides it — locked in by
+      `test_config_get_masks_webhook_token` rather than left to assumption)
+- [x] build the payload in `process_item` on the **success path only** (`src/main.py:575-584`):
       `{file: {id, name, folder_id}, employee: {name, email}, transcript, artifacts: {...}}`,
       resolving the employee via `config.folder_by_id(folder_id)` from Task 2 and parsing
       `artifacts["meta"]` through `meta.parse_meta` into `{topic, tags}`
-- [ ] write tests in `tests/test_main.py`: webhook fired once with the right employee; not
+      (➕ via a `_webhook_payload` helper; the whole webhook block is wrapped in a
+      `try/except` — `notify_complete` already swallows its own errors, but a payload-build
+      bug (`parse_meta`, `folder_by_id`) must not undo an already-uploaded file either)
+- [x] write tests in `tests/test_main.py`: webhook fired once with the right employee; not
       fired when the file was skipped (the early `return` at `:428-429`); not fired on failure;
       a webhook exception does not fail the file
-- [ ] run `uv run pytest && uv run ruff check` — must pass before Task 8
+      (➕ also: an unknown employee sending empty strings, and a malformed `meta` artifact
+      degrading to `{topic: "", tags: []}`)
+- [x] run `uv run pytest && uv run ruff check` — must pass before Task 8
+      (641 passed, 2 skipped; ruff clean)
+
+➕ **Verified against a real receiver (Task 7)**: beyond the mocked tests, `notify_complete`
+was driven against a throwaway local `http.server` — the POST arrives with
+`Authorization: Bearer <token>`, `Content-Type: application/json`, and Cyrillic payload
+fields intact; an unreachable receiver logs `ConnectionError` (type only) and returns
+normally. The `webhook.url` in the plan's Post-Completion still needs a real endpoint.
 
 ### Task 8: Collapse the three `deepgram-keyterms.txt` copies
 
