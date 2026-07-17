@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add the completion webhook
 - Return preset outputs from _run_preset_stage to process_item
 - Add the meta preset (topic + tags) with allow-list injection
 - Read tags.allowed into Config and stop dropping it

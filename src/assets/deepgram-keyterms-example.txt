@@ -1,0 +1,8 @@
+# Example Deepgram Nova-3 keyterm list: one term per line, max 100.
+# Blank lines and lines starting with # are ignored.
+#
+# This is only a sample. Keep the live list machine-local and out of git:
+# put it in data/deepgram-keyterms.txt and point stt.deepgram.keyterms_file at it.
+Kubernetes
+Ruby on Rails
+TypeScript

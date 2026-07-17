@@ -16,6 +16,7 @@ from src.config import (
     copy_prompt_assets,
     import_google_credentials,
     init_config,
+    load_packaged_keyterms,
     is_run_enabled,
     load_config,
     set_run_enabled,
@@ -1412,7 +1413,7 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     assert path == config_file
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     assert data["data_dir"] == "."
-    assert data["stt"]["deepgram"]["keyterms_file"] == "config/deepgram-keyterms.txt"
+    assert data["stt"]["deepgram"]["keyterms_file"] == "deepgram-keyterms-example.txt"
     assert data["presets"]["keypoints"]["enabled"] is True
     assert data["presets"]["keypoints"]["prompt_file"] == "prompts/keypoints.md"
     # The full default chain is enabled out of the box, with transcript-cleanup
@@ -1443,7 +1444,7 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     assert (tmp_path / "prompts" / "transcript-cleanup.md").is_file()
     assert (tmp_path / "prompts" / "action-items.md").is_file()
     assert (tmp_path / "prompts" / "meta.md").is_file()
-    assert (tmp_path / "config" / "deepgram-keyterms.txt").is_file()
+    assert (tmp_path / "deepgram-keyterms-example.txt").is_file()
     # The generated config loads back without provider secrets and yields the chain.
     cfg = load_config(config_path=config_file, validate_providers=False)
     assert cfg.data_dir == tmp_path
@@ -1465,8 +1466,18 @@ def test_init_config_validates_with_copied_keyterms(tmp_path):
 
     cfg = load_config(config_path=config_file)
 
-    assert cfg.deepgram_keyterms_file == tmp_path / "config" / "deepgram-keyterms.txt"
+    assert cfg.deepgram_keyterms_file == tmp_path / "deepgram-keyterms-example.txt"
     assert "Kubernetes" in cfg.deepgram_keyterms
+
+
+def test_packaged_keyterms_example_loads_and_points_at_the_live_list(tmp_path):
+    text = load_packaged_keyterms()
+
+    # A short illustrative list, not a curated one: the operator's real terms belong
+    # in the gitignored data/deepgram-keyterms.txt, and the example says so.
+    assert "data/deepgram-keyterms.txt" in text
+    terms = [line for line in text.splitlines() if line.strip() and not line.startswith("#")]
+    assert 0 < len(terms) <= 10
 
 
 def test_init_default_writes_to_gdstt_home(monkeypatch, tmp_path):
@@ -1478,7 +1489,7 @@ def test_init_default_writes_to_gdstt_home(monkeypatch, tmp_path):
     assert path == home / CONFIG_FILE_NAME
     assert path.is_file()
     assert (home / "prompts" / "keypoints.md").is_file()
-    assert (home / "config" / "deepgram-keyterms.txt").is_file()
+    assert (home / "deepgram-keyterms-example.txt").is_file()
 
 
 def test_init_default_falls_back_to_cwd_data(monkeypatch, tmp_path):

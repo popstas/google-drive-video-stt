@@ -337,19 +337,29 @@ normally. The `webhook.url` in the plan's Post-Completion still needs a real end
 
 ### Task 8: Collapse the three `deepgram-keyterms.txt` copies
 
-- [ ] write a failing test in `tests/test_config.py` that `gdstt config init` writes
+- [x] write a failing test in `tests/test_config.py` that `gdstt config init` writes
       `<config_dir>/deepgram-keyterms-example.txt` and that the packaged example loads
-- [ ] delete `config/deepgram-keyterms.txt` (byte-identical duplicate of the packaged asset)
-- [ ] replace `src/assets/deepgram-keyterms.txt` with a short
+      (`test_packaged_keyterms_example_loads_and_points_at_the_live_list` asserts the example
+      names `data/deepgram-keyterms.txt` and stays short — ≤10 terms — so it can't drift back
+      into a curated list)
+- [x] delete `config/deepgram-keyterms.txt` (byte-identical duplicate of the packaged asset)
+      (➕ the `config/` directory held nothing else and is gone entirely)
+- [x] replace `src/assets/deepgram-keyterms.txt` with a short
       `src/assets/deepgram-keyterms-example.txt` — a handful of illustrative terms and a
       comment saying the live list belongs in `data/deepgram-keyterms.txt`
-- [ ] point `DEEPGRAM_DEFAULT_KEYTERMS_FILE` (`src/config.py:40`) and
+- [x] point `DEEPGRAM_DEFAULT_KEYTERMS_FILE` (`src/config.py:40`) and
       `DEEPGRAM_KEYTERMS_ASSET` (`:41`) at the example name, dropping the `config/` path segment
-- [ ] update `copy_deepgram_keyterms_asset` (`:778-785`) to write the example beside `config.yml`
-- [ ] update the assertions at `tests/test_config.py:1115,1135,1156,1169`
-- [ ] confirm `data/config.yml:22` (`keyterms_file: ./deepgram-keyterms.txt`) still resolves
+- [x] update `copy_deepgram_keyterms_asset` (`:778-785`) to write the example beside `config.yml`
+      (no logic change — it already joins `DEEPGRAM_DEFAULT_KEYTERMS_FILE` onto the config dir,
+      so dropping the path segment moved the destination on its own)
+- [x] update the assertions at `tests/test_config.py:1115,1135,1156,1169`
+      (➕ `pyproject.toml:38`'s wheel `artifacts` list named the old asset by hand and would
+      have shipped a wheel without the keyterms file — repointed at the example)
+- [x] confirm `data/config.yml:22` (`keyterms_file: ./deepgram-keyterms.txt`) still resolves
       the live file and leave it untouched
-- [ ] run `uv run pytest && uv run ruff check` — must pass before Task 9
+      (verified via `load_config`: resolves to `data/deepgram-keyterms.txt`, which exists)
+- [x] run `uv run pytest && uv run ruff check` — must pass before Task 9
+      (642 passed, 2 skipped; ruff clean)
 
 ### Task 9: Verify acceptance criteria
 

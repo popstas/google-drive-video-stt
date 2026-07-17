@@ -37,8 +37,8 @@ OUTPUT_TARGETS = ("drive", "folder")
 DEEPGRAM_DIARIZE_MODELS = ("latest", "v1")
 DEEPGRAM_AUDIO_SOURCES = ("m4a_copy", "mp3_96k", "mp3_192k")
 DEEPGRAM_TXT_FORMATTERS = ("word_speaker", "utterance")
-DEEPGRAM_DEFAULT_KEYTERMS_FILE = Path("config/deepgram-keyterms.txt")
-DEEPGRAM_KEYTERMS_ASSET = "deepgram-keyterms.txt"
+DEEPGRAM_DEFAULT_KEYTERMS_FILE = Path("deepgram-keyterms-example.txt")
+DEEPGRAM_KEYTERMS_ASSET = "deepgram-keyterms-example.txt"
 DEEPGRAM_MAX_KEYTERMS = 100
 
 # Placeholder a preset prompt may carry to receive the config's ``tags.allowed``
@@ -914,7 +914,7 @@ def load_packaged_keyterms() -> str:
 
 
 def copy_deepgram_keyterms_asset(config_dir: Path, *, overwrite: bool = False) -> Path:
-    """Copy the packaged Deepgram keyterms file beside a generated config."""
+    """Copy the packaged Deepgram keyterms example beside a generated config."""
     dest = config_dir / DEEPGRAM_DEFAULT_KEYTERMS_FILE
     if dest.exists() and not overwrite:
         return dest
