@@ -5,6 +5,7 @@
 
 ### Features
 
+- Collapse the three deepgram-keyterms.txt copies into one example
 - Add the completion webhook
 - Return preset outputs from _run_preset_stage to process_item
 - Add the meta preset (topic + tags) with allow-list injection

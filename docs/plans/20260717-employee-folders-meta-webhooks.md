@@ -363,15 +363,56 @@ normally. The `webhook.url` in the plan's Post-Completion still needs a real end
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] verify all six Overview items are implemented
-- [ ] verify each "Real filenames" table row produces the expected names
-- [ ] verify a `folder_ids` config raises the migration error, and `folders` drives the loop
-- [ ] verify a webhook failure leaves the file processed and the run green
-- [ ] run the full test suite (`uv run pytest`) on the project's supported Pythons
-- [ ] run `uv run ruff check` — all issues fixed
-- [ ] run `scripts/docker-smoke.sh` — the config-only smoke must survive the keyterms and
+- [x] verify all six Overview items are implemented
+      (1) parsing — table below; (2)+(3) `meta` is a built-in with `.meta.md` /
+      `prompt_file=meta.md`, its packaged prompt carries `{{allowed_tags}}`, and a loaded
+      config renders the allow-list into `Preset.instructions`; `parse_meta` keeps
+      allow-listed tags, drops invented ones, and degrades to `Meta(topic="", tags=())`;
+      (4) `folders` → `EmployeeFolder` + `folder_by_id`; (5) `webhook.url`/`webhook_token`
+      parse and `notify_complete` fires; (6) `config/` gone, old asset gone, the 3-term
+      example names `data/deepgram-keyterms.txt`
+- [x] verify each "Real filenames" table row produces the expected names
+      (all 5 rows exercised through `extract_interlocutor_names` — each matched the
+      Expected column exactly, including the Meet-code stem yielding `[]`)
+- [x] verify a `folder_ids` config raises the migration error, and `folders` drives the loop
+      (`folder_ids: [abc]` **and** an empty `folder_ids: []` both raise the `ValueError`
+      quoting the `folders:` shape; a `folders:` config loads to `EmployeeFolder(...)`,
+      `config.folder_ids == ["abc"]`, `folder_by_id` hit/miss correct; the container
+      `doctor` reports `folders: 0 configured` from the same field)
+- [x] verify a webhook failure leaves the file processed and the run green
+      (`test_webhook_exception_does_not_fail_the_file`, `..._not_fired_on_failure`,
+      `..._not_fired_when_file_skipped` pass; driven live against an unreachable receiver:
+      logs `Failed to send completion webhook: ConnectionError` — type only, no token and
+      no transcript — and returns `None` instead of raising)
+- [x] run the full test suite (`uv run pytest`) on the project's supported Pythons
+      (642 passed, 2 skipped on 3.11 and 3.12 — the CI matrix in
+      `.github/workflows/tests.yml:15` — and on 3.13, the local default)
+- [x] run `uv run ruff check` — all issues fixed (All checks passed)
+- [x] run `scripts/docker-smoke.sh` — the config-only smoke must survive the keyterms and
       `folders` changes
-- [ ] verify test coverage meets project standard (80%+)
+      (➕ it did **not** survive: two real defects found and fixed — see below. Now exits 0,
+      and its `doctor` output confirms the `transcript-cleanup -> keypoints + meta +
+      action-items` DAG inside the image)
+- [x] verify test coverage meets project standard (80%+)
+      (92% overall via `pytest --cov=src`; every file changed by this plan is at or above
+      the bar — `src/webhook.py` and `src/meta.py` 100%, `src/main.py` 95%,
+      `src/postprocess.py` 99%, `src/config.py` 89%)
+
+➕ **Docker fallout found by Task 9's smoke run** (Task 8 deleted `config/`, but nothing
+outside `src/` was repointed — the mocked pytest suite could not see either bug):
+
+- `Dockerfile:22` still ran `COPY config ./config`, so **the image no longer built at all**.
+  Dropped the line: the directory only ever held the duplicate keyterms file, and
+  `DEEPGRAM_DEFAULT_KEYTERMS_FILE` now resolves beside `config.yml` rather than under
+  `config/`. (`docs/reviews/2026-06-04-pr9-deepgram-only-review.md:50` added that COPY
+  precisely because the old default pointed into `config/`; Task 8 removed its reason.)
+- `scripts/docker-smoke.sh` then passed every check but still **exited 1**: the container
+  writes `prompts/` into the mounted volume as root, so the host user's cleanup `rm -rf`
+  failed and, under `set -euo pipefail`, poisoned the exit code — a CI check that always
+  reports failure. Cleanup now empties the volume from inside the image and preserves the
+  real exit status. (Pre-existing, but unreachable while the build was broken.)
+- README's `config/deepgram-keyterms.txt` references are left to Task 10, which already
+  owns the keyterms doc paths.
 
 ### Task 10: [Final] Update documentation
 

@@ -20,8 +20,14 @@ echo "==> Building image: $IMAGE"
 docker build -t "$IMAGE" .
 
 SMOKE_HOME="$(mktemp -d)"
+# The container writes into the mounted volume as root, so the host user cannot
+# delete what it left behind; empty the volume from inside the image first.
 cleanup() {
-  rm -rf "$SMOKE_HOME"
+  local status=$?
+  docker run --rm -v "$SMOKE_HOME:/app/data" "$IMAGE" \
+    sh -c 'rm -rf /app/data/..?* /app/data/.[!.]* /app/data/*' >/dev/null 2>&1 || true
+  rm -rf "$SMOKE_HOME" || true
+  return "$status"
 }
 trap cleanup EXIT
 
