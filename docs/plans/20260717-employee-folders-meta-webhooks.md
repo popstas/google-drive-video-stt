@@ -211,13 +211,17 @@ helpers now build `folders=`, and the full suite is green again (582 passed, 2 s
 
 ### Task 4: Read `tags.allowed` into `Config` and stop dropping it
 
-- [ ] write failing tests in `tests/test_config.py`: `tags.allowed` parses into
+- [x] write failing tests in `tests/test_config.py`: `tags.allowed` parses into
       `Config.tags_allowed`; a missing `tags:` block yields `()`; a non-list raises
       `ValueError`; **`_config_to_yaml_dict` round-trips `tags.allowed` without dropping it**
-- [ ] add `tags_allowed: tuple[str, ...] = ()` to `Config` and parse it in `_config_from_yaml`
-- [ ] emit `tags.allowed` from `_config_to_yaml_dict` (`:811-873`) — this is the data-loss fix
-- [ ] seed an empty `tags: {allowed: []}` block in `_default_config_dict` (`:654-738`)
-- [ ] run `uv run pytest tests/test_config.py && uv run ruff check` — must pass before Task 5
+      (➕ also: whitespace-stripped/blank-dropped entries, and a non-mapping `tags:` block
+      rejected via the existing `_as_mapping` guard)
+- [x] add `tags_allowed: tuple[str, ...] = ()` to `Config` and parse it in `_config_from_yaml`
+      (via a new `_parse_tags_allowed` beside `_parse_folders`)
+- [x] emit `tags.allowed` from `_config_to_yaml_dict` (`:811-873`) — this is the data-loss fix
+- [x] seed an empty `tags: {allowed: []}` block in `_default_config_dict` (`:654-738`)
+- [x] run `uv run pytest tests/test_config.py && uv run ruff check` — must pass before Task 5
+      (145 passed; ruff clean; full suite 588 passed, 2 skipped)
 
 ### Task 5: Add the `meta` preset (topic + tags) with allow-list injection
 

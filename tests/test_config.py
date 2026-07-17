@@ -259,6 +259,66 @@ def test_folder_by_id_miss_returns_none(tmp_path):
     assert cfg.folder_by_id("nope") is None
 
 
+# --- tags.allowed ------------------------------------------------------------
+
+
+def test_tags_allowed_parses_into_tuple(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "tags": {"allowed": ["клиентская-консультация", "O-1"]},
+        },
+    )
+    assert cfg.tags_allowed == ("клиентская-консультация", "O-1")
+
+
+def test_missing_tags_block_yields_empty_tuple(tmp_path):
+    cfg = _load_config(tmp_path, {"stt": {"provider": "disabled"}})
+    assert cfg.tags_allowed == ()
+
+
+def test_tags_allowed_strips_whitespace_and_drops_blanks(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {"stt": {"provider": "disabled"}, "tags": {"allowed": [" O-1 ", "", "  "]}},
+    )
+    assert cfg.tags_allowed == ("O-1",)
+
+
+def test_tags_allowed_non_list_rejected(tmp_path):
+    with pytest.raises(ValueError, match="tags.allowed"):
+        _load_config(
+            tmp_path, {"stt": {"provider": "disabled"}, "tags": {"allowed": "O-1"}}
+        )
+
+
+def test_tags_non_mapping_rejected(tmp_path):
+    with pytest.raises(ValueError, match="tags"):
+        _load_config(tmp_path, {"stt": {"provider": "disabled"}, "tags": ["O-1"]})
+
+
+def test_config_to_yaml_dict_round_trips_tags_allowed(tmp_path):
+    # Regression: `tags.allowed` used to be absent from the serializer, so any
+    # whole-Config rewrite (`gdstt config set`, token refresh) silently dropped the
+    # operator's tag list.
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "tags": {"allowed": ["клиентская-консультация", "EB-1"]},
+        },
+    )
+
+    data = _config_to_yaml_dict(cfg)
+    assert data["tags"] == {"allowed": ["клиентская-консультация", "EB-1"]}
+
+    config_file = tmp_path / "roundtrip-tags.yml"
+    _write_yaml(config_file, data)
+    reloaded = load_config(config_path=config_file, validate_providers=False)
+    assert reloaded.tags_allowed == ("клиентская-консультация", "EB-1")
+
+
 def test_custom_poll_interval(tmp_path):
     cfg = _load_config(tmp_path, {"poll_interval": 120, "stt": {"provider": "disabled"}})
     assert cfg.poll_interval == 120
@@ -1211,6 +1271,8 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     # Batch and the run flag are on by default in a generated config.
     assert data["openai"]["batch"] is True
     assert data["run"]["enabled"] is True
+    # An empty tag allow-list is seeded so the operator has the block to fill in.
+    assert data["tags"] == {"allowed": []}
     # The packaged prompt assets are copied beside the config.
     assert (tmp_path / "prompts" / "keypoints.md").is_file()
     assert (tmp_path / "prompts" / "transcript-cleanup.md").is_file()

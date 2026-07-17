@@ -99,6 +99,9 @@ class Config:
     # in the generated config.yml.
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    # The tag allow-list the ``meta`` preset may pick from. Empty means the preset
+    # has nothing to choose between and returns no tags.
+    tags_allowed: tuple[str, ...] = ()
     presets: tuple[Preset, ...] = ()
     # Google OAuth is config-owned and inline-first. ``google_credentials``/
     # ``google_token`` hold inline mappings (the OAuth client JSON and the saved
@@ -184,6 +187,15 @@ def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
             )
         )
     return tuple(folders)
+
+
+def _parse_tags_allowed(raw: object) -> tuple[str, ...]:
+    """Parse the ``tags.allowed`` list into a tuple of non-empty tag names."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"tags.allowed must be a list of tags, got: {raw!r}")
+    return tuple(tag for tag in (_yaml_str(entry) for entry in raw) if tag)
 
 
 def _resolve_prompt_text(preset: Preset, config_file: Path | None) -> str:
@@ -464,12 +476,15 @@ def _config_from_yaml(
     run = _as_mapping(raw.get("run"), "run")
     notifications = _as_mapping(raw.get("notifications"), "notifications")
     telegram = _as_mapping(notifications.get("telegram"), "notifications.telegram")
+    tags = _as_mapping(raw.get("tags"), "tags")
     config_presets = _as_mapping(raw.get("presets"), "presets")
 
     run_enabled = _yaml_bool(run.get("enabled"), default=True)
 
     telegram_bot_token = _yaml_str(telegram.get("bot_token"))
     telegram_chat_id = _yaml_str(telegram.get("chat_id"))
+
+    tags_allowed = _parse_tags_allowed(tags.get("allowed"))
 
     (
         google_credentials,
@@ -622,6 +637,7 @@ def _config_from_yaml(
         deepgram_keyterms=deepgram_keyterms,
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
+        tags_allowed=tags_allowed,
         presets=presets,
         google_credentials=google_credentials,
         google_token=google_token,
@@ -790,6 +806,8 @@ def _default_config_dict(
                 "chat_id": "",
             },
         },
+        # Seeded empty: the `meta` preset picks tags only from this list.
+        "tags": {"allowed": []},
         # Google auth is inline-first and config-owned. The generated config ships an
         # empty block (no *_file pointers) so the data_dir fallback applies until the
         # operator runs `gdstt auth import-credentials` / `auth use-files`.
@@ -928,6 +946,9 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
                 "chat_id": config.telegram_chat_id,
             },
         },
+        # The tag allow-list is operator-owned data with no other home: omitting it
+        # here would drop it from the file on any whole-Config rewrite.
+        "tags": {"allowed": list(config.tags_allowed)},
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
         # the prompt text stays owned by the .md assets; disabled built-ins (e.g.
