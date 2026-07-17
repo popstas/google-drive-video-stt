@@ -156,24 +156,32 @@ Two bugs surfaced during discovery that are **not** in the TODO text but are in 
 
 ### Task 2: Replace `folder_ids` with `folders` in `Config`
 
-- [ ] write failing tests in `tests/test_config.py`: `folders` parses to a tuple of
+- [x] write failing tests in `tests/test_config.py`: `folders` parses to a tuple of
       `EmployeeFolder`; missing `name`/`email` default to `""`; a bare string entry is
       rejected; a config still carrying `folder_ids` raises `ValueError` naming `folders`
-- [ ] add a frozen `EmployeeFolder` dataclass (`folder_id`, `name: str = ""`,
+- [x] add a frozen `EmployeeFolder` dataclass (`folder_id`, `name: str = ""`,
       `email: str = ""`) to `src/config.py`
-- [ ] replace the `folder_ids: list[str]` field (`src/config.py:47`) with
+- [x] replace the `folder_ids: list[str]` field (`src/config.py:47`) with
       `folders: tuple[EmployeeFolder, ...]`, keeping it the first non-default field
-- [ ] replace `_parse_folder_ids` (`:122-123`) with `_parse_folders`, validating each entry is
+- [x] replace `_parse_folder_ids` (`:122-123`) with `_parse_folders`, validating each entry is
       a mapping with a non-empty `folder_id`
-- [ ] raise a setup `ValueError` when the YAML still has `folder_ids`, quoting the
+- [x] raise a setup `ValueError` when the YAML still has `folder_ids`, quoting the
       `folders: [{folder_id, name, email}]` shape in the message
-- [ ] update `_config_to_yaml_dict` (`:820`) and `_default_config_dict` (`:696`) to emit
+      (➕ keyed on the **presence** of `folder_ids`, not its truthiness — an empty
+      `folder_ids: []` is still a stale config and fails loudly rather than starting
+      with nothing to poll)
+- [x] update `_config_to_yaml_dict` (`:820`) and `_default_config_dict` (`:696`) to emit
       `folders: []`
-- [ ] add a `Config.folder_ids` read-only property returning `[f.folder_id for f in folders]`
+- [x] add a `Config.folder_ids` read-only property returning `[f.folder_id for f in folders]`
       so iteration sites stay short, and a `folder_by_id(folder_id) -> EmployeeFolder | None`
       lookup for Tasks 6-7
-- [ ] write tests for the property and the lookup (hit + miss)
-- [ ] run `uv run pytest tests/test_config.py && uv run ruff check` — must pass before Task 3
+- [x] write tests for the property and the lookup (hit + miss)
+- [x] run `uv run pytest tests/test_config.py && uv run ruff check` — must pass before Task 3
+      (139 passed; ruff clean)
+
+⚠️ The full suite is intentionally red between Tasks 2 and 3: 183 failures in the other
+test modules, all from `make_config(folder_ids=...)` helpers that Task 3's first checkbox
+migrates. `tests/test_config.py` — Task 2's gate — is green.
 
 ### Task 3: Wire `folders` through the runtime and CLI
 

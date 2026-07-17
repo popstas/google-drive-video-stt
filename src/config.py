@@ -42,9 +42,31 @@ DEEPGRAM_KEYTERMS_ASSET = "deepgram-keyterms.txt"
 DEEPGRAM_MAX_KEYTERMS = 100
 
 
+FOLDER_IDS_MIGRATION_ERROR = (
+    "folder_ids is no longer supported; use\n"
+    "  folders:\n"
+    "    - folder_id: <id>\n"
+    "      name: <employee name>\n"
+    "      email: <employee email>"
+)
+
+
+@dataclass(frozen=True)
+class EmployeeFolder:
+    """One watched Drive folder and the employee it belongs to.
+
+    ``name``/``email`` are optional: a folder whose employee is unknown still polls,
+    and downstream consumers (the completion webhook) send empty strings for it.
+    """
+
+    folder_id: str
+    name: str = ""
+    email: str = ""
+
+
 @dataclass(frozen=True)
 class Config:
-    folder_ids: list[str]
+    folders: tuple[EmployeeFolder, ...]
     poll_interval: int
     bitrate: str
     data_dir: Path
@@ -90,6 +112,18 @@ class Config:
     google_token_file: Path | None = None
     config_file: Path | None = None
 
+    @property
+    def folder_ids(self) -> list[str]:
+        """The watched folder ids, in config order — for iteration sites."""
+        return [folder.folder_id for folder in self.folders]
+
+    def folder_by_id(self, folder_id: str) -> EmployeeFolder | None:
+        """Return the folder with ``folder_id``, or None when it isn't configured."""
+        for folder in self.folders:
+            if folder.folder_id == folder_id:
+                return folder
+        return None
+
 
 class UniqueKeyLoader(yaml.SafeLoader):
     """A ``SafeLoader`` that rejects duplicate keys in any YAML mapping.
@@ -119,8 +153,37 @@ def _parse_config_yaml(text: str) -> object:
     return yaml.load(text, Loader=UniqueKeyLoader)
 
 
-def _parse_folder_ids(raw: str) -> list[str]:
-    return [item.strip() for item in raw.split(",") if item.strip()]
+def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
+    """Parse the ``folders:`` block into ``EmployeeFolder`` entries.
+
+    Each entry must be a mapping carrying a non-empty ``folder_id``; ``name`` and
+    ``email`` are optional and default to empty strings.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(
+            "folders must be a list of {folder_id, name, email} mappings, "
+            f"got: {raw!r}"
+        )
+    folders: list[EmployeeFolder] = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"folders[{index}] must be a mapping with folder_id/name/email, "
+                f"got: {entry!r}"
+            )
+        folder_id = _yaml_str(entry.get("folder_id"))
+        if not folder_id:
+            raise ValueError(f"folders[{index}] must define a non-empty folder_id")
+        folders.append(
+            EmployeeFolder(
+                folder_id=folder_id,
+                name=_yaml_str(entry.get("name")),
+                email=_yaml_str(entry.get("email")),
+            )
+        )
+    return tuple(folders)
 
 
 def _resolve_prompt_text(preset: Preset, config_file: Path | None) -> str:
@@ -415,13 +478,11 @@ def _config_from_yaml(
         google_token_file,
     ) = _resolve_google_auth(google, base)
 
-    folder_ids_raw = raw.get("folder_ids") or []
-    if isinstance(folder_ids_raw, str):
-        folder_ids = _parse_folder_ids(folder_ids_raw)
-    elif isinstance(folder_ids_raw, (list, tuple)):
-        folder_ids = [str(item).strip() for item in folder_ids_raw if str(item).strip()]
-    else:
-        raise ValueError("folder_ids must be a list or comma-separated string")
+    # Clean break: a config still on the old flat list must be rewritten by hand so
+    # each folder gains its employee, rather than silently polling nameless folders.
+    if "folder_ids" in raw:
+        raise ValueError(FOLDER_IDS_MIGRATION_ERROR)
+    folders = _parse_folders(raw.get("folders"))
 
     poll_raw = raw.get("poll_interval", 600)
     try:
@@ -533,7 +594,7 @@ def _config_from_yaml(
             )
 
     return Config(
-        folder_ids=folder_ids,
+        folders=folders,
         poll_interval=poll_interval,
         bitrate=bitrate,
         data_dir=data_dir,
@@ -693,7 +754,7 @@ def _default_config_dict(
     }
 
     config: dict[str, object] = {
-        "folder_ids": [],
+        "folders": [],
         "poll_interval": 600,
         "bitrate": "96k",
         "data_dir": data_dir or ".",
@@ -817,7 +878,10 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
     locations. See :func:`_relpath_for_config`.
     """
     return {
-        "folder_ids": list(config.folder_ids),
+        "folders": [
+            {"folder_id": folder.folder_id, "name": folder.name, "email": folder.email}
+            for folder in config.folders
+        ],
         "poll_interval": config.poll_interval,
         "bitrate": config.bitrate,
         "data_dir": _relpath_for_config(config.data_dir, config_file),

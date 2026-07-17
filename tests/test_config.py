@@ -7,6 +7,7 @@ import yaml
 
 from src.config import (
     CONFIG_FILE_NAME,
+    EmployeeFolder,
     _config_to_yaml_dict,
     config_get,
     config_set,
@@ -54,8 +55,8 @@ def _deepgram_data(deepgram=None, *, stt_extra=None):
 
 
 def test_defaults_when_config_minimal(tmp_path):
-    cfg = _load_config(tmp_path, {"folder_ids": []})
-    assert cfg.folder_ids == []
+    cfg = _load_config(tmp_path, {"folders": []})
+    assert cfg.folders == ()
     assert cfg.poll_interval == 600
     assert cfg.bitrate == "96k"
     # No data_dir key -> defaults to "." (the config home), matching the
@@ -151,31 +152,111 @@ def test_output_target_folder_with_output_dir(tmp_path):
     assert cfg.output_dir == output_dir
 
 
-def test_parses_single_folder_id(tmp_path):
-    cfg = _load_config(tmp_path, {"folder_ids": "abc123", "stt": {"provider": "disabled"}})
-    assert cfg.folder_ids == ["abc123"]
+def _folders_config(folders, **extra):
+    return {"folders": folders, "stt": {"provider": "disabled"}, **extra}
 
 
-def test_parses_multiple_folder_ids(tmp_path):
-    cfg = _load_config(tmp_path, {"folder_ids": "id1,id2,id3", "stt": {"provider": "disabled"}})
-    assert cfg.folder_ids == ["id1", "id2", "id3"]
-
-
-def test_strips_whitespace_in_folder_ids(tmp_path):
+def test_parses_single_folder(tmp_path):
     cfg = _load_config(
-        tmp_path, {"folder_ids": " id1 , id2 ,  ,id3 ", "stt": {"provider": "disabled"}}
+        tmp_path,
+        _folders_config(
+            [{"folder_id": "abc123", "name": "Олег Иванов", "email": "oleg@example.org"}]
+        ),
     )
-    assert cfg.folder_ids == ["id1", "id2", "id3"]
+    assert cfg.folders == (
+        EmployeeFolder(folder_id="abc123", name="Олег Иванов", email="oleg@example.org"),
+    )
 
 
-def test_empty_folder_ids_returns_empty_list(tmp_path):
-    cfg = _load_config(tmp_path, {"folder_ids": "", "stt": {"provider": "disabled"}})
-    assert cfg.folder_ids == []
+def test_parses_multiple_folders(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _folders_config(
+            [
+                {"folder_id": "id1", "name": "One", "email": "one@example.org"},
+                {"folder_id": "id2", "name": "Two", "email": "two@example.org"},
+            ]
+        ),
+    )
+    assert [f.folder_id for f in cfg.folders] == ["id1", "id2"]
+    assert [f.name for f in cfg.folders] == ["One", "Two"]
 
 
-def test_folder_ids_only_commas_returns_empty_list(tmp_path):
-    cfg = _load_config(tmp_path, {"folder_ids": " , , ", "stt": {"provider": "disabled"}})
-    assert cfg.folder_ids == []
+def test_folder_name_and_email_default_to_blank(tmp_path):
+    cfg = _load_config(tmp_path, _folders_config([{"folder_id": "id1"}]))
+    assert cfg.folders == (EmployeeFolder(folder_id="id1", name="", email=""),)
+
+
+def test_strips_whitespace_in_folder_fields(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _folders_config([{"folder_id": " id1 ", "name": " One ", "email": " one@x.org "}]),
+    )
+    assert cfg.folders == (
+        EmployeeFolder(folder_id="id1", name="One", email="one@x.org"),
+    )
+
+
+def test_missing_folders_key_returns_empty_tuple(tmp_path):
+    cfg = _load_config(tmp_path, {"stt": {"provider": "disabled"}})
+    assert cfg.folders == ()
+
+
+def test_bare_string_folder_entry_rejected(tmp_path):
+    with pytest.raises(ValueError, match="folders"):
+        _load_config(tmp_path, _folders_config(["abc123"]))
+
+
+def test_folder_without_folder_id_rejected(tmp_path):
+    with pytest.raises(ValueError, match="folder_id"):
+        _load_config(tmp_path, _folders_config([{"name": "No Id"}]))
+
+
+def test_folder_with_blank_folder_id_rejected(tmp_path):
+    with pytest.raises(ValueError, match="folder_id"):
+        _load_config(tmp_path, _folders_config([{"folder_id": "  "}]))
+
+
+def test_folders_non_list_rejected(tmp_path):
+    with pytest.raises(ValueError, match="folders"):
+        _load_config(tmp_path, _folders_config("abc123"))
+
+
+def test_legacy_folder_ids_raises_migration_error(tmp_path):
+    with pytest.raises(ValueError, match="folder_ids is no longer supported") as exc:
+        _load_config(tmp_path, {"folder_ids": ["abc"], "stt": {"provider": "disabled"}})
+    # The message must show the operator the replacement shape.
+    assert "folders:" in str(exc.value)
+    assert "folder_id:" in str(exc.value)
+
+
+def test_empty_folder_ids_list_still_raises_migration_error(tmp_path):
+    # Present-but-empty is still a stale config: fail loudly rather than start with
+    # no folders to poll.
+    with pytest.raises(ValueError, match="folder_ids is no longer supported"):
+        _load_config(tmp_path, {"folder_ids": [], "stt": {"provider": "disabled"}})
+
+
+def test_folder_ids_property_lists_ids_in_order(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _folders_config([{"folder_id": "id1"}, {"folder_id": "id2", "name": "Two"}]),
+    )
+    assert cfg.folder_ids == ["id1", "id2"]
+
+
+def test_folder_by_id_hit(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _folders_config([{"folder_id": "id1", "name": "One", "email": "one@x.org"}]),
+    )
+    found = cfg.folder_by_id("id1")
+    assert found == EmployeeFolder(folder_id="id1", name="One", email="one@x.org")
+
+
+def test_folder_by_id_miss_returns_none(tmp_path):
+    cfg = _load_config(tmp_path, _folders_config([{"folder_id": "id1"}]))
+    assert cfg.folder_by_id("nope") is None
 
 
 def test_custom_poll_interval(tmp_path):
@@ -454,7 +535,7 @@ def test_full_yaml_combination(tmp_path):
     cfg = _load_config(
         tmp_path,
         {
-            "folder_ids": "f1,f2",
+            "folders": [{"folder_id": "f1"}, {"folder_id": "f2"}],
             "poll_interval": 300,
             "bitrate": "192k",
             "data_dir": "mydata",
@@ -475,7 +556,7 @@ def test_loads_grouped_yaml(tmp_path):
     _write_yaml(
         config_file,
         {
-            "folder_ids": ["abc", "def"],
+            "folders": [{"folder_id": "abc"}, {"folder_id": "def"}],
             "poll_interval": 300,
             "bitrate": "128k",
             "data_dir": "mydata",
@@ -735,7 +816,7 @@ def test_config_to_yaml_dict_round_trips(tmp_path):
     cfg = _load_config(
         tmp_path,
         {
-            "folder_ids": "rt1",
+            "folders": [{"folder_id": "rt1", "name": "One", "email": "one@x.org"}],
             "stt": {"provider": "disabled"},
             "openai": {"api_key": "sk-rt", "keypoints": True},
         },
@@ -747,7 +828,9 @@ def test_config_to_yaml_dict_round_trips(tmp_path):
     _write_yaml(config_file, data)
     reloaded = load_config(config_path=config_file, validate_providers=False)
 
-    assert reloaded.folder_ids == ["rt1"]
+    assert reloaded.folders == (
+        EmployeeFolder(folder_id="rt1", name="One", email="one@x.org"),
+    )
     assert reloaded.openai_api_key == "sk-rt"
     assert reloaded.openai_keypoints is True
     assert reloaded.stt_provider == ""
@@ -1224,22 +1307,22 @@ def test_init_prompt_dir_points_prompt_files(tmp_path):
 
 def test_init_refuses_existing_without_force(tmp_path):
     config_file = tmp_path / "config.yml"
-    config_file.write_text("folder_ids: [keep]\n", encoding="utf-8")
+    config_file.write_text("folders: [{folder_id: keep}]\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="already exists"):
         init_config(config_path=config_file)
 
-    assert config_file.read_text(encoding="utf-8") == "folder_ids: [keep]\n"
+    assert config_file.read_text(encoding="utf-8") == "folders: [{folder_id: keep}]\n"
 
 
 def test_init_force_overwrites(tmp_path):
     config_file = tmp_path / "config.yml"
-    config_file.write_text("folder_ids: [stale]\n", encoding="utf-8")
+    config_file.write_text("folders: [{folder_id: stale}]\n", encoding="utf-8")
 
     init_config(config_path=config_file, force=True)
 
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    assert data["folder_ids"] == []
+    assert data["folders"] == []
 
 
 # --- config get / set / unset -----------------------------------------------

@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Features
+
+- Fix ExpertizeMe filename parsing in extract_interlocutor_names
+
 ### Documentation
 
 - Add plan for employee folders, meta preset, and webhooks
