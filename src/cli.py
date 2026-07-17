@@ -525,7 +525,7 @@ def cmd_relabel(args: argparse.Namespace) -> None:
 
 def cmd_list(args: argparse.Namespace) -> None:
     config = load_config(validate_providers=False, config_path=args.config)
-    folder_ids = [args.folder] if args.folder else config.folder_ids
+    folder_ids = [args.folder] if args.folder else [f.folder_id for f in config.folders]
     if not folder_ids:
         logger.error("No folders to inspect; configure folders or pass --folder")
         raise SystemExit(1)

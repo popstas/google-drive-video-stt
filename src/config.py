@@ -124,11 +124,6 @@ class Config:
     google_token_file: Path | None = None
     config_file: Path | None = None
 
-    @property
-    def folder_ids(self) -> list[str]:
-        """The watched folder ids, in config order — for iteration sites."""
-        return [folder.folder_id for folder in self.folders]
-
     def folder_by_id(self, folder_id: str) -> EmployeeFolder | None:
         """Return the folder with ``folder_id``, or None when it isn't configured."""
         for folder in self.folders:
@@ -168,8 +163,8 @@ def _parse_config_yaml(text: str) -> object:
 def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
     """Parse the ``folders:`` block into ``EmployeeFolder`` entries.
 
-    Each entry must be a mapping carrying a non-empty ``folder_id``; ``name`` and
-    ``email`` are optional and default to empty strings.
+    Each entry must be a mapping carrying a non-empty, unique ``folder_id``; ``name``
+    and ``email`` are optional and default to empty strings.
     """
     if raw is None:
         return ()
@@ -188,6 +183,13 @@ def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
         folder_id = _yaml_str(entry.get("folder_id"))
         if not folder_id:
             raise ValueError(f"folders[{index}] must define a non-empty folder_id")
+        if any(folder.folder_id == folder_id for folder in folders):
+            # Otherwise the folder is polled once per entry and folder_by_id silently
+            # attributes every file in it to whichever employee was listed first.
+            raise ValueError(
+                f"folders[{index}] repeats folder_id {folder_id!r}; "
+                "each folder must be listed once"
+            )
         folders.append(
             EmployeeFolder(
                 folder_id=folder_id,

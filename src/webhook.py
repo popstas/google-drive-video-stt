@@ -44,4 +44,11 @@ def notify_complete(
         )
         response.raise_for_status()
     except Exception as exc:
-        logger.warning("Failed to send completion webhook: %s", type(exc).__name__)
+        # The status code is not PII and is what separates a bad token from an
+        # unreachable receiver; the exception message can echo the URL, so it stays out.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        logger.warning(
+            "Failed to send completion webhook: %s%s",
+            type(exc).__name__,
+            f" (HTTP {status})" if status else "",
+        )

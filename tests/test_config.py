@@ -252,12 +252,25 @@ def test_empty_folder_ids_list_still_raises_migration_error(tmp_path):
         _load_config(tmp_path, {"folder_ids": [], "stt": {"provider": "disabled"}})
 
 
-def test_folder_ids_property_lists_ids_in_order(tmp_path):
+def test_folders_load_in_config_order(tmp_path):
     cfg = _load_config(
         tmp_path,
         _folders_config([{"folder_id": "id1"}, {"folder_id": "id2", "name": "Two"}]),
     )
-    assert cfg.folder_ids == ["id1", "id2"]
+    assert [f.folder_id for f in cfg.folders] == ["id1", "id2"]
+
+
+def test_duplicate_folder_id_raises(tmp_path):
+    with pytest.raises(ValueError, match="repeats folder_id"):
+        _load_config(
+            tmp_path,
+            _folders_config(
+                [
+                    {"folder_id": "dup", "name": "First"},
+                    {"folder_id": "dup", "name": "Second"},
+                ]
+            ),
+        )
 
 
 def test_folder_by_id_hit(tmp_path):
@@ -461,6 +474,27 @@ def test_empty_allow_list_renders_explicit_none(tmp_path):
     instructions = _preset_by_name(cfg, "tagger").instructions
     assert "{{allowed_tags}}" not in instructions
     assert "none" in instructions.lower()
+
+
+def test_allowed_tags_rendered_when_prompt_file_falls_back_to_packaged_asset(tmp_path):
+    """A prompt_file resolved from the packaged assets (not from disk) must still be
+    rendered — an unrendered placeholder leaves the model free to invent tags."""
+    config_file = tmp_path / "config.yml"
+    # meta.md carries {{allowed_tags}} and exists only as a packaged asset here.
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "tags": {"allowed": ["EB-1"]},
+            "presets": {"tagger": {"prompt_file": "meta.md"}},
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    instructions = _preset_by_name(cfg, "tagger").instructions
+    assert "{{allowed_tags}}" not in instructions
+    assert "- EB-1" in instructions
 
 
 def test_meta_builtin_prompt_renders_allowed_tags(tmp_path):
@@ -760,7 +794,7 @@ def test_full_yaml_combination(tmp_path):
             "stt": {"provider": "disabled"},
         },
     )
-    assert cfg.folder_ids == ["f1", "f2"]
+    assert [f.folder_id for f in cfg.folders] == ["f1", "f2"]
     assert cfg.poll_interval == 300
     assert cfg.bitrate == "192k"
     assert cfg.data_dir == tmp_path / "mydata"
@@ -796,7 +830,7 @@ def test_loads_grouped_yaml(tmp_path):
 
     cfg = load_config(config_path=config_file)
 
-    assert cfg.folder_ids == ["abc", "def"]
+    assert [f.folder_id for f in cfg.folders] == ["abc", "def"]
     assert cfg.poll_interval == 300
     assert cfg.bitrate == "128k"
     assert cfg.data_dir == tmp_path / "mydata"

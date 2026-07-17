@@ -20,9 +20,11 @@ _DATE_RE = re.compile(r"\d{4}[-/._]\d{1,2}[-/._]\d{1,2}|\d{1,2}[-/._]\d{1,2}[-/.
 _TITLE_SEP_RE = re.compile(r"\s+[-–—|]\s+")
 
 # Conjunctions that join participant names ("Alice and Bob", "Alice, Bob", "Alice и Bob",
-# "Ольга х ExpertizeMe").
+# "Ольга х ExpertizeMe", "Olga x ExpertizeMe"). The transliterated latin "x" is matched
+# case-sensitively: an uppercase "X" is a middle initial ("Malcolm X and Alice"), not a
+# separator, and matching it would split the name and strand the real conjunction.
 _NAME_SEP_RE = re.compile(
-    r"\s*,\s*|\s+&\s+|\s+and\s+|\s+и\s+|\s+х\s+|\s+x\s+", re.IGNORECASE
+    r"\s*,\s*|\s+&\s+|\s+and\s+|\s+и\s+|\s+х\s+|(?-i:\s+x\s+)", re.IGNORECASE
 )
 
 # A calendar-generated duration prefix ("30-минутная онлайн-встреча Alice ...",

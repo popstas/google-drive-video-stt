@@ -261,8 +261,10 @@ def test_agents_doc_documents_config_yml_and_preset_dag():
     assert "artifact_type" in text
     # The GDSTT_HOME directory bootstrap is the breaking change operators must know.
     assert "GDSTT_HOME" in text
-    # `meta` is a second built-in preset alongside `keypoints`.
-    assert "meta" in text
+    # `meta` is a second built-in preset alongside `keypoints`. Match the artifact
+    # suffix, not the bare word — "meta" alone also hits "metadata" and would pass
+    # even if the preset were never documented.
+    assert ".meta.md" in text
 
 
 def test_docs_document_the_folders_migration():

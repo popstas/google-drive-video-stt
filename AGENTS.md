@@ -126,7 +126,12 @@ dispatches it through `process_target` (honoring `--dry-run`).
 **Post-processing** runs in `process_item` after `transcribe_file` and before the
 artifact is written, gated by `stt_postprocess` (local path, `src/postprocess.py`):
 it cleans whitespace, parses interlocutor names from the file name, maps them onto
-diarized `Speaker N` labels, and merges spurious extra speakers.
+diarized `Speaker N` labels, and merges spurious extra speakers. Name parsing strips
+calendar duration prefixes (`30-минутная онлайн-встреча …`) and parentheticals,
+splits on `,`/`&`/`and`/`и`/`х`/`x`, and discards Google Meet room codes and the
+`_ORG_TOKENS` org names. Two non-obvious rules: `_ORG_TOKENS` is a code constant, not
+config (an operator's own org name would be read as a person), and the latin `x`
+separator is matched case-sensitively so an uppercase `X` stays a middle initial.
 
 **Preset DAG** (`src/presets.py` + `src/preset_pipeline.py`): after the transcript
 is written, `process_item` runs the enabled presets that are still missing an
@@ -215,7 +220,8 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   Resume with `gdstt start`/`gdstt run` (both set it true); `docker compose stop`
   halts the container itself.
 - Configuration is `<GDSTT_HOME>/config.yml` (default `./data/config.yml`; grouped
-  `output`, `stt.deepgram`, `openai`, and a top-level `presets` map). The file must
+  `output`, `stt.deepgram`, `openai`, `tags`, `webhook`, and a top-level `presets`
+  map). The file must
   exist — create it with `gdstt config init` (no dotenv, no migration, no
   auto-generation). Resolve a one-shot non-default file with `gdstt --config PATH ...`.
 - Enabled presets run after the transcript is produced and require `openai.api_key`;

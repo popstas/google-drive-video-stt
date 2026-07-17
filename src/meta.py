@@ -51,12 +51,11 @@ def _parse_frontmatter(text: str) -> dict | None:
     return parsed
 
 
-def _parse_tags(raw: object, allowed: Iterable[str] | None) -> tuple[str, ...]:
+def _parse_tags(raw: object, allowed: Iterable[str]) -> tuple[str, ...]:
     """Normalize the ``tags:`` value and drop anything outside the allow-list.
 
-    ``allowed`` of ``None`` skips filtering; an empty collection drops every tag
-    (a config with no ``tags.allowed`` gave the model nothing to pick from, so any
-    tag it returned is invented).
+    An empty ``allowed`` drops every tag: a config with no ``tags.allowed`` gave the
+    model nothing to pick from, so any tag it returned is invented.
     """
     if raw is None:
         return ()
@@ -66,25 +65,25 @@ def _parse_tags(raw: object, allowed: Iterable[str] | None) -> tuple[str, ...]:
         # A model answering `tags: O-1` instead of a list shouldn't lose the tag.
         candidates = [raw]
 
-    allow_set = None if allowed is None else {str(tag).strip() for tag in allowed}
+    allow_set = {str(tag).strip() for tag in allowed}
     tags: list[str] = []
     for candidate in candidates:
         tag = str(candidate).strip()
         if not tag or tag in tags:
             continue
-        if allow_set is not None and tag not in allow_set:
+        if tag not in allow_set:
             logger.debug("dropping meta tag outside the allow-list: %r", tag)
             continue
         tags.append(tag)
     return tuple(tags)
 
 
-def parse_meta(text: str, allowed: Iterable[str] | None = None) -> Meta:
+def parse_meta(text: str, allowed: Iterable[str]) -> Meta:
     """Read ``topic``/``tags`` from a ``meta`` artifact's YAML frontmatter.
 
-    ``allowed`` is the configured tag allow-list; tags outside it are dropped.
-    Passing ``None`` (the default) keeps every tag. A missing or malformed block
-    yields ``Meta(topic="", tags=())``.
+    ``allowed`` is the configured tag allow-list; tags outside it are dropped, and an
+    empty allow-list drops all of them. A missing or malformed block yields
+    ``Meta(topic="", tags=())``.
     """
     parsed = _parse_frontmatter(text)
     if parsed is None:

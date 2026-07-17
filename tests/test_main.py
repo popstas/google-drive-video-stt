@@ -43,6 +43,7 @@ def make_config(
     tags_allowed=(),
     webhook_url="",
     webhook_token="",
+    proxy_url="",
 ) -> Config:
     if presets is None:
         # Mirror the legacy keypoints gate: the built-in keypoints pass is the only
@@ -55,7 +56,7 @@ def make_config(
         poll_interval=poll_interval,
         bitrate=bitrate,
         data_dir=data_dir,
-        proxy_url="",
+        proxy_url=proxy_url,
         stt_provider=stt_provider,
         openai_api_key=openai_api_key,
         deepgram_api_key=deepgram_api_key,
@@ -1874,7 +1875,11 @@ def test_process_item_skips_presets_with_existing_artifacts(mocker, tmp_path):
     run_mock.assert_called_once()
     assert run_mock.call_args.kwargs["only"] == ["expertizeme-managers"]
     assert run_mock.call_args.kwargs["precomputed"] == {"transcript-cleanup": "cleaned"}
-    download_text.assert_called_once_with(service, "c1")
+    # c1 feeds the dependency; k1 is read back only so the webhook payload carries
+    # the keypoints produced on an earlier cycle. Neither preset is re-run.
+    assert download_text.call_count == 2
+    download_text.assert_any_call(service, "c1")
+    download_text.assert_any_call(service, "k1")
 
 
 def test_process_item_skips_preset_stage_when_all_present(mocker, tmp_path):
@@ -1968,10 +1973,12 @@ def test_process_item_reprocesses_missing_presets_from_existing_drive_txt(mocker
     main.process_item(service, item, "folderX", _two_preset_config())
 
     transcribe.assert_not_called()
-    # t1 = the existing transcript; c1 = the reused transcript-cleanup artifact.
-    assert download_text.call_count == 2
+    # t1 = the existing transcript; c1 = the reused transcript-cleanup artifact;
+    # k1 = the earlier keypoints, read back so the webhook payload is complete.
+    assert download_text.call_count == 3
     download_text.assert_any_call(service, "t1")
     download_text.assert_any_call(service, "c1")
+    download_text.assert_any_call(service, "k1")
     run_mock.assert_called_once()
     assert run_mock.call_args.args[0] == "existing transcript"
     assert run_mock.call_args.kwargs["only"] == ["expertizeme-managers"]
@@ -2290,12 +2297,17 @@ def test_process_item_telemetry_artifacts_empty_without_presets(mocker, tmp_path
 
 
 def test_process_item_telemetry_carries_artifacts_on_preset_refeed(mocker, tmp_path):
+    """Only ``expertizeme-managers`` is missing, so it alone is re-run — but the
+    webhook fires once per file, so the presets that succeeded on an earlier cycle
+    must be read back from their artifacts and reach the receiver too."""
     service = MagicMock()
     mocker.patch(
         "src.main.drive.download_text",
-        side_effect=lambda svc, file_id: (
-            "existing transcript" if file_id == "t1" else "Alice: hi"
-        ),
+        side_effect=lambda svc, file_id: {
+            "t1": "existing transcript",
+            "c1": "Alice: hi",
+            "k1": "earlier keypoints",
+        }[file_id],
     )
     mocker.patch("src.main.transcribe_file")
     mocker.patch("src.main.drive.upload")
@@ -2326,6 +2338,7 @@ def test_process_item_telemetry_carries_artifacts_on_preset_refeed(mocker, tmp_p
     assert telemetry.artifacts == {
         "transcript-cleanup": "Alice: hi",
         "expertizeme-managers": "notes",
+        "keypoints": "earlier keypoints",
     }
 
 
@@ -2463,6 +2476,60 @@ def test_webhook_not_fired_when_file_skipped(mocker, tmp_path):
     )
 
     assert telemetry is None
+    notify.assert_not_called()
+
+
+def test_webhook_receives_the_configured_proxy(mocker, tmp_path):
+    """The proxy is honoured inside notify_complete; this pins the wiring. Without
+    it, a proxied deployment silently stops delivering — notify_complete swallows the
+    connection error and the file still processes."""
+    notify = _mock_successful_run(mocker, tmp_path)
+
+    main.process_item(
+        MagicMock(),
+        _item("fid", "video.mp4"),
+        "folderX",
+        _webhook_config(proxy_url="http://proxy:3128"),
+    )
+
+    assert notify.call_args.kwargs["proxy_url"] == "http://proxy:3128"
+
+
+def test_webhook_not_fired_for_an_mp3_only_pass(mocker, tmp_path):
+    """STT disabled and only the mp3 artifact wanted: there is no transcript and no
+    preset output, so POSTing blanks would overwrite a good record on the receiver."""
+    notify = mocker.patch("src.main.webhook.notify_complete")
+    mocker.patch("src.main.drive.download", return_value=tmp_path / "video.mp4")
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    mocker.patch("src.main.drive.upload")
+
+    cfg = _webhook_config(stt_provider="", presets=(), drive_mp3_artifact=True)
+    telemetry = main.process_item(
+        MagicMock(), _item("fid", "video.mp4"), "folderX", cfg
+    )
+
+    assert telemetry is not None
+    assert telemetry.mp3_uploaded is True
+    notify.assert_not_called()
+
+
+def test_webhook_not_refired_when_only_a_late_mp3_is_added(mocker, tmp_path):
+    """Enabling drive_mp3_artifact after transcripts already exist backfills the mp3
+    only; the file's webhook already fired on the cycle that produced the transcript."""
+    notify = mocker.patch("src.main.webhook.notify_complete")
+    mocker.patch("src.main.drive.download", return_value=tmp_path / "video.mp4")
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    mocker.patch("src.main.drive.upload")
+
+    cfg = _webhook_config(presets=(), drive_mp3_artifact=True)
+    telemetry = main.process_item(
+        MagicMock(),
+        _item("fid", "video.mp4", has_txt=True, txt_id="t1", has_mp3=False),
+        "folderX",
+        cfg,
+    )
+
+    assert telemetry is not None
     notify.assert_not_called()
 
 

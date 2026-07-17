@@ -94,9 +94,9 @@ def test_empty_allow_list_drops_every_tag():
     assert meta.tags == ()
 
 
-def test_allowed_none_skips_filtering():
-    text = "---\ntopic: T\ntags: [anything-goes]\n---\n"
-    assert parse_meta(text).tags == ("anything-goes",)
+def test_tag_matching_the_allow_list_survives():
+    text = "---\ntopic: T\ntags: [O-1, invented]\n---\n"
+    assert parse_meta(text, allowed=ALLOWED).tags == ("O-1",)
 
 
 def test_leading_whitespace_and_bom_tolerated():

@@ -8,7 +8,9 @@ speech-to-text pipelines.
 
 ## Features
 
-- Polls one or more Google Drive folders on a configurable interval
+- Polls one or more Google Drive folders on a configurable interval, each mapped to
+  an employee (`folders: [{folder_id, name, email}]`) so every file knows whose
+  folder it came from
 - Idempotent: skips already-created artifacts, linked by source file id metadata
   when available and by sibling name as a legacy fallback
 - Audio extraction via ffmpeg (`libmp3lame`, configurable bitrate)
@@ -22,6 +24,10 @@ speech-to-text pipelines.
 - Config-defined DAG of OpenAI presets (each writes its own sibling artifact, e.g.
   the built-in Keypoints pass: `## Задачи` / `## Тезисы` / `## Открытые вопросы`),
   with independent presets run in parallel via the OpenAI Responses API
+- Built-in `meta` preset recording a one-sentence conversation topic plus tags drawn
+  only from the configured `tags.allowed` allow-list
+- Optional fire-and-forget completion webhook posting `{file, employee, transcript,
+  artifacts}` once per processed file
 - Output to Google Drive siblings or to a local folder (`output.target`)
 - Sibling `.mp3`/`.txt` names preserve the full Drive file name, including `/`
   characters
@@ -58,7 +64,7 @@ uv sync --extra dev
 
 Configuration lives in a single `config.yml`. For a fresh install, generate
 one from the packaged defaults — the full chain `transcript-cleanup -> keypoints +
-action-items` is enabled out of the box with `openai.batch: true`:
+action-items + meta` is enabled out of the box with `openai.batch: true`:
 
 ```bash
 gdstt config init      # writes config.yml + prompts/ to the resolved target (see below)
@@ -83,7 +89,7 @@ gdstt config init --force     # writes /srv/gdstt/config.yml
 ```
 
 The packaged prompt assets (`keypoints.md`, `transcript-cleanup.md`,
-`action-items.md`) are copied into `<GDSTT_HOME>/prompts/` beside the config, and
+`action-items.md`, `meta.md`) are copied into `<GDSTT_HOME>/prompts/` beside the config, and
 each preset's `prompt_file` points at them. There is no hidden runtime prompt in
 Python — the prompt text is owned by these `.md` files.
 
@@ -218,7 +224,8 @@ the last path segment in the browser URL:
 
 All configuration lives in the active `config.yml` (`<GDSTT_HOME>/config.yml`, or
 `./data/config.yml` when `GDSTT_HOME` is unset). It is grouped under `output`, `stt`
-(with a nested `deepgram` block), and `openai`, plus a top-level `presets` map.
+(with a nested `deepgram` block), `openai`, `tags`, and `webhook`, plus a top-level
+`presets` map.
 There is no auto-generation: create the file with `gdstt config init` (or by hand),
 then edit it. Resolve a one-shot non-default file with `gdstt --config PATH ...`.
 

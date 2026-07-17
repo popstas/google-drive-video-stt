@@ -5,6 +5,7 @@
 
 ### Features
 
+- Update documentation for folders, meta, and webhooks
 - Verify acceptance criteria and fix docker smoke fallout
 - Collapse the three deepgram-keyterms.txt copies into one example
 - Add the completion webhook

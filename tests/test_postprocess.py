@@ -82,6 +82,13 @@ def test_extract_names_latin_x_separator_drops_org_token():
     assert names == ["Olga"]
 
 
+def test_extract_names_uppercase_x_is_a_middle_initial_not_a_separator():
+    """Splitting on an uppercase "X" truncates the name and strands the real
+    conjunction, yielding the bogus interlocutor "and Alice"."""
+    names = postprocess.extract_interlocutor_names("Malcolm X and Alice - 2026-01-01.mp4")
+    assert names == ["Malcolm X", "Alice"]
+
+
 def test_extract_names_and_separator_regression_guard():
     names = postprocess.extract_interlocutor_names(
         "Aleksandr Tikhonov and Oksana Ciciarelli - 2026_05_20 16_55 CEST - Recording.mp4"

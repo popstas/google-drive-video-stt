@@ -165,9 +165,10 @@ def _run_preset_stage(
 ) -> dict[str, str]:
     """Run the enabled preset DAG over a transcript and persist each new artifact.
 
-    Returns each preset's text keyed by preset name — freshly produced ones plus the
-    dependency artifacts re-fed from an earlier cycle — so callers (the completion
-    webhook) can ship the outputs without re-downloading them.
+    Returns every enabled preset's text keyed by preset name — freshly produced ones
+    plus any that completed on an earlier cycle, read back from their artifacts — so
+    callers (the completion webhook) ship a file's full set of outputs even though
+    only the still-missing presets were run.
 
     Only presets still missing an artifact are produced (``reprocess`` re-runs them
     all, overwriting in place). Successful, non-empty outputs are written as soon as
@@ -198,21 +199,24 @@ def _run_preset_stage(
     # on an earlier cycle is re-fed from its artifact instead of being re-run,
     # which avoids extra OpenAI spend and keeps dependent siblings consistent with
     # the dependency output that produced the earlier ones.
+    def load_existing(name: str) -> str | None:
+        existing_id = artifact_ids.get(name)
+        if existing_id is not None:
+            return _call_with_transient_retries(
+                lambda: drive.download_text(service, existing_id),
+                description=f"download {name} artifact for {mp4_name}",
+            )
+        local_path = local_artifact_paths.get(name)
+        if local_path is not None:
+            return local_path.read_text(encoding="utf-8")
+        return None
+
     precomputed: dict[str, str] = {}
     if not reprocess:
         for dep in preset_pipeline.dependency_names(config.presets, missing):
-            existing_id = artifact_ids.get(dep)
-            if existing_id is not None:
-                precomputed[dep] = _call_with_transient_retries(
-                    lambda existing_id=existing_id: drive.download_text(
-                        service, existing_id
-                    ),
-                    description=f"download {dep} artifact for {mp4_name}",
-                )
-                continue
-            local_path = local_artifact_paths.get(dep)
-            if local_path is not None:
-                precomputed[dep] = local_path.read_text(encoding="utf-8")
+            text = load_existing(dep)
+            if text is not None:
+                precomputed[dep] = text
 
     results = preset_pipeline.run_presets(
         transcript,
@@ -252,11 +256,22 @@ def _run_preset_stage(
     if aggregated:
         raise RuntimeError(aggregated)
 
-    return {
+    produced = {
         name: result.text
         for name, result in results.items()
         if result.ok and result.text.strip()
     }
+    # The webhook fires once per file, so a preset that succeeded on an earlier
+    # cycle — and is therefore not re-run here — still has to reach the receiver.
+    for name in preset_by_name:
+        if name in produced:
+            continue
+        text = precomputed.get(name)
+        if text is None:
+            text = load_existing(name)
+        if text is not None and text.strip():
+            produced[name] = text
+    return produced
 
 
 def _prepare_deepgram_audio(mp4_path: Path, config: Config) -> Path:
@@ -621,20 +636,23 @@ def process_item(
             usage,
         )
 
-    # Success path only, after every artifact is written. Fire-and-forget: the whole
-    # block is guarded because a file that transcribed and uploaded must count as
-    # processed even if the payload or the receiver misbehaves.
-    try:
-        webhook.notify_complete(
-            url=config.webhook_url,
-            token=config.webhook_token,
-            proxy_url=config.proxy_url,
-            payload=_webhook_payload(
-                file_id, file_name, folder_id, config, transcript, artifacts
-            ),
-        )
-    except Exception as exc:
-        logger.warning("Completion webhook failed: %s", type(exc).__name__)
+    # Success path only, after every artifact is written. An mp3-only pass produces
+    # nothing a receiver can use, so it stays silent rather than POSTing blanks over
+    # a good record. Fire-and-forget: the whole block is guarded because a file that
+    # transcribed and uploaded must count as processed even if the payload or the
+    # receiver misbehaves.
+    if txt_uploaded or artifacts:
+        try:
+            webhook.notify_complete(
+                url=config.webhook_url,
+                token=config.webhook_token,
+                proxy_url=config.proxy_url,
+                payload=_webhook_payload(
+                    file_id, file_name, folder_id, config, transcript, artifacts
+                ),
+            )
+        except Exception as exc:
+            logger.warning("Completion webhook failed: %s", type(exc).__name__)
 
     return _ProcessTelemetry(
         provider=provider,
