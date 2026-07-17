@@ -179,24 +179,35 @@ Two bugs surfaced during discovery that are **not** in the TODO text but are in 
 - [x] run `uv run pytest tests/test_config.py && uv run ruff check` — must pass before Task 3
       (139 passed; ruff clean)
 
-⚠️ The full suite is intentionally red between Tasks 2 and 3: 183 failures in the other
+⚠️ ~~The full suite is intentionally red between Tasks 2 and 3: 183 failures in the other
 test modules, all from `make_config(folder_ids=...)` helpers that Task 3's first checkbox
-migrates. `tests/test_config.py` — Task 2's gate — is green.
+migrates. `tests/test_config.py` — Task 2's gate — is green.~~ **Resolved by Task 3**: the
+helpers now build `folders=`, and the full suite is green again (582 passed, 2 skipped).
 
 ### Task 3: Wire `folders` through the runtime and CLI
 
-- [ ] update the `make_config` helper in `tests/test_main.py:18,39` to build `folders=`, and
+- [x] update the `make_config` helper in `tests/test_main.py:18,39` to build `folders=`, and
       fix the other test modules' helpers (`test_cli`, `test_output`, `test_preset_pipeline`,
       `test_preset_dag_e2e`, `test_stt_contract`, `test_openai_pipeline`,
       `test_stt_transcribe`, `test_stt_deepgram_factory`)
-- [ ] write a failing test that `gdstt doctor` / `config` output lists each folder with its
+      (➕ added a `_as_folders` shim to `make_config` accepting ids **or** `EmployeeFolder`s,
+      so the ~25 folder-agnostic call sites stay `folders=["f1"]` and only the tests that
+      care about an employee spell out the dataclass)
+- [x] write a failing test that `gdstt doctor` / `config` output lists each folder with its
       employee name and email
-- [ ] update `src/main.py:828` (`run_once` iteration), `:905` (cycle summary count), and
+      (`test_doctor_lists_each_folder_with_employee_name_and_email`)
+- [x] update `src/main.py:828` (`run_once` iteration), `:905` (cycle summary count), and
       `:923-925` (empty-folders `SystemExit`) to read `config.folders`
-- [ ] update `src/cli.py:227-234` (first-folder default), `:413,423,519-524` (status output),
+- [x] update `src/cli.py:227-234` (first-folder default), `:413,423,519-524` (status output),
       and the `--folder` help text at `:742,901`
-- [ ] update `data/config.yml` to the `folders` shape, carrying the existing folder id
-- [ ] run `uv run pytest && uv run ruff check` — must pass before Task 4
+      (➕ added `_describe_employee(folder)` beside the `_describe_google_*` doctor helpers;
+      `cmd_list` keeps using the `config.folder_ids` property since it merges a bare
+      `--folder` id with the configured ones)
+- [x] update `data/config.yml` to the `folders` shape, carrying the existing folder id
+      (⚠️ gitignored local operator config — edited but **not** committed; `name`/`email`
+      left empty for the operator to fill per Post-Completion)
+- [x] run `uv run pytest && uv run ruff check` — must pass before Task 4
+      (582 passed, 2 skipped; ruff clean)
 
 ### Task 4: Read `tags.allowed` into `Config` and stop dropping it
 

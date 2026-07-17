@@ -224,14 +224,14 @@ def cmd_process(args: argparse.Namespace) -> None:
 
 def cmd_latest(args: argparse.Namespace) -> None:
     config = load_config(config_path=args.config)
-    folder_id = args.folder or (config.folder_ids[0] if config.folder_ids else None)
+    folder_id = args.folder or (config.folders[0].folder_id if config.folders else None)
     if not folder_id:
-        logger.error("No folder to inspect; configure folder_ids or pass --folder")
+        logger.error("No folder to inspect; configure folders or pass --folder")
         raise SystemExit(1)
-    if not args.folder and len(config.folder_ids) > 1:
+    if not args.folder and len(config.folders) > 1:
         logger.info(
             "%d folders configured; using the first (%s). Pass --folder to pick another.",
-            len(config.folder_ids), folder_id,
+            len(config.folders), folder_id,
         )
     service = auth.build_drive_service(config=config)
     newest = drive.find_newest_mp4(service, folder_id)
@@ -388,6 +388,13 @@ def _describe_google_token(config) -> str:
     return f"data_dir {fallback} ({'OK' if fallback.exists() else 'missing'})"
 
 
+def _describe_employee(folder) -> str:
+    """Describe a folder's employee for doctor; name/email are both optional."""
+    if folder.name and folder.email:
+        return f"{folder.name} <{folder.email}>"
+    return folder.name or folder.email or "(no employee configured)"
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     config_path = resolve_config_file_path(args.config)
     try:
@@ -410,7 +417,9 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     # token / refresh_token stay masked; only the source kind/location is shown).
     print(f"Google credentials: {_describe_google_credentials(config)}")
     print(f"Google token: {_describe_google_token(config)}")
-    print(f"folder_ids: {len(config.folder_ids)} configured")
+    print(f"folders: {len(config.folders)} configured")
+    for folder in config.folders:
+        print(f"  {folder.folder_id}: {_describe_employee(folder)}")
     print(f"stt.provider: {config.stt_provider or 'not configured'}")
     _print_preset_dag(config)
 
@@ -420,9 +429,9 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
     service = auth.build_drive_service(config=config)
     print("Drive auth: OK")
-    for folder_id in config.folder_ids:
-        items = drive.list_folder_state(service, folder_id)
-        print(f"Folder {folder_id}: OK, {len(items)} mp4 file(s)")
+    for folder in config.folders:
+        items = drive.list_folder_state(service, folder.folder_id)
+        print(f"Folder {folder.folder_id}: OK, {len(items)} mp4 file(s)")
 
 
 def cmd_config_init(args: argparse.Namespace) -> None:
@@ -518,7 +527,7 @@ def cmd_list(args: argparse.Namespace) -> None:
     config = load_config(validate_providers=False, config_path=args.config)
     folder_ids = [args.folder] if args.folder else config.folder_ids
     if not folder_ids:
-        logger.error("No folders to inspect; configure folder_ids or pass --folder")
+        logger.error("No folders to inspect; configure folders or pass --folder")
         raise SystemExit(1)
     service = auth.build_drive_service(config=config)
     for folder_id in folder_ids:
@@ -739,7 +748,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_latest.add_argument(
         "--folder",
         default=None,
-        help="Folder ID to inspect (default: first configured folder_ids entry)",
+        help="Folder ID to inspect (default: first configured folders entry)",
     )
     p_latest.add_argument(
         "--dry-run",
@@ -898,7 +907,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_list.add_argument(
         "--folder",
         default=None,
-        help="Folder ID to inspect (default: configured folder_ids)",
+        help="Folder ID to inspect (default: configured folders)",
     )
     p_list.set_defaults(func=cmd_list)
 

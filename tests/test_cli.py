@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src import cli
+from src.config import EmployeeFolder
 from src.presets import Preset
 from tests.test_main import make_config
 
@@ -173,7 +174,7 @@ def test_doctor_reports_google_source_without_secrets(mocker, capsys, tmp_path):
     from dataclasses import replace
 
     cfg = replace(
-        make_config(folder_ids=["f1"], data_dir=tmp_path),
+        make_config(folders=["f1"], data_dir=tmp_path),
         google_credentials={"installed": {"client_secret": "sup3rsecret"}},
         google_token={"refresh_token": "rt-secret"},
     )
@@ -194,7 +195,7 @@ def test_doctor_uses_drive_only_config_and_skips_auth_by_default(
     capsys,
     tmp_path,
 ):
-    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path, stt_provider="deepgram")
+    cfg = make_config(folders=["f1"], data_dir=tmp_path, stt_provider="deepgram")
     (tmp_path / "credentials.json").write_text("{}", encoding="utf-8")
     load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
     build_mock = mocker.patch("src.cli.auth.build_drive_service")
@@ -206,11 +207,29 @@ def test_doctor_uses_drive_only_config_and_skips_auth_by_default(
     out = capsys.readouterr().out
     assert "credentials.json: OK" in out
     assert "token.json: missing" in out
-    assert "folder_ids: 1 configured" in out
+    assert "folders: 1 configured" in out
+
+
+def test_doctor_lists_each_folder_with_employee_name_and_email(mocker, capsys, tmp_path):
+    cfg = make_config(
+        folders=[
+            EmployeeFolder("f1", name="Олег Иванов", email="oleg@expertizeme.org"),
+            EmployeeFolder("f2"),
+        ],
+        data_dir=tmp_path,
+    )
+    mocker.patch("src.cli.load_config", return_value=cfg)
+
+    cli.main(["doctor"])
+
+    out = capsys.readouterr().out
+    assert "folders: 2 configured" in out
+    assert "f1: Олег Иванов <oleg@expertizeme.org>" in out
+    assert "f2: (no employee configured)" in out
 
 
 def test_doctor_drive_check_lists_configured_folders(mocker, capsys, tmp_path):
-    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path)
+    cfg = make_config(folders=["f1"], data_dir=tmp_path)
     mocker.patch("src.cli.load_config", return_value=cfg)
     service = MagicMock()
     mocker.patch("src.cli.auth.build_drive_service", return_value=service)
@@ -225,7 +244,7 @@ def test_doctor_drive_check_lists_configured_folders(mocker, capsys, tmp_path):
 
 
 def test_doctor_reports_stt_provider_without_pipeline_readiness(mocker, capsys, tmp_path):
-    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path, stt_provider="deepgram")
+    cfg = make_config(folders=["f1"], data_dir=tmp_path, stt_provider="deepgram")
     mocker.patch("src.cli.load_config", return_value=cfg)
     build_mock = mocker.patch("src.cli.auth.build_drive_service")
 
@@ -413,7 +432,7 @@ def test_process_dispatches_safety_flags(mocker, tmp_path):
 
 
 def test_latest_dispatch_uses_first_folder(mocker, tmp_path):
-    cfg = make_config(data_dir=tmp_path, folder_ids=["folderA", "folderB"])
+    cfg = make_config(data_dir=tmp_path, folders=["folderA", "folderB"])
     load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
     service = MagicMock()
     build_mock = mocker.patch("src.cli.auth.build_drive_service", return_value=service)
@@ -461,7 +480,7 @@ def test_latest_dispatch_honors_folder_and_dry_run(mocker, tmp_path):
 
 
 def test_latest_dispatch_forwards_size_guards(mocker, tmp_path):
-    cfg = make_config(data_dir=tmp_path, folder_ids=["folderA"])
+    cfg = make_config(data_dir=tmp_path, folders=["folderA"])
     mocker.patch("src.cli.load_config", return_value=cfg)
     service = MagicMock()
     mocker.patch("src.cli.auth.build_drive_service", return_value=service)
@@ -496,7 +515,7 @@ def test_latest_no_mp4_skips_processing(mocker, tmp_path):
 
 
 def test_latest_without_folder_config_errors(mocker, tmp_path):
-    cfg = make_config(data_dir=tmp_path, folder_ids=[])
+    cfg = make_config(data_dir=tmp_path, folders=[])
     mocker.patch("src.cli.load_config", return_value=cfg)
 
     with pytest.raises(SystemExit):
@@ -646,7 +665,7 @@ def test_relabel_dispatch_no_header_flag(mocker, tmp_path):
 
 
 def test_list_dispatch_uses_configured_folders(mocker, capsys, tmp_path):
-    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path)
+    cfg = make_config(folders=["f1"], data_dir=tmp_path)
     mocker.patch("src.cli.load_config", return_value=cfg)
     service = MagicMock()
     mocker.patch("src.cli.auth.build_drive_service", return_value=service)
@@ -668,7 +687,7 @@ def test_list_dispatch_uses_configured_folders(mocker, capsys, tmp_path):
 
 
 def test_status_alias_with_explicit_folder(mocker, capsys, tmp_path):
-    cfg = make_config(folder_ids=[], data_dir=tmp_path)
+    cfg = make_config(folders=[], data_dir=tmp_path)
     mocker.patch("src.cli.load_config", return_value=cfg)
     service = MagicMock()
     mocker.patch("src.cli.auth.build_drive_service", return_value=service)
@@ -680,7 +699,7 @@ def test_status_alias_with_explicit_folder(mocker, capsys, tmp_path):
 
 
 def test_list_no_folders_exits(mocker, tmp_path):
-    cfg = make_config(folder_ids=[], data_dir=tmp_path)
+    cfg = make_config(folders=[], data_dir=tmp_path)
     mocker.patch("src.cli.load_config", return_value=cfg)
     mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
     mocker.patch("src.cli.drive.list_folder_state")
@@ -694,7 +713,7 @@ def test_list_no_folders_exits(mocker, tmp_path):
 def test_list_no_folders_skips_authentication(mocker, tmp_path):
     # The empty-folder check must short-circuit before authenticating, so a
     # missing/expired token can't mask the intended local error.
-    cfg = make_config(folder_ids=[], data_dir=tmp_path)
+    cfg = make_config(folders=[], data_dir=tmp_path)
     mocker.patch("src.cli.load_config", return_value=cfg)
     build_mock = mocker.patch("src.cli.auth.build_drive_service")
 
@@ -706,7 +725,7 @@ def test_list_no_folders_skips_authentication(mocker, tmp_path):
 
 
 def test_list_skips_provider_validation(mocker, tmp_path):
-    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path)
+    cfg = make_config(folders=["f1"], data_dir=tmp_path)
     load_mock = mocker.patch("src.cli.load_config", return_value=cfg)
     mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
     mocker.patch("src.cli.drive.list_folder_state", return_value=[])
@@ -859,7 +878,7 @@ def test_process_spend_summary_dry_run(mocker, capsys, tmp_path):
 
 
 def test_latest_prints_spend_summary(mocker, capsys, tmp_path):
-    cfg = make_config(data_dir=tmp_path, folder_ids=["folderA"])
+    cfg = make_config(data_dir=tmp_path, folders=["folderA"])
     mocker.patch("src.cli.load_config", return_value=cfg)
     mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
     mocker.patch(
@@ -880,7 +899,7 @@ def test_config_flag_is_passed_to_doctor(mocker, capsys, tmp_path):
     # --config is threaded straight into load_config (and resolve_config_file_path)
     # as a one-shot override; it is never routed through process env.
     target = tmp_path / "custom.yml"
-    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path)
+    cfg = make_config(folders=["f1"], data_dir=tmp_path)
     load = mocker.patch("src.cli.load_config", return_value=cfg)
 
     cli.main(["--config", str(target), "doctor"])
@@ -893,7 +912,7 @@ def test_config_flag_is_passed_to_doctor(mocker, capsys, tmp_path):
 def test_doctor_without_config_flag_passes_none(mocker, tmp_path):
     # Without --config, load_config receives config_path=None so the resolver falls
     # back to GDSTT_HOME/config.yml (or ./data/config.yml).
-    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path)
+    cfg = make_config(folders=["f1"], data_dir=tmp_path)
     load = mocker.patch("src.cli.load_config", return_value=cfg)
 
     cli.main(["doctor"])
@@ -910,7 +929,7 @@ def test_doctor_reports_preset_dag(mocker, capsys, tmp_path):
             depends_on=("transcript-cleanup",),
         ),
     )
-    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path, presets=presets)
+    cfg = make_config(folders=["f1"], data_dir=tmp_path, presets=presets)
     mocker.patch("src.cli.load_config", return_value=cfg)
 
     cli.main(["doctor"])
@@ -922,7 +941,7 @@ def test_doctor_reports_preset_dag(mocker, capsys, tmp_path):
 
 
 def test_doctor_reports_no_presets_when_none_enabled(mocker, capsys, tmp_path):
-    cfg = make_config(folder_ids=["f1"], data_dir=tmp_path, presets=())
+    cfg = make_config(folders=["f1"], data_dir=tmp_path, presets=())
     mocker.patch("src.cli.load_config", return_value=cfg)
 
     cli.main(["doctor"])

@@ -825,7 +825,8 @@ def run_once(
     cycle_skipped_size = 0
     cycle_folder_errors = 0
 
-    for folder_id in config.folder_ids:
+    for folder in config.folders:
+        folder_id = folder.folder_id
         listing_retry_state = _RetryState()
         try:
             items = _call_with_transient_retries(
@@ -902,7 +903,7 @@ def run_once(
             failed=cycle_failed,
             folder_errors=cycle_folder_errors,
         ),
-        len(config.folder_ids),
+        len(config.folders),
         cycle_pending,
         cycle_processed,
         cycle_failed,
@@ -920,8 +921,8 @@ def main(*, config_path: str | Path | None = None) -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     config = load_config(config_path=config_path)
-    if not config.folder_ids:
-        logger.error("folder_ids is empty; configure it in config.yml to start polling")
+    if not config.folders:
+        logger.error("folders is empty; configure it in config.yml to start polling")
         raise SystemExit(1)
 
     try:

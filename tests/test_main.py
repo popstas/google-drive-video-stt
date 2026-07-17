@@ -8,14 +8,22 @@ from google.auth.exceptions import RefreshError
 
 from src import main
 from src.auth import AuthError
-from src.config import Config
+from src.config import Config, EmployeeFolder
 from src.presets import BUILTIN_PRESETS, Preset
 from src.preset_pipeline import PresetResult
 from src.stt.base import STTError
 
 
+def _as_folders(entries) -> tuple[EmployeeFolder, ...]:
+    """Accept ids or EmployeeFolders, so folder-agnostic tests stay short."""
+    return tuple(
+        entry if isinstance(entry, EmployeeFolder) else EmployeeFolder(entry)
+        for entry in entries
+    )
+
+
 def make_config(
-    folder_ids=None,
+    folders=None,
     bitrate="96k",
     poll_interval=600,
     data_dir=Path("data"),
@@ -36,7 +44,7 @@ def make_config(
         # enabled preset when requested, and none otherwise.
         presets = BUILTIN_PRESETS if openai_keypoints else ()
     return Config(
-        folder_ids=folder_ids if folder_ids is not None else ["folderA"],
+        folders=_as_folders(folders if folders is not None else ["folderA"]),
         poll_interval=poll_interval,
         bitrate=bitrate,
         data_dir=data_dir,
@@ -747,7 +755,7 @@ def test_process_target_file_without_parent_raises(mocker):
 
 def test_run_once_iterates_all_folders_and_files(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1", "f2"])
+    cfg = make_config(folders=["f1", "f2"])
 
     listings = {
         "f1": [_item("v1", "a.mp4")],
@@ -770,7 +778,7 @@ def test_run_once_iterates_all_folders_and_files(mocker):
 
 def test_run_once_retries_transient_listing_error(mocker, caplog):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"])
+    cfg = make_config(folders=["f1"])
 
     list_mock = mocker.patch(
         "src.main.drive.list_folder_state",
@@ -792,7 +800,7 @@ def test_run_once_retries_transient_listing_error(mocker, caplog):
 
 def test_run_once_propagates_auth_error_from_listing(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"])
+    cfg = make_config(folders=["f1"])
 
     mocker.patch(
         "src.main.drive.list_folder_state",
@@ -805,7 +813,7 @@ def test_run_once_propagates_auth_error_from_listing(mocker):
 
 def test_run_once_propagates_auth_error_from_processing(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"])
+    cfg = make_config(folders=["f1"])
 
     mocker.patch(
         "src.main.drive.list_folder_state",
@@ -823,7 +831,7 @@ def test_run_once_propagates_auth_error_from_processing(mocker):
 def test_run_once_dry_run_does_not_process_items(mocker, caplog):
     service = MagicMock()
     cfg = make_config(
-        folder_ids=["folderA"],
+        folders=["folderA"],
         stt_provider="deepgram",
         deepgram_api_key="dg-x",
     )
@@ -845,7 +853,7 @@ def test_run_once_dry_run_does_not_process_items(mocker, caplog):
 def test_run_once_skips_large_pending_items_without_confirmation(mocker, caplog):
     service = MagicMock()
     cfg = make_config(
-        folder_ids=["folderA"],
+        folders=["folderA"],
         stt_provider="deepgram",
         deepgram_api_key="dg-x",
     )
@@ -864,7 +872,7 @@ def test_run_once_skips_large_pending_items_without_confirmation(mocker, caplog)
 
 def test_run_once_filters_already_processed(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"])
+    cfg = make_config(folders=["f1"])
 
     items = [
         _item("v1", "a.mp4", has_mp3=False),
@@ -881,7 +889,7 @@ def test_run_once_filters_already_processed(mocker):
 
 def test_run_once_with_stt_includes_files_missing_txt(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"], stt_provider="deepgram", deepgram_api_key="dg-x")
+    cfg = make_config(folders=["f1"], stt_provider="deepgram", deepgram_api_key="dg-x")
 
     items = [
         _item("v1", "a.mp4", has_mp3=True, has_txt=True, mp3_id="m1", mp3_name="a.mp3"),
@@ -898,7 +906,7 @@ def test_run_once_with_stt_includes_files_missing_txt(mocker):
 
 def test_run_once_continues_on_per_file_error(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"])
+    cfg = make_config(folders=["f1"])
 
     items = [
         _item("good1", "ok1.mp4"),
@@ -1103,7 +1111,7 @@ def test_process_item_summary_surfaces_cost_and_keypoints_usage(mocker, tmp_path
 
 def test_run_once_continues_on_listing_error(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["bad_folder", "good_folder"])
+    cfg = make_config(folders=["bad_folder", "good_folder"])
 
     def fake_list(svc, folder_id):
         if folder_id == "bad_folder":
@@ -1124,7 +1132,7 @@ def test_run_once_continues_on_listing_error(mocker):
 
 def test_run_once_no_folders_does_nothing(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=[])
+    cfg = make_config(folders=[])
 
     list_mock = mocker.patch("src.main.drive.list_folder_state")
     process_mock = mocker.patch("src.main.process_item")
@@ -1137,7 +1145,7 @@ def test_run_once_no_folders_does_nothing(mocker):
 
 def test_run_once_passes_config_to_process(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"], bitrate="192k")
+    cfg = make_config(folders=["f1"], bitrate="192k")
 
     mocker.patch(
         "src.main.drive.list_folder_state",
@@ -1152,7 +1160,7 @@ def test_run_once_passes_config_to_process(mocker):
 
 def test_run_once_logs_folder_and_cycle_summary(mocker, caplog):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"], stt_provider="deepgram", deepgram_api_key="dg-x")
+    cfg = make_config(folders=["f1"], stt_provider="deepgram", deepgram_api_key="dg-x")
 
     items = [
         _item("v1", "a.mp4", has_mp3=True, has_txt=False, mp3_id="m1", mp3_name="a.mp3"),
@@ -1175,7 +1183,7 @@ def test_run_once_logs_folder_and_cycle_summary(mocker, caplog):
 
 def test_run_once_aggregates_retry_total_from_process_telemetry(mocker, caplog):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"], stt_provider="deepgram", deepgram_api_key="dg-x")
+    cfg = make_config(folders=["f1"], stt_provider="deepgram", deepgram_api_key="dg-x")
 
     mocker.patch(
         "src.main.drive.list_folder_state",
@@ -1199,7 +1207,7 @@ def test_run_once_aggregates_retry_total_from_process_telemetry(mocker, caplog):
 
 
 def test_main_runs_loop_and_sleeps(mocker):
-    cfg = make_config(folder_ids=["f1"], poll_interval=42)
+    cfg = make_config(folders=["f1"], poll_interval=42)
     mocker.patch("src.main.load_config", return_value=cfg)
     service = MagicMock()
     mocker.patch("src.main.build_drive_service", return_value=service)
@@ -1223,7 +1231,7 @@ def test_main_runs_loop_and_sleeps(mocker):
 
 def test_run_once_propagates_refresh_error(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"])
+    cfg = make_config(folders=["f1"])
 
     mocker.patch(
         "src.main.drive.list_folder_state",
@@ -1239,7 +1247,7 @@ def test_run_once_propagates_refresh_error(mocker):
 
 def test_run_once_propagates_refresh_error_from_process(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"])
+    cfg = make_config(folders=["f1"])
 
     mocker.patch(
         "src.main.drive.list_folder_state",
@@ -1255,7 +1263,7 @@ def test_run_once_propagates_refresh_error_from_process(mocker):
 
 
 def test_main_exits_on_bootstrap_auth_error(mocker):
-    cfg = make_config(folder_ids=["f1"], poll_interval=1)
+    cfg = make_config(folders=["f1"], poll_interval=1)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch(
         "src.main.build_drive_service", side_effect=AuthError("malformed token")
@@ -1273,7 +1281,7 @@ def test_main_exits_on_bootstrap_auth_error(mocker):
 
 
 def test_main_exits_on_bootstrap_refresh_error(mocker):
-    cfg = make_config(folder_ids=["f1"], poll_interval=1)
+    cfg = make_config(folders=["f1"], poll_interval=1)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch(
         "src.main.build_drive_service", side_effect=RefreshError("revoked")
@@ -1288,7 +1296,7 @@ def test_main_exits_on_bootstrap_refresh_error(mocker):
 
 
 def test_main_exits_on_refresh_error(mocker):
-    cfg = make_config(folder_ids=["f1"], poll_interval=1)
+    cfg = make_config(folders=["f1"], poll_interval=1)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch("src.main.build_drive_service", return_value=MagicMock())
     mocker.patch("src.main.run_once", side_effect=RefreshError("revoked"))
@@ -1305,7 +1313,7 @@ def test_main_exits_on_refresh_error(mocker):
 
 
 def test_main_exits_on_auth_error(mocker):
-    cfg = make_config(folder_ids=["f1"], poll_interval=1)
+    cfg = make_config(folders=["f1"], poll_interval=1)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch("src.main.build_drive_service", return_value=MagicMock())
     mocker.patch("src.main.run_once", side_effect=AuthError("token gone"))
@@ -1319,7 +1327,7 @@ def test_main_exits_on_auth_error(mocker):
 
 
 def test_main_notifies_on_cycle_exception(mocker):
-    cfg = make_config(folder_ids=["f1"], poll_interval=1)
+    cfg = make_config(folders=["f1"], poll_interval=1)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch("src.main.build_drive_service", return_value=MagicMock())
 
@@ -2099,7 +2107,7 @@ def test_main_loop_idles_while_run_disabled_without_running(mocker):
     # `gdstt stop` keeps the loop alive but idle: run_once is never called while
     # run.enabled is false. The container stays up (no break/exit) so a Docker
     # `restart: unless-stopped` policy does not auto-resume processing.
-    cfg = make_config(folder_ids=["f1"], poll_interval=7)
+    cfg = make_config(folders=["f1"], poll_interval=7)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch("src.main.build_drive_service", return_value=MagicMock())
     mocker.patch("src.main.is_run_enabled", return_value=False)
@@ -2117,7 +2125,7 @@ def test_main_loop_idles_while_run_disabled_without_running(mocker):
 def test_main_loop_runs_while_enabled_and_idles_when_disabled(mocker):
     # Enabled twice (two cycles), then disabled (idle). run_once is called only
     # while enabled; once disabled the loop idles instead of exiting.
-    cfg = make_config(folder_ids=["f1"], poll_interval=5)
+    cfg = make_config(folders=["f1"], poll_interval=5)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch("src.main.build_drive_service", return_value=MagicMock())
     mocker.patch("src.main.is_run_enabled", side_effect=[True, True, False])
@@ -2136,7 +2144,7 @@ def test_main_does_not_enable_run_on_startup(mocker):
     # container restart instead of resuming on the next boot.
     import dataclasses
 
-    cfg = dataclasses.replace(make_config(folder_ids=["f1"]), run_enabled=False)
+    cfg = dataclasses.replace(make_config(folders=["f1"]), run_enabled=False)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch("src.main.build_drive_service", return_value=MagicMock())
     mocker.patch("src.main.is_run_enabled", return_value=False)

@@ -9,7 +9,7 @@ from src.config import Config
 
 def make_config(output_target="drive", output_dir=None) -> Config:
     return Config(
-        folder_ids=["folderA"],
+        folders=["folderA"],
         poll_interval=600,
         bitrate="96k",
         data_dir=Path("data"),

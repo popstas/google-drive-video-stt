@@ -66,7 +66,7 @@ def test_preset_dag_end_to_end_writes_each_artifact(tmp_path, monkeypatch):
 
     output_dir = tmp_path / "out"
     config = {
-        "folder_ids": [],
+        "folders": [],
         "data_dir": str(data_dir),
         "proxy_url": os.environ.get("PROXY_URL", "").strip(),
         "output": {"target": "folder", "dir": str(output_dir)},
