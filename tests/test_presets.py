@@ -16,7 +16,10 @@ from src.presets import (
 )
 
 
-_BUILTIN_NAMES_IN_ORDER = [p.name for p in BUILTIN_PRESETS]
+# `merge_presets` drops presets resolving to `enabled: false`, so the names a merge
+# yields are the *enabled* built-ins — opt-in ones like `meta` only appear once a
+# config turns them on.
+_BUILTIN_NAMES_IN_ORDER = [p.name for p in BUILTIN_PRESETS if p.enabled]
 _BUILTIN_NAMES = set(_BUILTIN_NAMES_IN_ORDER)
 
 
@@ -59,9 +62,21 @@ def test_builtin_meta_present():
     by_name = {p.name: p for p in BUILTIN_PRESETS}
     assert "meta" in by_name
     assert by_name["meta"].artifact_suffix == ".meta.md"
-    assert by_name["meta"].enabled is True
     assert by_name["meta"].prompt_file == "meta.md"
     assert by_name["meta"].instructions == load_packaged_prompt("meta.md")
+
+
+def test_builtin_meta_is_opt_in():
+    """`meta` ships disabled so it cannot appear in a config that predates it.
+
+    A default-enabled built-in is silently added to every existing config: an
+    STT-only deployment would trip the `openai.api_key` gate at load, and a config
+    that never wired `depends_on` would feed `meta` the raw diarized transcript.
+    """
+    by_name = {p.name: p for p in BUILTIN_PRESETS}
+    assert by_name["meta"].enabled is False
+    assert "meta" not in merge_presets(BUILTIN_PRESETS, None)
+    assert "meta" in merge_presets(BUILTIN_PRESETS, {"meta": {"enabled": True}})
 
 
 def test_builtin_meta_has_no_hardcoded_dependency():

@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock
 
+import pytest
 import requests
 
 from src import webhook
@@ -77,6 +78,26 @@ def test_uses_proxy_when_set(monkeypatch):
 
     _, kwargs = post.call_args
     assert kwargs["proxies"] == {"http": "http://proxy:3128", "https": "http://proxy:3128"}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:8080/h",
+        "http://127.0.0.1:8080/h",
+        "http://[::1]:8080/h",
+    ],
+)
+def test_bypasses_proxy_for_loopback_receiver(monkeypatch, url):
+    post = _post_mock(monkeypatch)
+
+    # A loopback receiver is unreachable through an egress proxy, and routing it there
+    # would push the token and transcript off-host — which is exactly what the
+    # loopback exemption in the plaintext warning promises will not happen.
+    notify_complete(url=url, proxy_url="http://proxy:3128", payload=PAYLOAD)
+
+    _, kwargs = post.call_args
+    assert kwargs["proxies"] == {"http": None, "https": None}
 
 
 def test_does_not_raise_on_http_error(monkeypatch, caplog):

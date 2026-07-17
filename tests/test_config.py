@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -45,7 +46,9 @@ def _load_config(tmp_path, data, *, validate_providers=False):
     return load_config(config_path=config_file, validate_providers=validate_providers)
 
 
-_BUILTIN_NAMES = {preset.name for preset in BUILTIN_PRESETS}
+# Only the enabled built-ins: `merge_presets` drops disabled ones, so opt-in
+# built-ins like `meta` are absent from a loaded config until it turns them on.
+_BUILTIN_NAMES = {preset.name for preset in BUILTIN_PRESETS if preset.enabled}
 
 
 def _disabled_builtins():
@@ -368,6 +371,51 @@ def test_missing_webhook_block_yields_blank_fields(tmp_path):
     assert cfg.webhook_token == ""
 
 
+def test_plaintext_webhook_url_warns(tmp_path, caplog):
+    """An http:// receiver leaks the bearer token and the transcript PII."""
+    with caplog.at_level(logging.WARNING, logger="src.config"):
+        cfg = _load_config(
+            tmp_path,
+            {
+                "stt": {"provider": "disabled"},
+                "webhook": {"url": "http://example.com/hook", "token": "secret"},
+            },
+        )
+    # Warn, don't raise: a plaintext receiver is unwise, not a config error.
+    assert cfg.webhook_url == "http://example.com/hook"
+    assert "clear text" in caplog.text
+    # The warning must not itself leak the token.
+    assert "secret" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/hook",
+        "http://localhost:8080/hook",
+        "http://127.0.0.1:8080/hook",
+        "",
+    ],
+)
+def test_safe_webhook_url_does_not_warn(tmp_path, caplog, url):
+    """https and loopback never cross the network in clear; neither does an unset URL."""
+    with caplog.at_level(logging.WARNING, logger="src.config"):
+        _load_config(
+            tmp_path,
+            {"stt": {"provider": "disabled"}, "webhook": {"url": url}},
+        )
+    assert "clear text" not in caplog.text
+
+
+@pytest.mark.parametrize("url", ["example.com/hook", "ftp://example.com/hook", "https://"])
+def test_undeliverable_webhook_url_rejected(tmp_path, url):
+    """Delivery is fire-and-forget and swallows errors, so a typo must fail at load."""
+    with pytest.raises(ValueError, match="absolute http"):
+        _load_config(
+            tmp_path, {"stt": {"provider": "disabled"}, "webhook": {"url": url}}
+        )
+
+
 def test_webhook_non_mapping_rejected(tmp_path):
     with pytest.raises(ValueError, match="webhook"):
         _load_config(
@@ -503,6 +551,9 @@ def test_meta_builtin_prompt_renders_allowed_tags(tmp_path):
         {
             "stt": {"provider": "disabled"},
             "tags": {"allowed": ["клиентская-консультация", "EB-1"]},
+            # `meta` is an opt-in built-in, so a config must enable it explicitly —
+            # as the generated config.yml does.
+            "presets": {"meta": {"enabled": True}},
         },
     )
     instructions = _preset_by_name(cfg, "meta").instructions
@@ -663,6 +714,41 @@ def test_stt_deepgram_rejects_missing_keyterms_file_when_enabled(tmp_path):
 
     with pytest.raises(ValueError, match="could not be read"):
         load_config(config_path=config_file)
+
+
+def test_stt_deepgram_missing_default_keyterms_file_degrades(tmp_path, caplog):
+    """The default file only exists once `config init` copies it, so a config that
+    predates it (or an operator who deleted the sample) must still start."""
+    with caplog.at_level(logging.WARNING, logger="src.config"):
+        cfg = _load_config(
+            tmp_path,
+            _deepgram_data({"keyterms_enabled": True}),
+            validate_providers=True,
+        )
+
+    assert cfg.deepgram_keyterms == ()
+    assert "continuing without keyterm prompting" in caplog.text
+
+
+def test_stt_deepgram_missing_default_keyterms_path_written_by_init_degrades(
+    tmp_path, caplog
+):
+    """`config init` writes the default path verbatim, so a config carrying it is not
+    making an explicit choice: a deleted sample must warn rather than hard-fail."""
+    with caplog.at_level(logging.WARNING, logger="src.config"):
+        cfg = _load_config(
+            tmp_path,
+            _deepgram_data(
+                {
+                    "keyterms_enabled": True,
+                    "keyterms_file": "deepgram-keyterms-example.txt",
+                }
+            ),
+            validate_providers=True,
+        )
+
+    assert cfg.deepgram_keyterms == ()
+    assert "continuing without keyterm prompting" in caplog.text
 
 
 def test_stt_deepgram_rejects_too_many_keyterms(tmp_path):
@@ -1501,17 +1587,21 @@ def test_init_config_validates_with_copied_keyterms(tmp_path):
     cfg = load_config(config_path=config_file)
 
     assert cfg.deepgram_keyterms_file == tmp_path / "deepgram-keyterms-example.txt"
-    assert "Kubernetes" in cfg.deepgram_keyterms
+    # The copied example carries no active terms, so a fresh install prompts
+    # Deepgram with nothing until the operator supplies their own list.
+    assert cfg.deepgram_keyterms == ()
 
 
 def test_packaged_keyterms_example_loads_and_points_at_the_live_list(tmp_path):
     text = load_packaged_keyterms()
 
-    # A short illustrative list, not a curated one: the operator's real terms belong
-    # in the gitignored data/deepgram-keyterms.txt, and the example says so.
+    # The operator's real terms belong in the gitignored data/deepgram-keyterms.txt,
+    # and the example says so.
     assert "data/deepgram-keyterms.txt" in text
+    # Illustration only: every term is commented out, so copying this file beside a
+    # config cannot bias transcription with sample terms the operator never chose.
     terms = [line for line in text.splitlines() if line.strip() and not line.startswith("#")]
-    assert 0 < len(terms) <= 10
+    assert terms == []
 
 
 def test_init_default_writes_to_gdstt_home(monkeypatch, tmp_path):
@@ -1747,11 +1837,56 @@ def test_config_get_masks_webhook_token(tmp_path):
     assert "***" in whole
     assert config_get("webhook.token", config_path=config_file) == "***"
 
-    # The URL is not a secret and stays visible.
+    # The URL may itself carry the credential, so only its host stays visible.
     config_set("webhook.url", "https://example.com/hooks/gdstt", config_path=config_file)
+    assert config_get("webhook.url", config_path=config_file) == "https://example.com/***"
+
+
+def test_config_get_redacts_webhook_url_query_and_credentials(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set(
+        "webhook.url",
+        "https://user:pw@example.com/hooks/gdstt?token=url-SECRET",
+        config_path=config_file,
+    )
+
+    # A receiver often authenticates via a token in the query string, so the URL is
+    # as sensitive as webhook.token; the host stays visible for confirmation.
+    whole = config_get(config_path=config_file)
+    assert "url-SECRET" not in whole
+    assert "pw" not in whole
+    assert "example.com" in whole
+
+    single = config_get("webhook.url", config_path=config_file)
+    assert single == "https://***@example.com/***?***"
+
+    block = config_get("webhook", config_path=config_file)
+    assert "url-SECRET" not in block
+
+    assert (
+        config_get("webhook.url", config_path=config_file, show_secrets=True)
+        == "https://user:pw@example.com/hooks/gdstt?token=url-SECRET"
+    )
+
+
+def test_config_get_redacts_webhook_url_path_secret(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set(
+        "webhook.url",
+        "https://hooks.slack.com/services/T00/B00/path-SECRET",
+        config_path=config_file,
+    )
+
+    # Slack/Discord/Teams put the whole credential in the path, with no query string
+    # and no userinfo — the shape that used to print verbatim.
+    assert "path-SECRET" not in config_get(config_path=config_file)
     assert (
         config_get("webhook.url", config_path=config_file)
-        == "https://example.com/hooks/gdstt"
+        == "https://hooks.slack.com/***"
+    )
+    assert (
+        config_get("webhook.url", config_path=config_file, show_secrets=True)
+        == "https://hooks.slack.com/services/T00/B00/path-SECRET"
     )
 
 

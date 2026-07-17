@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, replace
 from importlib.resources import files
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
 
@@ -387,14 +388,30 @@ def _parse_bool(raw: str, *, default: bool) -> bool:
     raise ValueError(f"Expected boolean value, got: {raw!r}")
 
 
-def _load_deepgram_keyterms(enabled: bool, keyterms_file: Path) -> tuple[str, ...]:
+def _load_deepgram_keyterms(
+    enabled: bool, keyterms_file: Path, *, explicit: bool = True
+) -> tuple[str, ...]:
     if not enabled:
         return ()
 
     try:
         raw_lines = keyterms_file.read_text(encoding="utf-8-sig").splitlines()
     except OSError as exc:
-        raise ValueError(f"DEEPGRAM_KEYTERMS_FILE could not be read: {keyterms_file}") from exc
+        # Keyterms default to on, but the default file only exists because
+        # `config init` copies the example beside the config. A config that predates
+        # that (or one whose operator deleted the sample, as the README suggests)
+        # must still start: keyterm prompting is an optimisation, not a requirement.
+        # An explicitly configured path that cannot be read stays a hard error.
+        if not explicit:
+            logger.warning(
+                "stt.deepgram.keyterms_file %s not found; continuing without keyterm "
+                "prompting. Run `gdstt config init` or set stt.deepgram.keyterms_file.",
+                keyterms_file,
+            )
+            return ()
+        raise ValueError(
+            f"stt.deepgram.keyterms_file could not be read: {keyterms_file}"
+        ) from exc
 
     keyterms = tuple(
         line.strip()
@@ -403,7 +420,7 @@ def _load_deepgram_keyterms(enabled: bool, keyterms_file: Path) -> tuple[str, ..
     )
     if len(keyterms) > DEEPGRAM_MAX_KEYTERMS:
         raise ValueError(
-            f"DEEPGRAM_KEYTERMS_FILE may contain at most {DEEPGRAM_MAX_KEYTERMS} "
+            f"stt.deepgram.keyterms_file may contain at most {DEEPGRAM_MAX_KEYTERMS} "
             f"keyterms, got: {len(keyterms)}"
         )
     return keyterms
@@ -507,6 +524,49 @@ def _yaml_bool(value: object, *, default: bool) -> bool:
     raise ValueError(f"Expected boolean value, got: {value!r}")
 
 
+def _validate_webhook_url(url: str) -> None:
+    """Reject a webhook URL that could never be delivered.
+
+    Delivery is fire-and-forget with no retry and ``notify_complete`` swallows every
+    exception, so a typo like a missing scheme would otherwise load clean and then
+    drop every notification with the only trace in a per-file warning. Unlike the
+    plaintext case below, this is a config error rather than an operator choice.
+    """
+    target = url.strip()
+    if not target:
+        return
+    parsed = urlparse(target)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(
+            "webhook.url must be an absolute http:// or https:// URL, got: "
+            f"{url!r}"
+        )
+
+
+def _warn_on_plaintext_webhook(url: str) -> None:
+    """Warn once at load when the completion webhook targets a plaintext receiver.
+
+    The payload carries PII (employee email plus the full transcript) and the request
+    carries the bearer token, so an ``http://`` receiver exposes all of it to any
+    on-path observer. Loopback is exempt — it never leaves the host — and this warns
+    rather than raises because internal plaintext receivers are a legitimate (if
+    unwise) operator choice, not a config error we should refuse to start on.
+    """
+    target = url.strip()
+    if not target:
+        return
+    parsed = urlparse(target)
+    if parsed.scheme != "http":
+        return
+    if (parsed.hostname or "") in {"localhost", "127.0.0.1", "::1"}:
+        return
+    logger.warning(
+        "webhook.url uses http://; the bearer token and the transcript payload "
+        "(including the employee email) will cross the network in clear text. "
+        "Use https:// unless the receiver is loopback."
+    )
+
+
 def _config_from_yaml(
     raw: dict,
     config_file: Path,
@@ -536,6 +596,8 @@ def _config_from_yaml(
 
     webhook_url = _yaml_str(webhook.get("url"))
     webhook_token = _yaml_str(webhook.get("token"))
+    _validate_webhook_url(webhook_url)
+    _warn_on_plaintext_webhook(webhook_url)
 
     (
         google_credentials,
@@ -599,9 +661,16 @@ def _config_from_yaml(
     deepgram_keyterms_enabled = _yaml_bool(
         deepgram.get("keyterms_enabled"), default=True
     )
+    deepgram_keyterms_raw = _yaml_str(deepgram.get("keyterms_file"))
+    # `config init` writes the default example path verbatim, so a present value that
+    # merely repeats the default is not an operator choice: it gets the same
+    # missing-file-warns-and-continues path as an omitted value.
+    deepgram_keyterms_explicit = (
+        bool(deepgram_keyterms_raw.strip())
+        and deepgram_keyterms_raw.strip() != DEEPGRAM_DEFAULT_KEYTERMS_FILE.as_posix()
+    )
     deepgram_keyterms_file = _resolve_relative_to(
-        _yaml_str(deepgram.get("keyterms_file"), str(DEEPGRAM_DEFAULT_KEYTERMS_FILE))
-        or str(DEEPGRAM_DEFAULT_KEYTERMS_FILE),
+        deepgram_keyterms_raw or str(DEEPGRAM_DEFAULT_KEYTERMS_FILE),
         base,
     )
     deepgram_keyterms: tuple[str, ...] = ()
@@ -657,6 +726,7 @@ def _config_from_yaml(
             deepgram_keyterms = _load_deepgram_keyterms(
                 deepgram_keyterms_enabled,
                 deepgram_keyterms_file,
+                explicit=deepgram_keyterms_explicit,
             )
 
     return Config(
@@ -1178,6 +1248,48 @@ MASKED_LEAF_KEYS: frozenset[str] = frozenset(
     {"client_secret", "refresh_token", "token", "access_token", "api_key", "bot_token"}
 )
 MASK = "***"
+# URL-valued keys whose credentials (userinfo), path and query string are redacted
+# unless --show-secrets is passed: a webhook receiver commonly authenticates via a
+# token, and it may sit in any of the three — Slack/Discord/Teams put it in the path,
+# others in the query — so the raw URL is as sensitive as `webhook.token`. Only the
+# scheme and host stay visible, which is enough to confirm the target.
+REDACTED_URL_KEY_PATHS: tuple[tuple[str, ...], ...] = (("webhook", "url"),)
+
+
+def _redact_url(value: object) -> object:
+    """Strip userinfo, path and query from a URL string, leaving scheme/host visible."""
+    if not isinstance(value, str) or not value.strip():
+        return value
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return MASK
+    netloc = parsed.netloc
+    if "@" in netloc:
+        netloc = f"{MASK}@{netloc.rsplit('@', 1)[1]}"
+    path = parsed.path
+    if path.strip("/"):
+        path = f"/{MASK}"
+    redacted = parsed._replace(
+        netloc=netloc,
+        path=path,
+        query=MASK if parsed.query else "",
+        fragment=MASK if parsed.fragment else "",
+    )
+    return redacted.geturl()
+
+
+def _redact_url_paths(data: dict, paths: tuple[tuple[str, ...], ...]) -> None:
+    """Redact each existing URL path in ``data`` in place."""
+    for path in paths:
+        node: object = data
+        for key in path[:-1]:
+            if not isinstance(node, dict):
+                node = None
+                break
+            node = node.get(key)
+        if isinstance(node, dict) and path[-1] in node:
+            node[path[-1]] = _redact_url(node[path[-1]])
 
 
 def _load_effective_yaml_dict(config_path: str | Path | None = None) -> tuple[Path, dict]:
@@ -1222,6 +1334,7 @@ def _mask_config_dict(data: dict) -> dict:
             node = node.get(key)
         if isinstance(node, dict) and path[-1] in node and node[path[-1]] not in (None, ""):
             node[path[-1]] = MASK
+    _redact_url_paths(masked, REDACTED_URL_KEY_PATHS)
     return masked
 
 
@@ -1280,11 +1393,23 @@ def _mask_get_value(parts: list[str], value: object) -> object:
     A secret scalar leaf (api keys, tokens, client_secret, refresh_token) is replaced
     wholesale; a mapping/list value (e.g. ``google.credentials`` / ``google.token``)
     is deep-masked so nested secret leaves are hidden while structure stays visible.
+    URL leaves that may carry a token (``webhook.url``) keep their target visible but
+    lose credentials and query string.
     """
     if isinstance(value, (dict, list)):
-        return _mask_value(value)
+        masked = _mask_value(value)
+        if isinstance(masked, dict):
+            suffixes = tuple(
+                path[len(parts) :]
+                for path in REDACTED_URL_KEY_PATHS
+                if tuple(parts) == path[: len(parts)] and len(path) > len(parts)
+            )
+            _redact_url_paths(masked, suffixes)
+        return masked
     if parts[-1] in MASKED_LEAF_KEYS and value not in (None, ""):
         return MASK
+    if tuple(parts) in REDACTED_URL_KEY_PATHS:
+        return _redact_url(value)
     return value
 
 

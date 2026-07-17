@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -1870,7 +1871,8 @@ def test_process_item_skips_presets_with_existing_artifacts(mocker, tmp_path):
         "video.mp4",
         artifact_ids={"transcript-cleanup": "c1", "keypoints": "k1"},
     )
-    main.process_item(service, item, "folderX", _two_preset_config())
+    config = _two_preset_config(webhook_url="https://hook.example/x")
+    main.process_item(service, item, "folderX", config)
 
     run_mock.assert_called_once()
     assert run_mock.call_args.kwargs["only"] == ["expertizeme-managers"]
@@ -1880,6 +1882,45 @@ def test_process_item_skips_presets_with_existing_artifacts(mocker, tmp_path):
     assert download_text.call_count == 2
     download_text.assert_any_call(service, "c1")
     download_text.assert_any_call(service, "k1")
+
+
+def test_process_item_skips_webhook_backfill_when_no_webhook_configured(
+    mocker, tmp_path
+):
+    """Without a receiver, don't pay a Drive read per earlier-cycle artifact.
+
+    The backfill's only consumer is the completion webhook, which no-ops on a blank
+    URL — so reading ``k1`` back would be a round-trip whose result is discarded.
+    The dependency read (``c1``) still happens: it feeds the preset that is re-run.
+    """
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    download_text = mocker.patch(
+        "src.main.drive.download_text", return_value="cleaned"
+    )
+    mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "expertizeme-managers": PresetResult(
+                name="expertizeme-managers", text="notes"
+            ),
+        },
+    )
+
+    item = _item(
+        "fid",
+        "video.mp4",
+        artifact_ids={"transcript-cleanup": "c1", "keypoints": "k1"},
+    )
+    main.process_item(service, item, "folderX", _two_preset_config(webhook_url=""))
+
+    download_text.assert_called_once_with(service, "c1")
 
 
 def test_process_item_skips_preset_stage_when_all_present(mocker, tmp_path):
@@ -1905,6 +1946,94 @@ def test_process_item_skips_preset_stage_when_all_present(mocker, tmp_path):
     main.process_item(service, item, "folderX", _two_preset_config())
 
     run_mock.assert_not_called()
+
+
+def test_process_item_backfills_webhook_when_every_preset_already_present(
+    mocker, tmp_path
+):
+    """A regenerated `.txt` still ships the earlier cycle's artifacts to the receiver.
+
+    When a file's `.txt` sibling is deleted but its preset artifacts survive, the
+    file is re-selected and re-transcribed, yet no preset is missing — so the stage
+    runs nothing. The webhook fires regardless (the `.txt` was uploaded), so it must
+    still carry the artifacts sitting on Drive rather than an empty map.
+    """
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mocker.patch("src.main.drive.download_text", side_effect=lambda svc, fid: fid)
+    run_mock = mocker.patch("src.main.preset_pipeline.run_presets")
+
+    item = _item(
+        "fid",
+        "video.mp4",
+        artifact_ids={
+            "transcript-cleanup": "c1",
+            "keypoints": "k1",
+            "expertizeme-managers": "e1",
+        },
+    )
+    config = _two_preset_config(webhook_url="https://hook.example/x")
+    telemetry = main.process_item(service, item, "folderX", config)
+
+    run_mock.assert_not_called()
+    assert telemetry is not None
+    assert telemetry.artifacts == {
+        "transcript-cleanup": "c1",
+        "keypoints": "k1",
+        "expertizeme-managers": "e1",
+    }
+
+
+def test_process_item_survives_backfill_read_failure(mocker, tmp_path):
+    """A failed backfill read degrades the payload instead of failing the file.
+
+    The backfill's reads exist only to enrich the webhook, and they run after every
+    artifact is already persisted. If a Drive read raised out of the stage, a file
+    that fully succeeded would be counted failed and alerted on — and it would never
+    reach the webhook at all, since the next cycle finds no preset missing.
+    """
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+
+    def flaky_download(svc, fid):
+        if fid == "k1":
+            raise RuntimeError("drive 404")
+        return fid
+
+    mocker.patch("src.main.drive.download_text", side_effect=flaky_download)
+    notify = mocker.patch("src.main.webhook.notify_complete")
+
+    item = _item(
+        "fid",
+        "video.mp4",
+        artifact_ids={
+            "transcript-cleanup": "c1",
+            "keypoints": "k1",
+            "expertizeme-managers": "e1",
+        },
+    )
+    config = _two_preset_config(webhook_url="https://hook.example/x")
+    telemetry = main.process_item(service, item, "folderX", config)
+
+    # The unreadable preset drops out; the rest still reach the receiver.
+    assert telemetry is not None
+    assert telemetry.artifacts == {
+        "transcript-cleanup": "c1",
+        "expertizeme-managers": "e1",
+    }
+    notify.assert_called_once()
 
 
 def test_process_item_raises_aggregated_error_but_persists_successes(mocker, tmp_path):
@@ -1970,11 +2099,13 @@ def test_process_item_reprocesses_missing_presets_from_existing_drive_txt(mocker
         txt_id="t1",
         artifact_ids={"transcript-cleanup": "c1", "keypoints": "k1"},
     )
-    main.process_item(service, item, "folderX", _two_preset_config())
+    config = _two_preset_config(webhook_url="https://hook.example/x")
+    main.process_item(service, item, "folderX", config)
 
     transcribe.assert_not_called()
     # t1 = the existing transcript; c1 = the reused transcript-cleanup artifact;
-    # k1 = the earlier keypoints, read back so the webhook payload is complete.
+    # k1 = the earlier keypoints, read back so the webhook payload is complete
+    # (the k1 read is why this config carries a webhook.url).
     assert download_text.call_count == 3
     download_text.assert_any_call(service, "t1")
     download_text.assert_any_call(service, "c1")
@@ -2207,6 +2338,7 @@ def test_run_preset_stage_forces_only_selected(mocker):
         reprocess=False,
         only_presets=["action-items"],
         usage={},
+        unproduced=set(),
     )
 
     kwargs = run_presets.call_args.kwargs
@@ -2330,7 +2462,10 @@ def test_process_item_telemetry_carries_artifacts_on_preset_refeed(mocker, tmp_p
         txt_id="t1",
         artifact_ids={"transcript-cleanup": "c1", "keypoints": "k1"},
     )
-    telemetry = main.process_item(service, item, "folderX", _two_preset_config())
+    # The backfill exists only to feed the receiver, so it is gated on a configured
+    # webhook — this test asserts the backfill, hence the URL.
+    config = _two_preset_config(webhook_url="https://hook.example/x")
+    telemetry = main.process_item(service, item, "folderX", config)
 
     assert telemetry is not None
     # The re-fed transcript, not a fresh STT pass.
@@ -2433,6 +2568,21 @@ def test_webhook_fired_once_with_employee_and_artifacts(mocker, tmp_path):
             },
         },
     }
+
+
+def test_webhook_withheld_while_a_preset_produced_no_artifact(mocker, tmp_path, caplog):
+    """A blank `ok` preset writes no artifact, so the file stays pending and is
+    re-selected every cycle. Firing here would re-POST the transcript forever — the
+    receiver gets no retry and has no dedupe key — so the webhook waits."""
+    notify = _mock_successful_run(mocker, tmp_path, meta_text="   ")
+
+    with caplog.at_level(logging.WARNING, logger="src.main"):
+        main.process_item(
+            MagicMock(), _item("fid", "video.mp4"), "folderX", _webhook_config()
+        )
+
+    notify.assert_not_called()
+    assert "Completion webhook withheld" in caplog.text
 
 
 def test_webhook_unknown_employee_sends_empty_strings(mocker, tmp_path):

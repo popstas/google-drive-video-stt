@@ -10,12 +10,14 @@ may carry a token.
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse
 
 import requests
 
 logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 10
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def notify_complete(
@@ -32,7 +34,16 @@ def notify_complete(
 
     bearer = token.strip()
     headers = {"Authorization": f"Bearer {bearer}"} if bearer else None
-    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+    if (urlparse(target).hostname or "") in LOOPBACK_HOSTS:
+        # A loopback receiver must never go through a proxy: the proxy could not reach
+        # it anyway, and routing it there would send the token and the transcript
+        # off-host, contradicting the loopback exemption in _warn_on_plaintext_webhook.
+        # None values also drop any proxy requests would otherwise take from the env.
+        proxies = {"http": None, "https": None}
+    elif proxy_url:
+        proxies = {"http": proxy_url, "https": proxy_url}
+    else:
+        proxies = None
 
     try:
         response = requests.post(

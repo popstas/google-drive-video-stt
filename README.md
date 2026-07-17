@@ -319,9 +319,9 @@ variable is read at runtime:
 | `stt.deepgram.audio_source` | `m4a_copy` | Audio sent to Deepgram: `m4a_copy`, `mp3_96k`, or `mp3_192k` |
 | `stt.deepgram.txt_formatter` | `word_speaker` | Deepgram TXT formatter: `word_speaker` or `utterance` |
 | `stt.deepgram.keyterms_enabled` | `true` | Enables Nova-3 keyterm prompting |
-| `stt.deepgram.keyterms_file` | `deepgram-keyterms-example.txt` | Keyterms file, one term per line, max 100. Resolved beside `config.yml`; point it at your own list (e.g. `data/deepgram-keyterms.txt`) |
+| `stt.deepgram.keyterms_file` | `deepgram-keyterms-example.txt` | Keyterms file, one term per line, max 100. Resolved beside `config.yml`; point it at your own list (e.g. `data/deepgram-keyterms.txt`). A missing default is a warning; a missing path you set explicitly is an error |
 | `tags.allowed` | (empty) | Allow-list the `meta` preset picks conversation tags from. Empty means `meta` returns no tags |
-| `webhook.url` | (empty) | Completion webhook endpoint. Empty disables it; a failure never fails the file |
+| `webhook.url` | (empty) | Completion webhook endpoint; must be an absolute `http://` or `https://` URL. Empty disables it; a failure never fails the file |
 | `webhook.token` | (empty) | Optional bearer token sent as `Authorization: Bearer <token>` |
 
 ## Speech-to-text
@@ -380,10 +380,12 @@ Keyterms are read from `stt.deepgram.keyterms_file`, one term per line. Blank li
 lines beginning with `#` are ignored. At most 100 keyterms are allowed, and they
 are sent only when `stt.deepgram.model=nova-3`.
 
-`gdstt config init` copies a short `deepgram-keyterms-example.txt` beside the
-config as a starting point — it is only an illustration, not a curated list. Keep
-your real keyterms machine-local and out of git (the repo gitignores
-`data/deepgram-keyterms.txt`), then point `stt.deepgram.keyterms_file` at it.
+`gdstt config init` copies a `deepgram-keyterms-example.txt` beside the config as a
+starting point. Its sample terms are commented out, so keyterm prompting stays
+inert until you supply your own — an uncurated sample left active would bias every
+transcript toward terms you never chose. Keep your real keyterms machine-local and
+out of git (the repo gitignores `data/deepgram-keyterms.txt`), then point
+`stt.deepgram.keyterms_file` at it.
 
 Sample output:
 
@@ -508,9 +510,26 @@ file — a bad LLM reply must never cost you a processed recording.
 
 Tune the vocabulary by editing `tags.allowed`; no code change is needed.
 
+`config init` enables `meta` for you. Unlike `keypoints`, it is **opt-in** for
+configs written before it existed — otherwise upgrading would silently add an
+OpenAI pass to every deployment, including STT-only ones that carry no
+`openai.api_key`. To turn it on in an existing `config.yml`, add it under
+`presets:` with the dependency wired, exactly as the generated config does:
+
+```yaml
+presets:
+  meta:
+    enabled: true
+    depends_on: [transcript-cleanup]
+    prompt_file: prompts/meta.md
+```
+
+Without `depends_on`, `meta` reads the raw diarized transcript instead of the
+cleaned one.
+
 ### Completion webhook
 
-When `webhook.url` is set, the service POSTs a JSON body once per file, on the
+When `webhook.url` is set, the service POSTs a JSON body per file, on the
 success path only, after every artifact has been written:
 
 ```json
@@ -533,6 +552,13 @@ preset's output appears under `artifacts` keyed by preset name — raw text, exc
 therefore extends the payload with no code change, so a consumer must tolerate new
 keys appearing.
 
+A file normally notifies once, when it is transcribed. It notifies **again** if it
+is later re-selected and produces preset output — after you add a preset to
+`config.yml`, or run `gdstt reprocess`. The repeat POST carries the file's full
+current artifact set, not just the new preset, so the latest delivery always wins.
+Receivers that must not double-record should treat `file.id` as the dedupe key and
+upsert on it.
+
 Set `webhook.token` to have the request carry `Authorization: Bearer <token>`.
 Delivery is **fire-and-forget**: an unreachable endpoint, a 4xx/5xx, or a timeout
 (10s) is logged as a warning and the file still counts as processed. There is no
@@ -540,7 +566,10 @@ retry. Failure logs record only the exception type, so the token and transcript
 never reach the log.
 
 The payload carries PII — the employee's email and the full transcript — so point
-`webhook.url` at an HTTPS endpoint and protect it with a token.
+`webhook.url` at an HTTPS endpoint and protect it with a token. A non-loopback
+`http://` URL logs a warning at startup: the token and the whole payload would
+cross the network in clear text. It is a warning rather than a hard error, since a
+plaintext receiver on a trusted internal network is a valid choice.
 
 ### Output destination
 

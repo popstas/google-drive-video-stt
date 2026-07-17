@@ -89,6 +89,13 @@ def test_extract_names_uppercase_x_is_a_middle_initial_not_a_separator():
     assert names == ["Malcolm X", "Alice"]
 
 
+def test_extract_names_uppercase_cyrillic_x_is_a_middle_initial_not_a_separator():
+    """Same as the latin "X" case: an uppercase cyrillic "Х" is an initial, so
+    splitting on it strands the real "и" conjunction as "и Алиса"."""
+    names = postprocess.extract_interlocutor_names("Малкольм Х и Алиса - 2026-01-01.mp4")
+    assert names == ["Малкольм Х", "Алиса"]
+
+
 def test_extract_names_and_separator_regression_guard():
     names = postprocess.extract_interlocutor_names(
         "Aleksandr Tikhonov and Oksana Ciciarelli - 2026_05_20 16_55 CEST - Recording.mp4"

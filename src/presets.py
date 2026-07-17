@@ -126,11 +126,18 @@ BUILTIN_PRESETS: tuple[Preset, ...] = (
         artifact_suffix=".keypoints.md",
         prompt_file="keypoints.md",
     ),
+    # Opt-in, unlike `keypoints`: a built-in that defaults to enabled is silently
+    # added to every config that predates it, which for `meta` means an STT-only
+    # deployment suddenly trips the "openai.api_key is required" gate, and a config
+    # that never wired `depends_on` feeds it the raw diarized transcript instead of
+    # the cleaned one. `_default_config_dict` writes `enabled: true` with the
+    # dependency, so a generated config still runs it.
     Preset(
         name="meta",
         instructions=META_INSTRUCTIONS,
         artifact_suffix=".meta.md",
         prompt_file="meta.md",
+        enabled=False,
     ),
 )
 

@@ -146,7 +146,11 @@ text) and `meta` (a `.meta.md` YAML-frontmatter artifact with a one-sentence
 `topic:` and `tags:` drawn from `tags.allowed`, parsed back by `src/meta.py`).
 Built-ins carry `depends_on=()` — a hardcoded dependency on a *config* preset like
 `transcript-cleanup` would make `validate_dag` reject every config that omits it;
-the default chain is wired in `_default_config_dict` instead. `config.yml` presets
+the default chain is wired in `_default_config_dict` instead. `meta` additionally
+ships `enabled=False`: a default-enabled built-in joins every config that predates
+it, which would trip the `openai.api_key` gate on an STT-only deployment and feed
+`meta` the raw diarized transcript wherever `depends_on` was never wired. The
+generated config turns it on explicitly. `config.yml` presets
 override built-ins field-by-field, add new presets, and disable a built-in with
 `enabled: false`. `validate_dag()` rejects unknown/disabled dependencies and cycles. If a preset fails, its dependents are skipped while
 independent branches still persist, then an aggregated error makes the file retry
@@ -162,8 +166,10 @@ For deterministic, agent-driven speaker correction, `src/relabel_transcript.py`
 while preserving each utterance's words (whitespace is normalized).
 
 **Completion webhook** (`src/webhook.py`): when `webhook.url` is set, `process_item`
-POSTs `{file, employee, transcript, artifacts}` once per file on the success path
-only, after every artifact is written. The employee comes from
+POSTs `{file, employee, transcript, artifacts}` on the success path only, after
+every artifact is written — normally once per file, and again if a later cycle
+re-feeds its transcript to produce a newly added preset (`file.id` is the
+receiver's dedupe key). The employee comes from
 `config.folder_by_id(folder_id)`; `artifacts` carries each preset's raw text keyed
 by name, except `meta`, which `meta.parse_meta` turns into `{topic, tags}`.
 `notify_complete` mirrors `notify.notify_error`'s contract and never raises: a
@@ -231,8 +237,10 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   per employee, `name`/`email` optional. The old `folder_ids: [str]` is **removed**:
   a config still carrying that key raises a setup `ValueError` quoting the `folders`
   shape (the presence of the key is the trigger, so an empty `folder_ids: []` fails
-  too). `Config.folder_ids` survives as a read-only property for iteration sites,
-  and `Config.folder_by_id()` resolves an entry back to its `EmployeeFolder`.
+  too). Iteration sites read `folder_id` off `config.folders` directly; there is no
+  `Config.folder_ids` compatibility shim (it would revive the exact name the
+  migration error bans). `Config.folder_by_id()` resolves an entry back to its
+  `EmployeeFolder`.
 - `tags.allowed` is the only vocabulary the `meta` preset may tag with. It reaches
   prompts through the `{{allowed_tags}}` placeholder rendered at load time by
   `_resolve_prompt_text` (inline, file, and packaged prompts alike), and is enforced
@@ -240,8 +248,9 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   degrades to `Meta(topic="", tags=())` on a missing/malformed block — a bad LLM
   reply must not fail the file.
 - The completion webhook (`webhook.url`, optional `webhook.token`) is
-  fire-and-forget: it fires once per file on the success path only, and any failure
-  is logged without failing the file. Its payload carries PII (employee email, full
+  fire-and-forget: it fires on the success path only (once per transcription, plus
+  once per later preset-backfill cycle), and any failure is logged without failing
+  the file. Its payload carries PII (employee email, full
   transcript), so failure logs must never include the body or the token.
 - `output.target` selects where artifacts land: `drive` (siblings) or `folder`
   (`output.dir`, required when `folder`).

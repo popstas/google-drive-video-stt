@@ -16,6 +16,10 @@
 - Replace folder_ids with folders in Config
 - Fix ExpertizeMe filename parsing in extract_interlocutor_names
 
+### Bug Fixes
+
+- review: Complete webhook payloads and harden name parsing
+
 ### Documentation
 
 - Add plan for employee folders, meta preset, and webhooks
