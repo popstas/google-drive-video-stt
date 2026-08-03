@@ -1,7 +1,14 @@
 # talks-reducer threshold benchmark — design
 
 Date: 2026-08-03
-Status: approved design, ready for implementation
+Status: executed — results in `data/results/threshold-tests/report.md` (gitignored)
+
+**Outcome:** recommended level is `0.03`. The decision rule below did **not**
+survive contact with the data — no level scored zero `major`, because feeding the
+LLM the 30 *largest* divergences marks nearly everything major at every level.
+The experiment switched to a random sample plus deterministic volume metrics; the
+report explains the substitution. The rest of this document is the design as
+approved beforehand, kept unedited as the record of what was pre-registered.
 
 ## Problem
 
