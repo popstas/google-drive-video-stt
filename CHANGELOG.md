@@ -18,6 +18,7 @@
 
 ### Bug Fixes
 
+- Harden webhooks, config validation, and the keyterms example
 - review: Complete webhook payloads and harden name parsing
 
 ### Documentation
