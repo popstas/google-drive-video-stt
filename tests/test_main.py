@@ -2945,3 +2945,153 @@ def test_process_target_ignores_the_mark_and_the_gate(monkeypatch, gate_config):
     process_item.assert_called_once()
     assert marked == []
     assert process_item.call_args.kwargs.get("booking_decision") is None
+
+
+# --- Planfix comment ------------------------------------------------------------
+
+
+@pytest.fixture
+def planfix_config(gate_config):
+    return replace(
+        gate_config,
+        planfix_create_comment_url="https://crm.example.com/planfix_create_comment",
+        planfix_token="planfix-token",
+        planfix_presets=("keypoints",),
+    )
+
+
+def test_planfix_description_concatenates_presets_in_order():
+    description = main._planfix_description(
+        {"keypoints": "Задачи: раз", "action-items": "Сделать два", "meta": "topic: x"},
+        ("keypoints", "action-items"),
+    )
+
+    assert description == "## keypoints\nЗадачи: раз\n\n## action-items\nСделать два"
+
+
+def test_planfix_description_skips_presets_without_an_artifact():
+    description = main._planfix_description(
+        {"keypoints": "Задачи: раз"}, ("keypoints", "action-items")
+    )
+
+    assert description == "## keypoints\nЗадачи: раз"
+
+
+def test_planfix_description_is_blank_when_nothing_matched():
+    assert main._planfix_description({"meta": "topic: x"}, ("keypoints",)) == ""
+
+
+def test_comment_is_sent_for_a_matched_recording(monkeypatch, planfix_config):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.planfix, "send_comment", send)
+    marked = MagicMock()
+    monkeypatch.setattr(main.drive, "set_file_app_properties", marked)
+
+    main._send_planfix_comment(
+        MagicMock(), gate_item("v1"), "v1", planfix_config,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_called_once()
+    assert send.call_args.kwargs["task_id"] == "851030"
+    assert send.call_args.kwargs["description"] == "## keypoints\nЗадачи: раз"
+    marked.assert_called_once()
+    assert marked.call_args[0][2] == {"planfix_comment_task_id": "851030"}
+
+
+def test_comment_is_not_sent_twice(monkeypatch, planfix_config):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.planfix, "send_comment", send)
+
+    main._send_planfix_comment(
+        MagicMock(),
+        gate_item("v1", planfix_comment_task_id="851030"),
+        "v1", planfix_config, {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_not_called()
+
+
+def test_comment_is_not_sent_for_an_unmatched_recording(monkeypatch, planfix_config):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.planfix, "send_comment", send)
+
+    main._send_planfix_comment(
+        MagicMock(), gate_item("v1"), "v1", planfix_config,
+        {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+    )
+
+    send.assert_not_called()
+
+
+def test_comment_is_not_sent_when_the_url_is_blank(monkeypatch, planfix_config):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.planfix, "send_comment", send)
+    unconfigured = replace(planfix_config, planfix_create_comment_url="")
+
+    main._send_planfix_comment(
+        MagicMock(), gate_item("v1"), "v1", unconfigured,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_not_called()
+
+
+def test_failed_comment_notifies_telegram_and_leaves_no_marker(
+    monkeypatch, planfix_config
+):
+    send = MagicMock(return_value=False)
+    monkeypatch.setattr(main.planfix, "send_comment", send)
+    marked = MagicMock()
+    monkeypatch.setattr(main.drive, "set_file_app_properties", marked)
+    notified = MagicMock()
+    monkeypatch.setattr(main.notify, "notify_error", notified)
+
+    main._send_planfix_comment(
+        MagicMock(), gate_item("v1"), "v1", planfix_config,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_called_once()
+    # No marker means `gdstt reprocess` can resend it.
+    marked.assert_not_called()
+    notified.assert_called_once()
+
+
+def test_process_item_sends_the_comment_on_the_success_path(mocker, tmp_path):
+    """Copy of ``test_webhook_fired_once_with_employee_and_artifacts``: same arrange,
+    with `_send_planfix_comment` mocked and `booking_decision` passed through."""
+    _mock_successful_run(mocker, tmp_path)
+    sent = MagicMock()
+    mocker.patch.object(main, "_send_planfix_comment", sent)
+
+    main.process_item(
+        MagicMock(),
+        _item("fid", "video.mp4"),
+        "folderX",
+        _webhook_config(),
+        booking_decision=MATCHED_DECISION,
+    )
+
+    sent.assert_called_once()
+
+
+def test_process_item_withholds_the_comment_when_a_preset_produced_nothing(
+    mocker, tmp_path
+):
+    """Copy of ``test_webhook_withheld_while_a_preset_produced_no_artifact``: same
+    arrange (a blank ``meta`` preset), with `_send_planfix_comment` mocked and
+    `booking_decision` passed through."""
+    _mock_successful_run(mocker, tmp_path, meta_text="   ")
+    sent = MagicMock()
+    mocker.patch.object(main, "_send_planfix_comment", sent)
+
+    main.process_item(
+        MagicMock(),
+        _item("fid", "video.mp4"),
+        "folderX",
+        _webhook_config(),
+        booking_decision=MATCHED_DECISION,
+    )
+
+    sent.assert_not_called()

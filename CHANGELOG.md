@@ -5,6 +5,7 @@
 
 ### Features
 
+- Gate the polling loop on booked calls
 - Resolve booking matches and mark unmatched recordings
 - Add the inbound call-booking receiver
 - Add the Planfix comment client

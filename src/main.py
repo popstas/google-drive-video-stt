@@ -20,6 +20,7 @@ from src import (
     meta as meta_module,
     notify,
     output,
+    planfix,
     postprocess,
     preset_pipeline,
     webhook,
@@ -510,6 +511,79 @@ def _webhook_payload(
     }
 
 
+def _planfix_description(
+    artifacts: dict[str, str], preset_names: tuple[str, ...]
+) -> str:
+    """Concatenate the configured preset artifacts into one comment body.
+
+    Presets are joined in configured order, each under its own heading, and a preset
+    with no artifact is skipped rather than emitting an empty section.
+    """
+    sections = [
+        f"## {name}\n{artifacts[name].strip()}"
+        for name in preset_names
+        if artifacts.get(name, "").strip()
+    ]
+    return "\n\n".join(sections)
+
+
+def _send_planfix_comment(
+    service: Any,
+    item: dict,
+    file_id: str,
+    config: Config,
+    artifacts: dict[str, str],
+    booking_decision: booking_gate.BookingDecision,
+) -> None:
+    """Post the meeting summary into the matched Planfix task, exactly once.
+
+    `process_item` can legitimately reach its success path more than once per file — a
+    later cycle that backfills a newly configured preset re-feeds the transcript — so
+    the `planfix_comment_task_id` marker, written only after a successful POST, is what
+    keeps a second pass from posting a duplicate comment into the task.
+    """
+    if not booking_decision.is_matched:
+        return
+    if not config.planfix_create_comment_url:
+        return
+    if item.get("planfix_comment_task_id"):
+        logger.debug("Planfix comment already sent for %s, skipping", file_id)
+        return
+
+    description = _planfix_description(artifacts, config.planfix_presets)
+    if not description:
+        logger.warning(
+            "No configured Planfix preset produced text for %s; nothing to comment",
+            file_id,
+        )
+        return
+
+    sent = planfix.send_comment(
+        url=config.planfix_create_comment_url,
+        token=config.planfix_token,
+        proxy_url=config.proxy_url,
+        task_id=booking_decision.task_id,
+        description=description,
+    )
+    if sent:
+        drive.set_file_app_properties(
+            service,
+            file_id,
+            {drive.PLANFIX_COMMENT_TASK_ID_PROPERTY: booking_decision.task_id},
+        )
+        return
+
+    # Unlike the completion webhook, a lost CRM comment is invisible to a human, so it
+    # escalates. No marker is written, so `gdstt reprocess` can resend it.
+    notify.notify_error(
+        f"Failed to create the Planfix comment on task {booking_decision.task_id} "
+        f"for {item.get('file', {}).get('name')}; rerun `gdstt reprocess {file_id}`",
+        telegram_bot_token=config.telegram_bot_token,
+        telegram_chat_id=config.telegram_chat_id,
+        proxy_url=config.proxy_url,
+    )
+
+
 def process_item(
     service: Any,
     item: dict,
@@ -731,6 +805,15 @@ def process_item(
             )
         except Exception as exc:
             logger.warning("Completion webhook failed: %s", type(exc).__name__)
+
+        try:
+            _send_planfix_comment(
+                service, item, file_id, config, artifacts, booking_decision
+            )
+        except Exception as exc:
+            # A file that transcribed and uploaded must count as processed even if the
+            # CRM hand-off misbehaves.
+            logger.warning("Planfix comment failed: %s", type(exc).__name__)
 
     return _ProcessTelemetry(
         provider=provider,
