@@ -16,6 +16,13 @@ from src.presets import (
 )
 
 
+# `merge_presets` drops presets resolving to `enabled: false`, so the names a merge
+# yields are the *enabled* built-ins — opt-in ones like `meta` only appear once a
+# config turns them on.
+_BUILTIN_NAMES_IN_ORDER = [p.name for p in BUILTIN_PRESETS if p.enabled]
+_BUILTIN_NAMES = set(_BUILTIN_NAMES_IN_ORDER)
+
+
 # --- suffix derivation ------------------------------------------------------
 
 
@@ -49,6 +56,47 @@ def test_builtin_keypoints_present():
     assert by_name["keypoints"].artifact_suffix == ".keypoints.md"
     assert by_name["keypoints"].enabled is True
     assert by_name["keypoints"].prompt_file == "keypoints.md"
+
+
+def test_builtin_meta_present():
+    by_name = {p.name: p for p in BUILTIN_PRESETS}
+    assert "meta" in by_name
+    assert by_name["meta"].artifact_suffix == ".meta.md"
+    assert by_name["meta"].prompt_file == "meta.md"
+    assert by_name["meta"].instructions == load_packaged_prompt("meta.md")
+
+
+def test_builtin_meta_is_opt_in():
+    """`meta` ships disabled so it cannot appear in a config that predates it.
+
+    A default-enabled built-in is silently added to every existing config: an
+    STT-only deployment would trip the `openai.api_key` gate at load, and a config
+    that never wired `depends_on` would feed `meta` the raw diarized transcript.
+    """
+    by_name = {p.name: p for p in BUILTIN_PRESETS}
+    assert by_name["meta"].enabled is False
+    assert "meta" not in merge_presets(BUILTIN_PRESETS, None)
+    assert "meta" in merge_presets(BUILTIN_PRESETS, {"meta": {"enabled": True}})
+
+
+def test_builtin_meta_has_no_hardcoded_dependency():
+    # Like `keypoints`, the built-in carries no `depends_on`: `transcript-cleanup`
+    # is a config preset, so wiring the dependency into code would make every
+    # config that omits it fail `validate_dag`. The chain is declared in the
+    # generated config instead (see `_default_config_dict`).
+    by_name = {p.name: p for p in BUILTIN_PRESETS}
+    assert by_name["meta"].depends_on == ()
+
+
+def test_meta_prompt_asset_is_packaged():
+    assert "meta.md" in presets_module.PACKAGED_PROMPT_ASSETS
+
+
+def test_load_packaged_prompt_returns_meta_text():
+    text = load_packaged_prompt("meta.md")
+    assert "topic:" in text
+    assert "tags:" in text
+    assert "{{allowed_tags}}" in text
 
 
 # --- packaged prompt assets -------------------------------------------------
@@ -103,7 +151,7 @@ def test_preset_accepts_prompt_file_field():
 
 def test_merge_with_no_config_returns_builtins():
     merged = merge_presets(BUILTIN_PRESETS, None)
-    assert set(merged) == {"keypoints"}
+    assert set(merged) == _BUILTIN_NAMES
     assert merged["keypoints"].instructions == INSTRUCTIONS
 
 
@@ -126,7 +174,7 @@ def test_merge_adds_new_preset():
         BUILTIN_PRESETS,
         {"expertizeme-managers": {"instructions": "summarize for managers"}},
     )
-    assert set(merged) == {"keypoints", "expertizeme-managers"}
+    assert set(merged) == _BUILTIN_NAMES | {"expertizeme-managers"}
     new = merged["expertizeme-managers"]
     assert new.instructions == "summarize for managers"
     assert new.artifact_suffix == ".expertizeme-managers.md"
@@ -160,7 +208,8 @@ def test_merge_new_preset_keeps_instructions_over_prompt_file():
 
 def test_merge_disables_builtin():
     merged = merge_presets(BUILTIN_PRESETS, {"keypoints": {"enabled": False}})
-    assert merged == {}
+    assert "keypoints" not in merged
+    assert set(merged) == _BUILTIN_NAMES - {"keypoints"}
 
 
 def test_merge_disables_new_preset():
@@ -168,7 +217,7 @@ def test_merge_disables_new_preset():
         BUILTIN_PRESETS,
         {"extra": {"instructions": "x", "enabled": False}},
     )
-    assert set(merged) == {"keypoints"}
+    assert set(merged) == _BUILTIN_NAMES
 
 
 def test_merge_preserves_order_builtins_then_new():
@@ -182,7 +231,11 @@ def test_merge_preserves_order_builtins_then_new():
             },
         },
     )
-    assert list(merged) == ["keypoints", "transcript-cleanup", "expertizeme-managers"]
+    assert list(merged) == [
+        *_BUILTIN_NAMES_IN_ORDER,
+        "transcript-cleanup",
+        "expertizeme-managers",
+    ]
 
 
 def test_merge_batch_and_model_fallback_none():

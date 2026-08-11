@@ -1,6 +1,36 @@
 # Changelog
 
 
+## Unreleased
+
+### Features
+
+- Update documentation for folders, meta, and webhooks
+- Verify acceptance criteria and fix docker smoke fallout
+- Collapse the three deepgram-keyterms.txt copies into one example
+- Add the completion webhook
+- Return preset outputs from _run_preset_stage to process_item
+- Add the meta preset (topic + tags) with allow-list injection
+- Read tags.allowed into Config and stop dropping it
+- Wire folders through the runtime and CLI
+- Replace folder_ids with folders in Config
+- Fix ExpertizeMe filename parsing in extract_interlocutor_names
+
+### Bug Fixes
+
+- Harden webhooks, config validation, and the keyterms example
+- review: Complete webhook payloads and harden name parsing
+
+### Documentation
+
+- Record the talks-reducer threshold result
+- Design the talks-reducer threshold benchmark
+- Add plan for employee folders, meta preset, and webhooks
+
+### Build
+
+- Point pre-commit changelog hook at .venv/bin/git-cliff
+
 ## v0.2.1 - 2026-07-09
 
 ### Build

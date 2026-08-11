@@ -9,7 +9,7 @@ from src.stt.deepgram_provider import DeepgramProvider
 
 def test_get_provider_creates_deepgram_provider():
     cfg = Config(
-        folder_ids=[],
+        folders=[],
         poll_interval=600,
         bitrate="96k",
         data_dir=Path("data"),

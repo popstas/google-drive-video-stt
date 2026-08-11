@@ -13,7 +13,7 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 import requests
 
-from src import drive, notify, output, postprocess, preset_pipeline
+from src import drive, meta as meta_module, notify, output, postprocess, preset_pipeline, webhook
 from src.auth import AuthError, build_drive_service
 from src.config import Config, is_run_enabled, load_config
 from src.extractor import extract_m4a_copy, extract_mp3
@@ -42,6 +42,8 @@ class _ProcessTelemetry:
     txt_uploaded: bool = False
     cost_usd: dict[str, float | None] = field(default_factory=dict)
     usage: dict[str, dict[str, int]] = field(default_factory=dict)
+    transcript: str = ""
+    artifacts: dict[str, str] = field(default_factory=dict)
 
 
 def _http_status_code(exc: Exception) -> int | None:
@@ -158,10 +160,18 @@ def _run_preset_stage(
     artifact_ids: dict[str, str],
     reprocess: bool,
     usage: dict[str, dict[str, int]],
+    unproduced: set[str],
     local_artifact_paths: dict[str, Path] | None = None,
     only_presets: list[str] | None = None,
-) -> None:
+) -> dict[str, str]:
     """Run the enabled preset DAG over a transcript and persist each new artifact.
+
+    Returns every enabled preset's text keyed by preset name — freshly produced ones
+    plus any that completed on an earlier cycle, read back from their artifacts — so
+    callers (the completion webhook) ship a file's full set of outputs even though
+    only the still-missing presets were run. The earlier-cycle backfill costs a Drive
+    read per artifact and only the webhook consumes it, so it is skipped entirely
+    when ``webhook.url`` is unset; the return is then this cycle's presets alone.
 
     Only presets still missing an artifact are produced (``reprocess`` re-runs them
     all, overwriting in place). Successful, non-empty outputs are written as soon as
@@ -170,10 +180,14 @@ def _run_preset_stage(
     re-fed without re-running STT) so only the still-missing presets retry. Folder
     targets write preset artifacts to local disk, which ``list_folder_state`` does
     not track, so their preset stage runs once per transcription only.
+
+    ``unproduced`` collects presets that ran without error but returned blank text, so
+    no artifact was written. Those files come back next cycle, so the caller must not
+    report this pass as the file's completion.
     """
     preset_by_name = {preset.name: preset for preset in config.presets}
     if not preset_by_name:
-        return
+        return {}
     local_artifact_paths = local_artifact_paths or {}
     existing_names = set(artifact_ids) | set(local_artifact_paths)
     if only_presets is not None:
@@ -184,29 +198,70 @@ def _run_preset_stage(
         missing = list(preset_by_name)
     else:
         missing = [name for name in preset_by_name if name not in existing_names]
-    if not missing:
-        return
 
     # Reuse dependency artifacts already persisted on Drive so a retry re-runs
     # only the still-missing presets (per the plan): a dependency that completed
     # on an earlier cycle is re-fed from its artifact instead of being re-run,
     # which avoids extra OpenAI spend and keeps dependent siblings consistent with
     # the dependency output that produced the earlier ones.
+    def load_existing(name: str) -> str | None:
+        existing_id = artifact_ids.get(name)
+        if existing_id is not None:
+            return _call_with_transient_retries(
+                lambda: drive.download_text(service, existing_id),
+                description=f"download {name} artifact for {mp4_name}",
+            )
+        local_path = local_artifact_paths.get(name)
+        if local_path is not None:
+            return local_path.read_text(encoding="utf-8")
+        return None
+
+    # Every webhook POST carries a file's full artifact set, so a preset that
+    # succeeded on an earlier cycle — and is therefore not re-run here — still has
+    # to reach the receiver.
+    # Backfilling it costs a Drive download apiece, and the completion webhook is
+    # this data's only consumer, so skip the reads outright when no receiver is
+    # configured (``notify_complete`` would discard them on its blank-URL return).
+    # These reads only enrich the payload, so they must never fail the file: every
+    # artifact is already persisted by the time this runs, and raising here would
+    # both alert on a good record and — since the next cycle sees no missing presets
+    # — leave the webhook permanently undelivered. Degrade to a partial payload.
+    def backfill(
+        produced: dict[str, str], precomputed: dict[str, str]
+    ) -> dict[str, str]:
+        if not config.webhook_url.strip():
+            return produced
+        for name in preset_by_name:
+            if name in produced:
+                continue
+            text = precomputed.get(name)
+            if text is None:
+                try:
+                    text = load_existing(name)
+                except Exception as exc:
+                    logger.warning(
+                        "Webhook backfill skipped [preset=%s, file=%s]: %s",
+                        name,
+                        mp4_name,
+                        type(exc).__name__,
+                    )
+                    continue
+            if text is not None and text.strip():
+                produced[name] = text
+        return produced
+
+    if not missing:
+        # Every preset already has an artifact, so nothing is re-run — but the file
+        # can still reach the webhook (its ``.txt`` was regenerated this cycle), and
+        # the receiver expects the full set, so the artifacts are read back.
+        return backfill({}, {})
+
     precomputed: dict[str, str] = {}
     if not reprocess:
         for dep in preset_pipeline.dependency_names(config.presets, missing):
-            existing_id = artifact_ids.get(dep)
-            if existing_id is not None:
-                precomputed[dep] = _call_with_transient_retries(
-                    lambda existing_id=existing_id: drive.download_text(
-                        service, existing_id
-                    ),
-                    description=f"download {dep} artifact for {mp4_name}",
-                )
-                continue
-            local_path = local_artifact_paths.get(dep)
-            if local_path is not None:
-                precomputed[dep] = local_path.read_text(encoding="utf-8")
+            text = load_existing(dep)
+            if text is not None:
+                precomputed[dep] = text
 
     results = preset_pipeline.run_presets(
         transcript,
@@ -226,7 +281,19 @@ def _run_preset_stage(
     ]
     for name in ordered_names:
         result = results.get(name)
-        if result is None or not result.ok or not result.text.strip():
+        if result is None or not result.ok:
+            continue
+        if not result.text.strip():
+            # Blank output writes no artifact (by design — a blank doc is worthless),
+            # so the preset stays "missing" and the file is re-selected next cycle.
+            # Record it: the webhook must not treat this pass as the file's completion
+            # and re-POST the transcript on every cycle from here on.
+            unproduced.add(name)
+            logger.warning(
+                "Preset %s returned empty output for %s; no artifact written",
+                name,
+                mp4_name,
+            )
             continue
         if result.usage:
             usage[f"openai_{name}"] = dict(result.usage)
@@ -245,6 +312,13 @@ def _run_preset_stage(
     aggregated = preset_pipeline.aggregate_error(results)
     if aggregated:
         raise RuntimeError(aggregated)
+
+    produced = {
+        name: result.text
+        for name, result in results.items()
+        if result.ok and result.text.strip()
+    }
+    return backfill(produced, precomputed)
 
 
 def _prepare_deepgram_audio(mp4_path: Path, config: Config) -> Path:
@@ -393,6 +467,39 @@ def _retry_count_from_exception(exc: Exception) -> int:
     return retry_count if isinstance(retry_count, int) else 0
 
 
+def _webhook_payload(
+    file_id: str,
+    file_name: str,
+    folder_id: str,
+    config: Config,
+    transcript: str,
+    artifacts: dict[str, str],
+) -> dict:
+    """Build the completion-webhook body.
+
+    Non-``meta`` presets pass through as raw text keyed by preset name, so adding a
+    preset to config.yml extends the payload with no code change. ``meta`` is parsed
+    into ``{topic, tags}`` (tags filtered to the configured allow-list). An unknown
+    employee sends empty strings rather than omitting the key.
+    """
+    employee = config.folder_by_id(folder_id)
+    payload_artifacts: dict[str, object] = dict(artifacts)
+    meta_text = artifacts.get("meta")
+    if meta_text is not None:
+        parsed = meta_module.parse_meta(meta_text, config.tags_allowed)
+        payload_artifacts["meta"] = {"topic": parsed.topic, "tags": list(parsed.tags)}
+
+    return {
+        "file": {"id": file_id, "name": file_name, "folder_id": folder_id},
+        "employee": {
+            "name": employee.name if employee else "",
+            "email": employee.email if employee else "",
+        },
+        "transcript": transcript,
+        "artifacts": payload_artifacts,
+    }
+
+
 def process_item(
     service: Any,
     item: dict,
@@ -445,6 +552,9 @@ def process_item(
     usage: dict[str, dict[str, int]] = {}
     mp3_uploaded = False
     txt_uploaded = False
+    transcript = ""
+    artifacts: dict[str, str] = {}
+    unproduced: set[str] = set()
 
     try:
         with tempfile.TemporaryDirectory(prefix="gd-stt-") as tmp:
@@ -507,8 +617,9 @@ def process_item(
                     txt_id=item.get("txt_id"),
                 )
                 txt_uploaded = True
+                transcript = text
 
-                _run_preset_stage(
+                artifacts = _run_preset_stage(
                     service,
                     file_id,
                     file_name,
@@ -520,6 +631,7 @@ def process_item(
                     artifact_ids=item.get("artifact_ids") or {},
                     reprocess=reprocess_txt,
                     usage=usage,
+                    unproduced=unproduced,
                     local_artifact_paths=_local_artifact_paths(item),
                     only_presets=reprocess_presets,
                 )
@@ -535,8 +647,9 @@ def process_item(
                     )
                 else:
                     text = Path(item["local_txt_path"]).read_text(encoding="utf-8")
+                transcript = text
                 speaker_names = _speaker_names_from_file_info(file_info)
-                _run_preset_stage(
+                artifacts = _run_preset_stage(
                     service,
                     file_id,
                     file_name,
@@ -548,6 +661,7 @@ def process_item(
                     artifact_ids=item.get("artifact_ids") or {},
                     reprocess=False,
                     usage=usage,
+                    unproduced=unproduced,
                     local_artifact_paths=_local_artifact_paths(item),
                     only_presets=reprocess_presets,
                 )
@@ -572,6 +686,36 @@ def process_item(
             usage,
         )
 
+    # Success path only, after every artifact is written. An mp3-only pass produces
+    # nothing a receiver can use, so it stays silent rather than POSTing blanks over
+    # a good record. Fire-and-forget: the whole block is guarded because a file that
+    # transcribed and uploaded must count as processed even if the payload or the
+    # receiver misbehaves.
+    #
+    # A preset that returned blank wrote no artifact, so this file is still pending and
+    # comes back next cycle. A file may notify more than once (a later cycle can add a
+    # newly configured preset), but that re-delivery is bounded — a blank preset never
+    # settles, so firing here would re-POST the transcript on *every* cycle forever.
+    # Staying silent keeps re-delivery bounded; the receiver gets no retry either way.
+    if unproduced:
+        logger.warning(
+            "Completion webhook withheld for %s: presets produced no artifact (%s)",
+            file_name,
+            ", ".join(sorted(unproduced)),
+        )
+    elif txt_uploaded or artifacts:
+        try:
+            webhook.notify_complete(
+                url=config.webhook_url,
+                token=config.webhook_token,
+                proxy_url=config.proxy_url,
+                payload=_webhook_payload(
+                    file_id, file_name, folder_id, config, transcript, artifacts
+                ),
+            )
+        except Exception as exc:
+            logger.warning("Completion webhook failed: %s", type(exc).__name__)
+
     return _ProcessTelemetry(
         provider=provider,
         processing_mode=processing_mode,
@@ -581,6 +725,8 @@ def process_item(
         txt_uploaded=txt_uploaded,
         cost_usd=cost_usd,
         usage=usage,
+        transcript=transcript,
+        artifacts=artifacts,
     )
 
 
@@ -825,7 +971,8 @@ def run_once(
     cycle_skipped_size = 0
     cycle_folder_errors = 0
 
-    for folder_id in config.folder_ids:
+    for folder in config.folders:
+        folder_id = folder.folder_id
         listing_retry_state = _RetryState()
         try:
             items = _call_with_transient_retries(
@@ -902,7 +1049,7 @@ def run_once(
             failed=cycle_failed,
             folder_errors=cycle_folder_errors,
         ),
-        len(config.folder_ids),
+        len(config.folders),
         cycle_pending,
         cycle_processed,
         cycle_failed,
@@ -920,8 +1067,8 @@ def main(*, config_path: str | Path | None = None) -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     config = load_config(config_path=config_path)
-    if not config.folder_ids:
-        logger.error("folder_ids is empty; configure it in config.yml to start polling")
+    if not config.folders:
+        logger.error("folders is empty; configure it in config.yml to start polling")
         raise SystemExit(1)
 
     try:

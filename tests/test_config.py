@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -7,20 +8,23 @@ import yaml
 
 from src.config import (
     CONFIG_FILE_NAME,
+    EmployeeFolder,
     _config_to_yaml_dict,
+    _default_config_dict,
     config_get,
     config_set,
     config_unset,
     copy_prompt_assets,
     import_google_credentials,
     init_config,
+    load_packaged_keyterms,
     is_run_enabled,
     load_config,
     set_run_enabled,
     resolve_config_file_path,
     use_google_files,
 )
-from src.presets import PACKAGED_PROMPT_ASSETS
+from src.presets import BUILTIN_PRESETS, PACKAGED_PROMPT_ASSETS
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch, tmp_path):
@@ -42,20 +46,35 @@ def _load_config(tmp_path, data, *, validate_providers=False):
     return load_config(config_path=config_file, validate_providers=validate_providers)
 
 
+# Only the enabled built-ins: `merge_presets` drops disabled ones, so opt-in
+# built-ins like `meta` are absent from a loaded config until it turns them on.
+_BUILTIN_NAMES = {preset.name for preset in BUILTIN_PRESETS if preset.enabled}
+
+
+def _disabled_builtins():
+    """Disable every built-in preset.
+
+    Derived from the registry rather than spelled out, so adding a built-in doesn't
+    silently re-enable OpenAI in the deepgram-only tests (which carry no
+    openai.api_key and would fail provider validation).
+    """
+    return {preset.name: {"enabled": False} for preset in BUILTIN_PRESETS}
+
+
 def _deepgram_data(deepgram=None, *, stt_extra=None):
-    """Build a deepgram-only config dict (keypoints preset disabled, keyterms off)."""
+    """Build a deepgram-only config dict (built-in presets disabled, keyterms off)."""
     dg = {"api_key": "dg-test", "keyterms_enabled": False}
     if deepgram:
         dg.update(deepgram)
     stt = {"provider": "deepgram", "deepgram": dg}
     if stt_extra:
         stt.update(stt_extra)
-    return {"stt": stt, "presets": {"keypoints": {"enabled": False}}}
+    return {"stt": stt, "presets": _disabled_builtins()}
 
 
 def test_defaults_when_config_minimal(tmp_path):
-    cfg = _load_config(tmp_path, {"folder_ids": []})
-    assert cfg.folder_ids == []
+    cfg = _load_config(tmp_path, {"folders": []})
+    assert cfg.folders == ()
     assert cfg.poll_interval == 600
     assert cfg.bitrate == "96k"
     # No data_dir key -> defaults to "." (the config home), matching the
@@ -151,31 +170,396 @@ def test_output_target_folder_with_output_dir(tmp_path):
     assert cfg.output_dir == output_dir
 
 
-def test_parses_single_folder_id(tmp_path):
-    cfg = _load_config(tmp_path, {"folder_ids": "abc123", "stt": {"provider": "disabled"}})
-    assert cfg.folder_ids == ["abc123"]
+def _folders_config(folders, **extra):
+    return {"folders": folders, "stt": {"provider": "disabled"}, **extra}
 
 
-def test_parses_multiple_folder_ids(tmp_path):
-    cfg = _load_config(tmp_path, {"folder_ids": "id1,id2,id3", "stt": {"provider": "disabled"}})
-    assert cfg.folder_ids == ["id1", "id2", "id3"]
-
-
-def test_strips_whitespace_in_folder_ids(tmp_path):
+def test_parses_single_folder(tmp_path):
     cfg = _load_config(
-        tmp_path, {"folder_ids": " id1 , id2 ,  ,id3 ", "stt": {"provider": "disabled"}}
+        tmp_path,
+        _folders_config(
+            [{"folder_id": "abc123", "name": "Олег Иванов", "email": "oleg@example.org"}]
+        ),
     )
-    assert cfg.folder_ids == ["id1", "id2", "id3"]
+    assert cfg.folders == (
+        EmployeeFolder(folder_id="abc123", name="Олег Иванов", email="oleg@example.org"),
+    )
 
 
-def test_empty_folder_ids_returns_empty_list(tmp_path):
-    cfg = _load_config(tmp_path, {"folder_ids": "", "stt": {"provider": "disabled"}})
-    assert cfg.folder_ids == []
+def test_parses_multiple_folders(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _folders_config(
+            [
+                {"folder_id": "id1", "name": "One", "email": "one@example.org"},
+                {"folder_id": "id2", "name": "Two", "email": "two@example.org"},
+            ]
+        ),
+    )
+    assert [f.folder_id for f in cfg.folders] == ["id1", "id2"]
+    assert [f.name for f in cfg.folders] == ["One", "Two"]
 
 
-def test_folder_ids_only_commas_returns_empty_list(tmp_path):
-    cfg = _load_config(tmp_path, {"folder_ids": " , , ", "stt": {"provider": "disabled"}})
-    assert cfg.folder_ids == []
+def test_folder_name_and_email_default_to_blank(tmp_path):
+    cfg = _load_config(tmp_path, _folders_config([{"folder_id": "id1"}]))
+    assert cfg.folders == (EmployeeFolder(folder_id="id1", name="", email=""),)
+
+
+def test_strips_whitespace_in_folder_fields(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _folders_config([{"folder_id": " id1 ", "name": " One ", "email": " one@x.org "}]),
+    )
+    assert cfg.folders == (
+        EmployeeFolder(folder_id="id1", name="One", email="one@x.org"),
+    )
+
+
+def test_missing_folders_key_returns_empty_tuple(tmp_path):
+    cfg = _load_config(tmp_path, {"stt": {"provider": "disabled"}})
+    assert cfg.folders == ()
+
+
+def test_bare_string_folder_entry_rejected(tmp_path):
+    with pytest.raises(ValueError, match="folders"):
+        _load_config(tmp_path, _folders_config(["abc123"]))
+
+
+def test_folder_without_folder_id_rejected(tmp_path):
+    with pytest.raises(ValueError, match="folder_id"):
+        _load_config(tmp_path, _folders_config([{"name": "No Id"}]))
+
+
+def test_folder_with_blank_folder_id_rejected(tmp_path):
+    with pytest.raises(ValueError, match="folder_id"):
+        _load_config(tmp_path, _folders_config([{"folder_id": "  "}]))
+
+
+def test_folders_non_list_rejected(tmp_path):
+    with pytest.raises(ValueError, match="folders"):
+        _load_config(tmp_path, _folders_config("abc123"))
+
+
+def test_legacy_folder_ids_raises_migration_error(tmp_path):
+    with pytest.raises(ValueError, match="folder_ids is no longer supported") as exc:
+        _load_config(tmp_path, {"folder_ids": ["abc"], "stt": {"provider": "disabled"}})
+    # The message must show the operator the replacement shape.
+    assert "folders:" in str(exc.value)
+    assert "folder_id:" in str(exc.value)
+
+
+def test_empty_folder_ids_list_still_raises_migration_error(tmp_path):
+    # Present-but-empty is still a stale config: fail loudly rather than start with
+    # no folders to poll.
+    with pytest.raises(ValueError, match="folder_ids is no longer supported"):
+        _load_config(tmp_path, {"folder_ids": [], "stt": {"provider": "disabled"}})
+
+
+def test_folders_load_in_config_order(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _folders_config([{"folder_id": "id1"}, {"folder_id": "id2", "name": "Two"}]),
+    )
+    assert [f.folder_id for f in cfg.folders] == ["id1", "id2"]
+
+
+def test_duplicate_folder_id_raises(tmp_path):
+    with pytest.raises(ValueError, match="repeats folder_id"):
+        _load_config(
+            tmp_path,
+            _folders_config(
+                [
+                    {"folder_id": "dup", "name": "First"},
+                    {"folder_id": "dup", "name": "Second"},
+                ]
+            ),
+        )
+
+
+def test_folder_by_id_hit(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _folders_config([{"folder_id": "id1", "name": "One", "email": "one@x.org"}]),
+    )
+    found = cfg.folder_by_id("id1")
+    assert found == EmployeeFolder(folder_id="id1", name="One", email="one@x.org")
+
+
+def test_folder_by_id_miss_returns_none(tmp_path):
+    cfg = _load_config(tmp_path, _folders_config([{"folder_id": "id1"}]))
+    assert cfg.folder_by_id("nope") is None
+
+
+# --- tags.allowed ------------------------------------------------------------
+
+
+def test_tags_allowed_parses_into_tuple(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "tags": {"allowed": ["клиентская-консультация", "O-1"]},
+        },
+    )
+    assert cfg.tags_allowed == ("клиентская-консультация", "O-1")
+
+
+def test_missing_tags_block_yields_empty_tuple(tmp_path):
+    cfg = _load_config(tmp_path, {"stt": {"provider": "disabled"}})
+    assert cfg.tags_allowed == ()
+
+
+def test_tags_allowed_strips_whitespace_and_drops_blanks(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {"stt": {"provider": "disabled"}, "tags": {"allowed": [" O-1 ", "", "  "]}},
+    )
+    assert cfg.tags_allowed == ("O-1",)
+
+
+def test_tags_allowed_non_list_rejected(tmp_path):
+    with pytest.raises(ValueError, match="tags.allowed"):
+        _load_config(
+            tmp_path, {"stt": {"provider": "disabled"}, "tags": {"allowed": "O-1"}}
+        )
+
+
+def test_tags_non_mapping_rejected(tmp_path):
+    with pytest.raises(ValueError, match="tags"):
+        _load_config(tmp_path, {"stt": {"provider": "disabled"}, "tags": ["O-1"]})
+
+
+def test_config_to_yaml_dict_round_trips_tags_allowed(tmp_path):
+    # Regression: `tags.allowed` used to be absent from the serializer, so any
+    # whole-Config rewrite (`gdstt config set`, token refresh) silently dropped the
+    # operator's tag list.
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "tags": {"allowed": ["клиентская-консультация", "EB-1"]},
+        },
+    )
+
+    data = _config_to_yaml_dict(cfg)
+    assert data["tags"] == {"allowed": ["клиентская-консультация", "EB-1"]}
+
+    config_file = tmp_path / "roundtrip-tags.yml"
+    _write_yaml(config_file, data)
+    reloaded = load_config(config_path=config_file, validate_providers=False)
+    assert reloaded.tags_allowed == ("клиентская-консультация", "EB-1")
+
+
+# --- webhook -----------------------------------------------------------------
+
+
+def test_webhook_parses_url_and_token(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "webhook": {"url": "https://example.com/hooks/gdstt", "token": "secret"},
+        },
+    )
+    assert cfg.webhook_url == "https://example.com/hooks/gdstt"
+    assert cfg.webhook_token == "secret"
+
+
+def test_missing_webhook_block_yields_blank_fields(tmp_path):
+    cfg = _load_config(tmp_path, {"stt": {"provider": "disabled"}})
+    assert cfg.webhook_url == ""
+    assert cfg.webhook_token == ""
+
+
+def test_plaintext_webhook_url_warns(tmp_path, caplog):
+    """An http:// receiver leaks the bearer token and the transcript PII."""
+    with caplog.at_level(logging.WARNING, logger="src.config"):
+        cfg = _load_config(
+            tmp_path,
+            {
+                "stt": {"provider": "disabled"},
+                "webhook": {"url": "http://example.com/hook", "token": "secret"},
+            },
+        )
+    # Warn, don't raise: a plaintext receiver is unwise, not a config error.
+    assert cfg.webhook_url == "http://example.com/hook"
+    assert "clear text" in caplog.text
+    # The warning must not itself leak the token.
+    assert "secret" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/hook",
+        "http://localhost:8080/hook",
+        "http://127.0.0.1:8080/hook",
+        "",
+    ],
+)
+def test_safe_webhook_url_does_not_warn(tmp_path, caplog, url):
+    """https and loopback never cross the network in clear; neither does an unset URL."""
+    with caplog.at_level(logging.WARNING, logger="src.config"):
+        _load_config(
+            tmp_path,
+            {"stt": {"provider": "disabled"}, "webhook": {"url": url}},
+        )
+    assert "clear text" not in caplog.text
+
+
+@pytest.mark.parametrize("url", ["example.com/hook", "ftp://example.com/hook", "https://"])
+def test_undeliverable_webhook_url_rejected(tmp_path, url):
+    """Delivery is fire-and-forget and swallows errors, so a typo must fail at load."""
+    with pytest.raises(ValueError, match="absolute http"):
+        _load_config(
+            tmp_path, {"stt": {"provider": "disabled"}, "webhook": {"url": url}}
+        )
+
+
+def test_webhook_non_mapping_rejected(tmp_path):
+    with pytest.raises(ValueError, match="webhook"):
+        _load_config(
+            tmp_path, {"stt": {"provider": "disabled"}, "webhook": ["https://x"]}
+        )
+
+
+def test_webhook_round_trips(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "webhook": {"url": "https://example.com/hooks/gdstt", "token": "secret"},
+        },
+    )
+
+    data = _config_to_yaml_dict(cfg)
+    assert data["webhook"] == {
+        "url": "https://example.com/hooks/gdstt",
+        "token": "secret",
+    }
+
+    config_file = tmp_path / "roundtrip-webhook.yml"
+    _write_yaml(config_file, data)
+    reloaded = load_config(config_path=config_file, validate_providers=False)
+    assert reloaded.webhook_url == "https://example.com/hooks/gdstt"
+    assert reloaded.webhook_token == "secret"
+
+
+def test_default_config_dict_seeds_empty_webhook_block():
+    assert _default_config_dict()["webhook"] == {"url": "", "token": ""}
+
+
+# --- {{allowed_tags}} prompt rendering ---------------------------------------
+
+
+def _preset_by_name(cfg, name):
+    return next(p for p in cfg.presets if p.name == name)
+
+
+def test_allowed_tags_placeholder_rendered_at_load(tmp_path):
+    prompt = tmp_path / "tagged.md"
+    prompt.write_text("Pick from:\n\n{{allowed_tags}}\n", encoding="utf-8")
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "tags": {"allowed": ["клиентская-консультация", "O-1"]},
+            "presets": {
+                "keypoints": {"enabled": False},
+                "tagger": {"prompt_file": str(prompt)},
+            },
+        },
+    )
+    instructions = _preset_by_name(cfg, "tagger").instructions
+    assert "{{allowed_tags}}" not in instructions
+    assert "- клиентская-консультация" in instructions
+    assert "- O-1" in instructions
+
+
+def test_allowed_tags_placeholder_rendered_in_inline_instructions(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "tags": {"allowed": ["O-1"]},
+            "presets": {
+                "keypoints": {"enabled": False},
+                "tagger": {"instructions": "Tags:\n{{allowed_tags}}"},
+            },
+        },
+    )
+    assert _preset_by_name(cfg, "tagger").instructions == "Tags:\n- O-1"
+
+
+def test_prompt_without_placeholder_is_untouched(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "tags": {"allowed": ["O-1"]},
+            "presets": {
+                "keypoints": {"enabled": False},
+                "plain": {"instructions": "No placeholder here."},
+            },
+        },
+    )
+    assert _preset_by_name(cfg, "plain").instructions == "No placeholder here."
+
+
+def test_empty_allow_list_renders_explicit_none(tmp_path):
+    # With no tags configured the model must be told to return an empty list rather
+    # than being handed a blank section it might fill by inventing tags.
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": {
+                "keypoints": {"enabled": False},
+                "tagger": {"instructions": "Tags:\n{{allowed_tags}}"},
+            },
+        },
+    )
+    instructions = _preset_by_name(cfg, "tagger").instructions
+    assert "{{allowed_tags}}" not in instructions
+    assert "none" in instructions.lower()
+
+
+def test_allowed_tags_rendered_when_prompt_file_falls_back_to_packaged_asset(tmp_path):
+    """A prompt_file resolved from the packaged assets (not from disk) must still be
+    rendered — an unrendered placeholder leaves the model free to invent tags."""
+    config_file = tmp_path / "config.yml"
+    # meta.md carries {{allowed_tags}} and exists only as a packaged asset here.
+    _write_yaml(
+        config_file,
+        {
+            "stt": {"provider": "disabled"},
+            "tags": {"allowed": ["EB-1"]},
+            "presets": {"tagger": {"prompt_file": "meta.md"}},
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+
+    instructions = _preset_by_name(cfg, "tagger").instructions
+    assert "{{allowed_tags}}" not in instructions
+    assert "- EB-1" in instructions
+
+
+def test_meta_builtin_prompt_renders_allowed_tags(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "tags": {"allowed": ["клиентская-консультация", "EB-1"]},
+            # `meta` is an opt-in built-in, so a config must enable it explicitly —
+            # as the generated config.yml does.
+            "presets": {"meta": {"enabled": True}},
+        },
+    )
+    instructions = _preset_by_name(cfg, "meta").instructions
+    assert "{{allowed_tags}}" not in instructions
+    assert "- клиентская-консультация" in instructions
+    assert "- EB-1" in instructions
 
 
 def test_custom_poll_interval(tmp_path):
@@ -332,6 +716,41 @@ def test_stt_deepgram_rejects_missing_keyterms_file_when_enabled(tmp_path):
         load_config(config_path=config_file)
 
 
+def test_stt_deepgram_missing_default_keyterms_file_degrades(tmp_path, caplog):
+    """The default file only exists once `config init` copies it, so a config that
+    predates it (or an operator who deleted the sample) must still start."""
+    with caplog.at_level(logging.WARNING, logger="src.config"):
+        cfg = _load_config(
+            tmp_path,
+            _deepgram_data({"keyterms_enabled": True}),
+            validate_providers=True,
+        )
+
+    assert cfg.deepgram_keyterms == ()
+    assert "continuing without keyterm prompting" in caplog.text
+
+
+def test_stt_deepgram_missing_default_keyterms_path_written_by_init_degrades(
+    tmp_path, caplog
+):
+    """`config init` writes the default path verbatim, so a config carrying it is not
+    making an explicit choice: a deleted sample must warn rather than hard-fail."""
+    with caplog.at_level(logging.WARNING, logger="src.config"):
+        cfg = _load_config(
+            tmp_path,
+            _deepgram_data(
+                {
+                    "keyterms_enabled": True,
+                    "keyterms_file": "deepgram-keyterms-example.txt",
+                }
+            ),
+            validate_providers=True,
+        )
+
+    assert cfg.deepgram_keyterms == ()
+    assert "continuing without keyterm prompting" in caplog.text
+
+
 def test_stt_deepgram_rejects_too_many_keyterms(tmp_path):
     keyterms = tmp_path / "keyterms.txt"
     keyterms.write_text("\n".join(f"term-{i}" for i in range(101)), encoding="utf-8")
@@ -434,7 +853,7 @@ def test_stt_deepgram_key_file_is_ignored_when_transcription_disabled(tmp_path):
         tmp_path,
         {
             "stt": {"provider": "disabled", "deepgram": {"api_key_file": str(missing_key_file)}},
-            "presets": {"keypoints": {"enabled": False}},
+            "presets": _disabled_builtins(),
         },
         validate_providers=True,
     )
@@ -454,14 +873,14 @@ def test_full_yaml_combination(tmp_path):
     cfg = _load_config(
         tmp_path,
         {
-            "folder_ids": "f1,f2",
+            "folders": [{"folder_id": "f1"}, {"folder_id": "f2"}],
             "poll_interval": 300,
             "bitrate": "192k",
             "data_dir": "mydata",
             "stt": {"provider": "disabled"},
         },
     )
-    assert cfg.folder_ids == ["f1", "f2"]
+    assert [f.folder_id for f in cfg.folders] == ["f1", "f2"]
     assert cfg.poll_interval == 300
     assert cfg.bitrate == "192k"
     assert cfg.data_dir == tmp_path / "mydata"
@@ -475,7 +894,7 @@ def test_loads_grouped_yaml(tmp_path):
     _write_yaml(
         config_file,
         {
-            "folder_ids": ["abc", "def"],
+            "folders": [{"folder_id": "abc"}, {"folder_id": "def"}],
             "poll_interval": 300,
             "bitrate": "128k",
             "data_dir": "mydata",
@@ -497,7 +916,7 @@ def test_loads_grouped_yaml(tmp_path):
 
     cfg = load_config(config_path=config_file)
 
-    assert cfg.folder_ids == ["abc", "def"]
+    assert [f.folder_id for f in cfg.folders] == ["abc", "def"]
     assert cfg.poll_interval == 300
     assert cfg.bitrate == "128k"
     assert cfg.data_dir == tmp_path / "mydata"
@@ -572,11 +991,11 @@ def test_generated_yaml_emits_batch_wait_when_disabled(tmp_path):
 
 def test_yaml_disabled_provider_is_mp3_only(tmp_path):
     config_file = tmp_path / "config.yml"
-    # Disabling the built-in keypoints preset keeps this a pure mp3-only setup; with
-    # any enabled preset, an openai.api_key would be required.
+    # Disabling the built-in presets keeps this a pure mp3-only setup; with any
+    # enabled preset, an openai.api_key would be required.
     _write_yaml(
         config_file,
-        {"stt": {"provider": "disabled"}, "presets": {"keypoints": {"enabled": False}}},
+        {"stt": {"provider": "disabled"}, "presets": _disabled_builtins()},
     )
 
     cfg = load_config(config_path=config_file)
@@ -735,7 +1154,7 @@ def test_config_to_yaml_dict_round_trips(tmp_path):
     cfg = _load_config(
         tmp_path,
         {
-            "folder_ids": "rt1",
+            "folders": [{"folder_id": "rt1", "name": "One", "email": "one@x.org"}],
             "stt": {"provider": "disabled"},
             "openai": {"api_key": "sk-rt", "keypoints": True},
         },
@@ -747,7 +1166,9 @@ def test_config_to_yaml_dict_round_trips(tmp_path):
     _write_yaml(config_file, data)
     reloaded = load_config(config_path=config_file, validate_providers=False)
 
-    assert reloaded.folder_ids == ["rt1"]
+    assert reloaded.folders == (
+        EmployeeFolder(folder_id="rt1", name="One", email="one@x.org"),
+    )
     assert reloaded.openai_api_key == "sk-rt"
     assert reloaded.openai_keypoints is True
     assert reloaded.stt_provider == ""
@@ -772,7 +1193,7 @@ def test_yaml_presets_merge_over_builtins(tmp_path):
     cfg = load_config(config_path=config_file, validate_providers=False)
 
     by_name = {p.name: p for p in cfg.presets}
-    assert set(by_name) == {"keypoints", "transcript-cleanup"}
+    assert set(by_name) == _BUILTIN_NAMES | {"transcript-cleanup"}
     assert by_name["keypoints"].depends_on == ("transcript-cleanup",)
     # The built-in instructions are preserved when only depends_on is overridden.
     assert by_name["keypoints"].artifact_suffix == ".keypoints.md"
@@ -784,7 +1205,7 @@ def test_yaml_presets_default_to_builtins_when_absent(tmp_path):
 
     cfg = load_config(config_path=config_file, validate_providers=False)
 
-    assert {p.name for p in cfg.presets} == {"keypoints"}
+    assert {p.name for p in cfg.presets} == _BUILTIN_NAMES
 
 
 def test_yaml_presets_can_disable_builtin(tmp_path):
@@ -796,7 +1217,7 @@ def test_yaml_presets_can_disable_builtin(tmp_path):
 
     cfg = load_config(config_path=config_file, validate_providers=False)
 
-    assert cfg.presets == ()
+    assert "keypoints" not in {p.name for p in cfg.presets}
 
 
 def test_yaml_presets_invalid_dag_raises(tmp_path):
@@ -982,7 +1403,7 @@ def test_yaml_duplicate_artifact_suffix_ignored_when_disabled(tmp_path):
 
     cfg = load_config(config_path=config_file, validate_providers=False)
 
-    assert {p.name for p in cfg.presets} == {"keypoints", "first"}
+    assert {p.name for p in cfg.presets} == _BUILTIN_NAMES | {"first"}
 
 
 def test_yaml_shared_prompt_file_distinct_names_and_suffixes_allowed(tmp_path):
@@ -1112,27 +1533,38 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     assert path == config_file
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     assert data["data_dir"] == "."
-    assert data["stt"]["deepgram"]["keyterms_file"] == "config/deepgram-keyterms.txt"
+    assert data["stt"]["deepgram"]["keyterms_file"] == "deepgram-keyterms-example.txt"
     assert data["presets"]["keypoints"]["enabled"] is True
     assert data["presets"]["keypoints"]["prompt_file"] == "prompts/keypoints.md"
     # The full default chain is enabled out of the box, with transcript-cleanup
-    # written above keypoints and both downstream presets depending on it.
-    assert list(data["presets"]) == ["transcript-cleanup", "keypoints", "action-items"]
+    # written above keypoints and every downstream preset depending on it.
+    assert list(data["presets"]) == [
+        "transcript-cleanup",
+        "keypoints",
+        "action-items",
+        "meta",
+    ]
     assert [name for name, p in data["presets"].items() if p["enabled"]] == [
         "transcript-cleanup",
         "keypoints",
         "action-items",
+        "meta",
     ]
     assert data["presets"]["keypoints"]["depends_on"] == ["transcript-cleanup"]
     assert data["presets"]["action-items"]["depends_on"] == ["transcript-cleanup"]
+    assert data["presets"]["meta"]["depends_on"] == ["transcript-cleanup"]
+    assert data["presets"]["meta"]["prompt_file"] == "prompts/meta.md"
     # Batch and the run flag are on by default in a generated config.
     assert data["openai"]["batch"] is True
     assert data["run"]["enabled"] is True
+    # An empty tag allow-list is seeded so the operator has the block to fill in.
+    assert data["tags"] == {"allowed": []}
     # The packaged prompt assets are copied beside the config.
     assert (tmp_path / "prompts" / "keypoints.md").is_file()
     assert (tmp_path / "prompts" / "transcript-cleanup.md").is_file()
     assert (tmp_path / "prompts" / "action-items.md").is_file()
-    assert (tmp_path / "config" / "deepgram-keyterms.txt").is_file()
+    assert (tmp_path / "prompts" / "meta.md").is_file()
+    assert (tmp_path / "deepgram-keyterms-example.txt").is_file()
     # The generated config loads back without provider secrets and yields the chain.
     cfg = load_config(config_path=config_file, validate_providers=False)
     assert cfg.data_dir == tmp_path
@@ -1140,6 +1572,7 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
         "transcript-cleanup",
         "keypoints",
         "action-items",
+        "meta",
     }
 
 
@@ -1153,8 +1586,22 @@ def test_init_config_validates_with_copied_keyterms(tmp_path):
 
     cfg = load_config(config_path=config_file)
 
-    assert cfg.deepgram_keyterms_file == tmp_path / "config" / "deepgram-keyterms.txt"
-    assert "Kubernetes" in cfg.deepgram_keyterms
+    assert cfg.deepgram_keyterms_file == tmp_path / "deepgram-keyterms-example.txt"
+    # The copied example carries no active terms, so a fresh install prompts
+    # Deepgram with nothing until the operator supplies their own list.
+    assert cfg.deepgram_keyterms == ()
+
+
+def test_packaged_keyterms_example_loads_and_points_at_the_live_list(tmp_path):
+    text = load_packaged_keyterms()
+
+    # The operator's real terms belong in the gitignored data/deepgram-keyterms.txt,
+    # and the example says so.
+    assert "data/deepgram-keyterms.txt" in text
+    # Illustration only: every term is commented out, so copying this file beside a
+    # config cannot bias transcription with sample terms the operator never chose.
+    terms = [line for line in text.splitlines() if line.strip() and not line.startswith("#")]
+    assert terms == []
 
 
 def test_init_default_writes_to_gdstt_home(monkeypatch, tmp_path):
@@ -1166,7 +1613,7 @@ def test_init_default_writes_to_gdstt_home(monkeypatch, tmp_path):
     assert path == home / CONFIG_FILE_NAME
     assert path.is_file()
     assert (home / "prompts" / "keypoints.md").is_file()
-    assert (home / "config" / "deepgram-keyterms.txt").is_file()
+    assert (home / "deepgram-keyterms-example.txt").is_file()
 
 
 def test_init_default_falls_back_to_cwd_data(monkeypatch, tmp_path):
@@ -1224,22 +1671,22 @@ def test_init_prompt_dir_points_prompt_files(tmp_path):
 
 def test_init_refuses_existing_without_force(tmp_path):
     config_file = tmp_path / "config.yml"
-    config_file.write_text("folder_ids: [keep]\n", encoding="utf-8")
+    config_file.write_text("folders: [{folder_id: keep}]\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="already exists"):
         init_config(config_path=config_file)
 
-    assert config_file.read_text(encoding="utf-8") == "folder_ids: [keep]\n"
+    assert config_file.read_text(encoding="utf-8") == "folders: [{folder_id: keep}]\n"
 
 
 def test_init_force_overwrites(tmp_path):
     config_file = tmp_path / "config.yml"
-    config_file.write_text("folder_ids: [stale]\n", encoding="utf-8")
+    config_file.write_text("folders: [{folder_id: stale}]\n", encoding="utf-8")
 
     init_config(config_path=config_file, force=True)
 
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    assert data["folder_ids"] == []
+    assert data["folders"] == []
 
 
 # --- config get / set / unset -----------------------------------------------
@@ -1379,6 +1826,70 @@ def test_config_get_single_secret_is_masked_by_default(tmp_path):
     assert config_get("openai.api_key", config_path=config_file) == "***"
 
 
+def test_config_get_masks_webhook_token(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set("webhook.token", "hook-SECRET", config_path=config_file)
+
+    # The webhook token authenticates against the receiver and must be masked in
+    # both the whole-config dump and a single-key lookup.
+    whole = config_get(config_path=config_file)
+    assert "hook-SECRET" not in whole
+    assert "***" in whole
+    assert config_get("webhook.token", config_path=config_file) == "***"
+
+    # The URL may itself carry the credential, so only its host stays visible.
+    config_set("webhook.url", "https://example.com/hooks/gdstt", config_path=config_file)
+    assert config_get("webhook.url", config_path=config_file) == "https://example.com/***"
+
+
+def test_config_get_redacts_webhook_url_query_and_credentials(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set(
+        "webhook.url",
+        "https://user:pw@example.com/hooks/gdstt?token=url-SECRET",
+        config_path=config_file,
+    )
+
+    # A receiver often authenticates via a token in the query string, so the URL is
+    # as sensitive as webhook.token; the host stays visible for confirmation.
+    whole = config_get(config_path=config_file)
+    assert "url-SECRET" not in whole
+    assert "pw" not in whole
+    assert "example.com" in whole
+
+    single = config_get("webhook.url", config_path=config_file)
+    assert single == "https://***@example.com/***?***"
+
+    block = config_get("webhook", config_path=config_file)
+    assert "url-SECRET" not in block
+
+    assert (
+        config_get("webhook.url", config_path=config_file, show_secrets=True)
+        == "https://user:pw@example.com/hooks/gdstt?token=url-SECRET"
+    )
+
+
+def test_config_get_redacts_webhook_url_path_secret(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set(
+        "webhook.url",
+        "https://hooks.slack.com/services/T00/B00/path-SECRET",
+        config_path=config_file,
+    )
+
+    # Slack/Discord/Teams put the whole credential in the path, with no query string
+    # and no userinfo — the shape that used to print verbatim.
+    assert "path-SECRET" not in config_get(config_path=config_file)
+    assert (
+        config_get("webhook.url", config_path=config_file)
+        == "https://hooks.slack.com/***"
+    )
+    assert (
+        config_get("webhook.url", config_path=config_file, show_secrets=True)
+        == "https://hooks.slack.com/services/T00/B00/path-SECRET"
+    )
+
+
 def test_config_get_masks_telegram_bot_token(tmp_path):
     config_file = _base_config_file(tmp_path)
     config_set(
@@ -1445,7 +1956,7 @@ def test_yaml_google_inline_credentials_and_token(tmp_path):
         config_file,
         {
             "stt": {"provider": "disabled"},
-            "presets": {"keypoints": {"enabled": False}},
+            "presets": _disabled_builtins(),
             "google": {
                 "credentials": {"installed": {"client_id": "cid", "client_secret": "x"}},
                 "token": {"token": "t", "refresh_token": "r"},
@@ -1470,7 +1981,7 @@ def test_yaml_google_file_paths_resolve_relative(tmp_path):
         config_file,
         {
             "stt": {"provider": "disabled"},
-            "presets": {"keypoints": {"enabled": False}},
+            "presets": _disabled_builtins(),
             "google": {
                 "credentials_file": "secrets/creds.json",
                 "token_file": "/abs/token.json",
@@ -1492,7 +2003,7 @@ def test_yaml_google_back_compat_data_dir_fallback(tmp_path):
     config_file = tmp_path / "config.yml"
     _write_yaml(
         config_file,
-        {"stt": {"provider": "disabled"}, "presets": {"keypoints": {"enabled": False}}},
+        {"stt": {"provider": "disabled"}, "presets": _disabled_builtins()},
     )
 
     cfg = load_config(config_path=config_file)
@@ -1509,7 +2020,7 @@ def test_yaml_google_credentials_both_inline_and_file_fails(tmp_path):
         config_file,
         {
             "stt": {"provider": "disabled"},
-            "presets": {"keypoints": {"enabled": False}},
+            "presets": _disabled_builtins(),
             "google": {
                 "credentials": {"installed": {"client_id": "cid"}},
                 "credentials_file": "creds.json",
@@ -1527,7 +2038,7 @@ def test_yaml_google_token_both_inline_and_file_fails(tmp_path):
         config_file,
         {
             "stt": {"provider": "disabled"},
-            "presets": {"keypoints": {"enabled": False}},
+            "presets": _disabled_builtins(),
             "google": {
                 "token": {"token": "t"},
                 "token_file": "token.json",

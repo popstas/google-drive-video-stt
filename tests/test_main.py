@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -8,14 +9,24 @@ from google.auth.exceptions import RefreshError
 
 from src import main
 from src.auth import AuthError
-from src.config import Config
+from src.config import Config, EmployeeFolder
 from src.presets import BUILTIN_PRESETS, Preset
 from src.preset_pipeline import PresetResult
 from src.stt.base import STTError
 
+_KEYPOINTS_BUILTIN = next(p for p in BUILTIN_PRESETS if p.name == "keypoints")
+
+
+def _as_folders(entries) -> tuple[EmployeeFolder, ...]:
+    """Accept ids or EmployeeFolders, so folder-agnostic tests stay short."""
+    return tuple(
+        entry if isinstance(entry, EmployeeFolder) else EmployeeFolder(entry)
+        for entry in entries
+    )
+
 
 def make_config(
-    folder_ids=None,
+    folders=None,
     bitrate="96k",
     poll_interval=600,
     data_dir=Path("data"),
@@ -30,17 +41,23 @@ def make_config(
     output_dir=None,
     openai_keypoints=False,
     presets=None,
+    tags_allowed=(),
+    webhook_url="",
+    webhook_token="",
+    proxy_url="",
 ) -> Config:
     if presets is None:
         # Mirror the legacy keypoints gate: the built-in keypoints pass is the only
-        # enabled preset when requested, and none otherwise.
-        presets = BUILTIN_PRESETS if openai_keypoints else ()
+        # enabled preset when requested, and none otherwise. Deliberately not the
+        # whole BUILTIN_PRESETS tuple — `meta` is a built-in too, and pulling it in
+        # here would silently widen every openai_keypoints=True test to two passes.
+        presets = (_KEYPOINTS_BUILTIN,) if openai_keypoints else ()
     return Config(
-        folder_ids=folder_ids if folder_ids is not None else ["folderA"],
+        folders=_as_folders(folders if folders is not None else ["folderA"]),
         poll_interval=poll_interval,
         bitrate=bitrate,
         data_dir=data_dir,
-        proxy_url="",
+        proxy_url=proxy_url,
         stt_provider=stt_provider,
         openai_api_key=openai_api_key,
         deepgram_api_key=deepgram_api_key,
@@ -51,6 +68,9 @@ def make_config(
         openai_keypoints=openai_keypoints,
         deepgram_audio_source=deepgram_audio_source,
         drive_mp3_artifact=drive_mp3_artifact,
+        tags_allowed=tuple(tags_allowed),
+        webhook_url=webhook_url,
+        webhook_token=webhook_token,
         presets=tuple(presets),
     )
 
@@ -747,7 +767,7 @@ def test_process_target_file_without_parent_raises(mocker):
 
 def test_run_once_iterates_all_folders_and_files(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1", "f2"])
+    cfg = make_config(folders=["f1", "f2"])
 
     listings = {
         "f1": [_item("v1", "a.mp4")],
@@ -770,7 +790,7 @@ def test_run_once_iterates_all_folders_and_files(mocker):
 
 def test_run_once_retries_transient_listing_error(mocker, caplog):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"])
+    cfg = make_config(folders=["f1"])
 
     list_mock = mocker.patch(
         "src.main.drive.list_folder_state",
@@ -792,7 +812,7 @@ def test_run_once_retries_transient_listing_error(mocker, caplog):
 
 def test_run_once_propagates_auth_error_from_listing(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"])
+    cfg = make_config(folders=["f1"])
 
     mocker.patch(
         "src.main.drive.list_folder_state",
@@ -805,7 +825,7 @@ def test_run_once_propagates_auth_error_from_listing(mocker):
 
 def test_run_once_propagates_auth_error_from_processing(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"])
+    cfg = make_config(folders=["f1"])
 
     mocker.patch(
         "src.main.drive.list_folder_state",
@@ -823,7 +843,7 @@ def test_run_once_propagates_auth_error_from_processing(mocker):
 def test_run_once_dry_run_does_not_process_items(mocker, caplog):
     service = MagicMock()
     cfg = make_config(
-        folder_ids=["folderA"],
+        folders=["folderA"],
         stt_provider="deepgram",
         deepgram_api_key="dg-x",
     )
@@ -845,7 +865,7 @@ def test_run_once_dry_run_does_not_process_items(mocker, caplog):
 def test_run_once_skips_large_pending_items_without_confirmation(mocker, caplog):
     service = MagicMock()
     cfg = make_config(
-        folder_ids=["folderA"],
+        folders=["folderA"],
         stt_provider="deepgram",
         deepgram_api_key="dg-x",
     )
@@ -864,7 +884,7 @@ def test_run_once_skips_large_pending_items_without_confirmation(mocker, caplog)
 
 def test_run_once_filters_already_processed(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"])
+    cfg = make_config(folders=["f1"])
 
     items = [
         _item("v1", "a.mp4", has_mp3=False),
@@ -881,7 +901,7 @@ def test_run_once_filters_already_processed(mocker):
 
 def test_run_once_with_stt_includes_files_missing_txt(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"], stt_provider="deepgram", deepgram_api_key="dg-x")
+    cfg = make_config(folders=["f1"], stt_provider="deepgram", deepgram_api_key="dg-x")
 
     items = [
         _item("v1", "a.mp4", has_mp3=True, has_txt=True, mp3_id="m1", mp3_name="a.mp3"),
@@ -898,7 +918,7 @@ def test_run_once_with_stt_includes_files_missing_txt(mocker):
 
 def test_run_once_continues_on_per_file_error(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"])
+    cfg = make_config(folders=["f1"])
 
     items = [
         _item("good1", "ok1.mp4"),
@@ -1103,7 +1123,7 @@ def test_process_item_summary_surfaces_cost_and_keypoints_usage(mocker, tmp_path
 
 def test_run_once_continues_on_listing_error(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["bad_folder", "good_folder"])
+    cfg = make_config(folders=["bad_folder", "good_folder"])
 
     def fake_list(svc, folder_id):
         if folder_id == "bad_folder":
@@ -1124,7 +1144,7 @@ def test_run_once_continues_on_listing_error(mocker):
 
 def test_run_once_no_folders_does_nothing(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=[])
+    cfg = make_config(folders=[])
 
     list_mock = mocker.patch("src.main.drive.list_folder_state")
     process_mock = mocker.patch("src.main.process_item")
@@ -1137,7 +1157,7 @@ def test_run_once_no_folders_does_nothing(mocker):
 
 def test_run_once_passes_config_to_process(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"], bitrate="192k")
+    cfg = make_config(folders=["f1"], bitrate="192k")
 
     mocker.patch(
         "src.main.drive.list_folder_state",
@@ -1152,7 +1172,7 @@ def test_run_once_passes_config_to_process(mocker):
 
 def test_run_once_logs_folder_and_cycle_summary(mocker, caplog):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"], stt_provider="deepgram", deepgram_api_key="dg-x")
+    cfg = make_config(folders=["f1"], stt_provider="deepgram", deepgram_api_key="dg-x")
 
     items = [
         _item("v1", "a.mp4", has_mp3=True, has_txt=False, mp3_id="m1", mp3_name="a.mp3"),
@@ -1175,7 +1195,7 @@ def test_run_once_logs_folder_and_cycle_summary(mocker, caplog):
 
 def test_run_once_aggregates_retry_total_from_process_telemetry(mocker, caplog):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"], stt_provider="deepgram", deepgram_api_key="dg-x")
+    cfg = make_config(folders=["f1"], stt_provider="deepgram", deepgram_api_key="dg-x")
 
     mocker.patch(
         "src.main.drive.list_folder_state",
@@ -1199,7 +1219,7 @@ def test_run_once_aggregates_retry_total_from_process_telemetry(mocker, caplog):
 
 
 def test_main_runs_loop_and_sleeps(mocker):
-    cfg = make_config(folder_ids=["f1"], poll_interval=42)
+    cfg = make_config(folders=["f1"], poll_interval=42)
     mocker.patch("src.main.load_config", return_value=cfg)
     service = MagicMock()
     mocker.patch("src.main.build_drive_service", return_value=service)
@@ -1223,7 +1243,7 @@ def test_main_runs_loop_and_sleeps(mocker):
 
 def test_run_once_propagates_refresh_error(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"])
+    cfg = make_config(folders=["f1"])
 
     mocker.patch(
         "src.main.drive.list_folder_state",
@@ -1239,7 +1259,7 @@ def test_run_once_propagates_refresh_error(mocker):
 
 def test_run_once_propagates_refresh_error_from_process(mocker):
     service = MagicMock()
-    cfg = make_config(folder_ids=["f1"])
+    cfg = make_config(folders=["f1"])
 
     mocker.patch(
         "src.main.drive.list_folder_state",
@@ -1255,7 +1275,7 @@ def test_run_once_propagates_refresh_error_from_process(mocker):
 
 
 def test_main_exits_on_bootstrap_auth_error(mocker):
-    cfg = make_config(folder_ids=["f1"], poll_interval=1)
+    cfg = make_config(folders=["f1"], poll_interval=1)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch(
         "src.main.build_drive_service", side_effect=AuthError("malformed token")
@@ -1273,7 +1293,7 @@ def test_main_exits_on_bootstrap_auth_error(mocker):
 
 
 def test_main_exits_on_bootstrap_refresh_error(mocker):
-    cfg = make_config(folder_ids=["f1"], poll_interval=1)
+    cfg = make_config(folders=["f1"], poll_interval=1)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch(
         "src.main.build_drive_service", side_effect=RefreshError("revoked")
@@ -1288,7 +1308,7 @@ def test_main_exits_on_bootstrap_refresh_error(mocker):
 
 
 def test_main_exits_on_refresh_error(mocker):
-    cfg = make_config(folder_ids=["f1"], poll_interval=1)
+    cfg = make_config(folders=["f1"], poll_interval=1)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch("src.main.build_drive_service", return_value=MagicMock())
     mocker.patch("src.main.run_once", side_effect=RefreshError("revoked"))
@@ -1305,7 +1325,7 @@ def test_main_exits_on_refresh_error(mocker):
 
 
 def test_main_exits_on_auth_error(mocker):
-    cfg = make_config(folder_ids=["f1"], poll_interval=1)
+    cfg = make_config(folders=["f1"], poll_interval=1)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch("src.main.build_drive_service", return_value=MagicMock())
     mocker.patch("src.main.run_once", side_effect=AuthError("token gone"))
@@ -1319,7 +1339,7 @@ def test_main_exits_on_auth_error(mocker):
 
 
 def test_main_notifies_on_cycle_exception(mocker):
-    cfg = make_config(folder_ids=["f1"], poll_interval=1)
+    cfg = make_config(folders=["f1"], poll_interval=1)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch("src.main.build_drive_service", return_value=MagicMock())
 
@@ -1851,11 +1871,55 @@ def test_process_item_skips_presets_with_existing_artifacts(mocker, tmp_path):
         "video.mp4",
         artifact_ids={"transcript-cleanup": "c1", "keypoints": "k1"},
     )
-    main.process_item(service, item, "folderX", _two_preset_config())
+    config = _two_preset_config(webhook_url="https://hook.example/x")
+    main.process_item(service, item, "folderX", config)
 
     run_mock.assert_called_once()
     assert run_mock.call_args.kwargs["only"] == ["expertizeme-managers"]
     assert run_mock.call_args.kwargs["precomputed"] == {"transcript-cleanup": "cleaned"}
+    # c1 feeds the dependency; k1 is read back only so the webhook payload carries
+    # the keypoints produced on an earlier cycle. Neither preset is re-run.
+    assert download_text.call_count == 2
+    download_text.assert_any_call(service, "c1")
+    download_text.assert_any_call(service, "k1")
+
+
+def test_process_item_skips_webhook_backfill_when_no_webhook_configured(
+    mocker, tmp_path
+):
+    """Without a receiver, don't pay a Drive read per earlier-cycle artifact.
+
+    The backfill's only consumer is the completion webhook, which no-ops on a blank
+    URL — so reading ``k1`` back would be a round-trip whose result is discarded.
+    The dependency read (``c1``) still happens: it feeds the preset that is re-run.
+    """
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    download_text = mocker.patch(
+        "src.main.drive.download_text", return_value="cleaned"
+    )
+    mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "expertizeme-managers": PresetResult(
+                name="expertizeme-managers", text="notes"
+            ),
+        },
+    )
+
+    item = _item(
+        "fid",
+        "video.mp4",
+        artifact_ids={"transcript-cleanup": "c1", "keypoints": "k1"},
+    )
+    main.process_item(service, item, "folderX", _two_preset_config(webhook_url=""))
+
     download_text.assert_called_once_with(service, "c1")
 
 
@@ -1882,6 +1946,94 @@ def test_process_item_skips_preset_stage_when_all_present(mocker, tmp_path):
     main.process_item(service, item, "folderX", _two_preset_config())
 
     run_mock.assert_not_called()
+
+
+def test_process_item_backfills_webhook_when_every_preset_already_present(
+    mocker, tmp_path
+):
+    """A regenerated `.txt` still ships the earlier cycle's artifacts to the receiver.
+
+    When a file's `.txt` sibling is deleted but its preset artifacts survive, the
+    file is re-selected and re-transcribed, yet no preset is missing — so the stage
+    runs nothing. The webhook fires regardless (the `.txt` was uploaded), so it must
+    still carry the artifacts sitting on Drive rather than an empty map.
+    """
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mocker.patch("src.main.drive.download_text", side_effect=lambda svc, fid: fid)
+    run_mock = mocker.patch("src.main.preset_pipeline.run_presets")
+
+    item = _item(
+        "fid",
+        "video.mp4",
+        artifact_ids={
+            "transcript-cleanup": "c1",
+            "keypoints": "k1",
+            "expertizeme-managers": "e1",
+        },
+    )
+    config = _two_preset_config(webhook_url="https://hook.example/x")
+    telemetry = main.process_item(service, item, "folderX", config)
+
+    run_mock.assert_not_called()
+    assert telemetry is not None
+    assert telemetry.artifacts == {
+        "transcript-cleanup": "c1",
+        "keypoints": "k1",
+        "expertizeme-managers": "e1",
+    }
+
+
+def test_process_item_survives_backfill_read_failure(mocker, tmp_path):
+    """A failed backfill read degrades the payload instead of failing the file.
+
+    The backfill's reads exist only to enrich the webhook, and they run after every
+    artifact is already persisted. If a Drive read raised out of the stage, a file
+    that fully succeeded would be counted failed and alerted on — and it would never
+    reach the webhook at all, since the next cycle finds no preset missing.
+    """
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+    mp3_path = tmp_path / "video.mp3"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=mp3_path)
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+
+    def flaky_download(svc, fid):
+        if fid == "k1":
+            raise RuntimeError("drive 404")
+        return fid
+
+    mocker.patch("src.main.drive.download_text", side_effect=flaky_download)
+    notify = mocker.patch("src.main.webhook.notify_complete")
+
+    item = _item(
+        "fid",
+        "video.mp4",
+        artifact_ids={
+            "transcript-cleanup": "c1",
+            "keypoints": "k1",
+            "expertizeme-managers": "e1",
+        },
+    )
+    config = _two_preset_config(webhook_url="https://hook.example/x")
+    telemetry = main.process_item(service, item, "folderX", config)
+
+    # The unreadable preset drops out; the rest still reach the receiver.
+    assert telemetry is not None
+    assert telemetry.artifacts == {
+        "transcript-cleanup": "c1",
+        "expertizeme-managers": "e1",
+    }
+    notify.assert_called_once()
 
 
 def test_process_item_raises_aggregated_error_but_persists_successes(mocker, tmp_path):
@@ -1947,13 +2099,17 @@ def test_process_item_reprocesses_missing_presets_from_existing_drive_txt(mocker
         txt_id="t1",
         artifact_ids={"transcript-cleanup": "c1", "keypoints": "k1"},
     )
-    main.process_item(service, item, "folderX", _two_preset_config())
+    config = _two_preset_config(webhook_url="https://hook.example/x")
+    main.process_item(service, item, "folderX", config)
 
     transcribe.assert_not_called()
-    # t1 = the existing transcript; c1 = the reused transcript-cleanup artifact.
-    assert download_text.call_count == 2
+    # t1 = the existing transcript; c1 = the reused transcript-cleanup artifact;
+    # k1 = the earlier keypoints, read back so the webhook payload is complete
+    # (the k1 read is why this config carries a webhook.url).
+    assert download_text.call_count == 3
     download_text.assert_any_call(service, "t1")
     download_text.assert_any_call(service, "c1")
+    download_text.assert_any_call(service, "k1")
     run_mock.assert_called_once()
     assert run_mock.call_args.args[0] == "existing transcript"
     assert run_mock.call_args.kwargs["only"] == ["expertizeme-managers"]
@@ -2099,7 +2255,7 @@ def test_main_loop_idles_while_run_disabled_without_running(mocker):
     # `gdstt stop` keeps the loop alive but idle: run_once is never called while
     # run.enabled is false. The container stays up (no break/exit) so a Docker
     # `restart: unless-stopped` policy does not auto-resume processing.
-    cfg = make_config(folder_ids=["f1"], poll_interval=7)
+    cfg = make_config(folders=["f1"], poll_interval=7)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch("src.main.build_drive_service", return_value=MagicMock())
     mocker.patch("src.main.is_run_enabled", return_value=False)
@@ -2117,7 +2273,7 @@ def test_main_loop_idles_while_run_disabled_without_running(mocker):
 def test_main_loop_runs_while_enabled_and_idles_when_disabled(mocker):
     # Enabled twice (two cycles), then disabled (idle). run_once is called only
     # while enabled; once disabled the loop idles instead of exiting.
-    cfg = make_config(folder_ids=["f1"], poll_interval=5)
+    cfg = make_config(folders=["f1"], poll_interval=5)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch("src.main.build_drive_service", return_value=MagicMock())
     mocker.patch("src.main.is_run_enabled", side_effect=[True, True, False])
@@ -2136,7 +2292,7 @@ def test_main_does_not_enable_run_on_startup(mocker):
     # container restart instead of resuming on the next boot.
     import dataclasses
 
-    cfg = dataclasses.replace(make_config(folder_ids=["f1"]), run_enabled=False)
+    cfg = dataclasses.replace(make_config(folders=["f1"]), run_enabled=False)
     mocker.patch("src.main.load_config", return_value=cfg)
     mocker.patch("src.main.build_drive_service", return_value=MagicMock())
     mocker.patch("src.main.is_run_enabled", return_value=False)
@@ -2182,8 +2338,400 @@ def test_run_preset_stage_forces_only_selected(mocker):
         reprocess=False,
         only_presets=["action-items"],
         usage={},
+        unproduced=set(),
     )
 
     kwargs = run_presets.call_args.kwargs
     assert kwargs["only"] == ["action-items"]
     assert kwargs["precomputed"] == {"transcript-cleanup": "cleanup text"}
+
+
+def test_process_item_telemetry_carries_preset_artifacts(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "transcript-cleanup": PresetResult(
+                name="transcript-cleanup", text="Alice: hi"
+            ),
+            "keypoints": PresetResult(name="keypoints", text="## Задачи"),
+            "expertizeme-managers": PresetResult(
+                name="expertizeme-managers", text="notes"
+            ),
+        },
+    )
+
+    telemetry = main.process_item(
+        service, _item("fid", "video.mp4"), "folderX", _two_preset_config()
+    )
+
+    assert telemetry is not None
+    assert telemetry.transcript == "Speaker 1: hi"
+    assert telemetry.artifacts == {
+        "transcript-cleanup": "Alice: hi",
+        "keypoints": "## Задачи",
+        "expertizeme-managers": "notes",
+    }
+
+
+def test_process_item_telemetry_omits_empty_preset_artifacts(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "transcript-cleanup": PresetResult(
+                name="transcript-cleanup", text="Alice: hi"
+            ),
+            "keypoints": PresetResult(name="keypoints", text="   "),
+        },
+    )
+
+    telemetry = main.process_item(
+        service, _item("fid", "video.mp4"), "folderX", _two_preset_config()
+    )
+
+    assert telemetry is not None
+    assert telemetry.artifacts == {"transcript-cleanup": "Alice: hi"}
+
+
+def test_process_item_telemetry_artifacts_empty_without_presets(mocker, tmp_path):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+
+    cfg = make_config(
+        stt_provider="deepgram",
+        deepgram_api_key="dg-x",
+        deepgram_audio_source="mp3_96k",
+        drive_mp3_artifact=False,
+    )
+    telemetry = main.process_item(service, _item("fid", "video.mp4"), "folderX", cfg)
+
+    assert telemetry is not None
+    assert telemetry.artifacts == {}
+    assert telemetry.transcript == "Speaker 1: hi"
+
+
+def test_process_item_telemetry_carries_artifacts_on_preset_refeed(mocker, tmp_path):
+    """Only ``expertizeme-managers`` is missing, so it alone is re-run — but the
+    webhook fires once per file, so the presets that succeeded on an earlier cycle
+    must be read back from their artifacts and reach the receiver too."""
+    service = MagicMock()
+    mocker.patch(
+        "src.main.drive.download_text",
+        side_effect=lambda svc, file_id: {
+            "t1": "existing transcript",
+            "c1": "Alice: hi",
+            "k1": "earlier keypoints",
+        }[file_id],
+    )
+    mocker.patch("src.main.transcribe_file")
+    mocker.patch("src.main.drive.upload")
+    mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "transcript-cleanup": PresetResult(
+                name="transcript-cleanup", text="Alice: hi"
+            ),
+            "expertizeme-managers": PresetResult(
+                name="expertizeme-managers", text="notes"
+            ),
+        },
+    )
+
+    item = _item(
+        "fid",
+        "video.mp4",
+        has_txt=True,
+        txt_id="t1",
+        artifact_ids={"transcript-cleanup": "c1", "keypoints": "k1"},
+    )
+    # The backfill exists only to feed the receiver, so it is gated on a configured
+    # webhook — this test asserts the backfill, hence the URL.
+    config = _two_preset_config(webhook_url="https://hook.example/x")
+    telemetry = main.process_item(service, item, "folderX", config)
+
+    assert telemetry is not None
+    # The re-fed transcript, not a fresh STT pass.
+    assert telemetry.transcript == "existing transcript"
+    assert telemetry.artifacts == {
+        "transcript-cleanup": "Alice: hi",
+        "expertizeme-managers": "notes",
+        "keypoints": "earlier keypoints",
+    }
+
+
+# --- completion webhook ------------------------------------------------------
+
+
+_META_ARTIFACT = (
+    "---\n"
+    "topic: Консультация по визе O-1\n"
+    "tags: [O-1, клиентская-консультация, invented-tag]\n"
+    "---\n"
+)
+
+
+def _webhook_config(**overrides):
+    """A two-preset config whose DAG also produces a `meta` artifact."""
+    presets = (
+        Preset(name="transcript-cleanup", instructions="clean it"),
+        Preset(
+            name="keypoints",
+            instructions="summarize",
+            artifact_suffix=".keypoints.md",
+            depends_on=("transcript-cleanup",),
+        ),
+        Preset(
+            name="meta",
+            instructions="topic and tags",
+            artifact_suffix=".meta.md",
+            depends_on=("transcript-cleanup",),
+        ),
+    )
+    base = dict(
+        stt_provider="deepgram",
+        deepgram_api_key="dg-x",
+        deepgram_audio_source="mp3_96k",
+        openai_api_key="sk-x",
+        openai_keypoints=True,
+        drive_mp3_artifact=False,
+        presets=presets,
+        folders=[
+            EmployeeFolder("folderX", name="Олег Иванов", email="oleg@expertizeme.org")
+        ],
+        tags_allowed=("O-1", "клиентская-консультация"),
+        webhook_url="https://example.com/hooks/gdstt",
+        webhook_token="secret",
+    )
+    base.update(overrides)
+    return make_config(**base)
+
+
+def _mock_successful_run(mocker, tmp_path, *, meta_text=_META_ARTIFACT):
+    mocker.patch("src.main.drive.download", return_value=tmp_path / "video.mp4")
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "transcript-cleanup": PresetResult(
+                name="transcript-cleanup", text="Ольга: привет"
+            ),
+            "keypoints": PresetResult(name="keypoints", text="## Задачи"),
+            "meta": PresetResult(name="meta", text=meta_text),
+        },
+    )
+    return mocker.patch("src.main.webhook.notify_complete")
+
+
+def test_webhook_fired_once_with_employee_and_artifacts(mocker, tmp_path):
+    notify = _mock_successful_run(mocker, tmp_path)
+
+    main.process_item(
+        MagicMock(), _item("fid", "video.mp4"), "folderX", _webhook_config()
+    )
+
+    notify.assert_called_once()
+    kwargs = notify.call_args.kwargs
+    assert kwargs["url"] == "https://example.com/hooks/gdstt"
+    assert kwargs["token"] == "secret"
+    assert kwargs["payload"] == {
+        "file": {"id": "fid", "name": "video.mp4", "folder_id": "folderX"},
+        "employee": {"name": "Олег Иванов", "email": "oleg@expertizeme.org"},
+        "transcript": "Speaker 1: hi",
+        "artifacts": {
+            "transcript-cleanup": "Ольга: привет",
+            "keypoints": "## Задачи",
+            # `meta` is parsed into structured fields; `invented-tag` is outside the
+            # configured allow-list and must not reach the receiver.
+            "meta": {
+                "topic": "Консультация по визе O-1",
+                "tags": ["O-1", "клиентская-консультация"],
+            },
+        },
+    }
+
+
+def test_webhook_withheld_while_a_preset_produced_no_artifact(mocker, tmp_path, caplog):
+    """A blank `ok` preset writes no artifact, so the file stays pending and is
+    re-selected every cycle. Firing here would re-POST the transcript forever — the
+    receiver gets no retry and has no dedupe key — so the webhook waits."""
+    notify = _mock_successful_run(mocker, tmp_path, meta_text="   ")
+
+    with caplog.at_level(logging.WARNING, logger="src.main"):
+        main.process_item(
+            MagicMock(), _item("fid", "video.mp4"), "folderX", _webhook_config()
+        )
+
+    notify.assert_not_called()
+    assert "Completion webhook withheld" in caplog.text
+
+
+def test_webhook_unknown_employee_sends_empty_strings(mocker, tmp_path):
+    notify = _mock_successful_run(mocker, tmp_path)
+
+    # The file's folder isn't in `folders` at all — the payload keeps the key.
+    main.process_item(
+        MagicMock(), _item("fid", "video.mp4"), "otherFolder", _webhook_config()
+    )
+
+    payload = notify.call_args.kwargs["payload"]
+    assert payload["employee"] == {"name": "", "email": ""}
+    assert payload["file"]["folder_id"] == "otherFolder"
+
+
+def test_webhook_malformed_meta_degrades_to_empty_fields(mocker, tmp_path):
+    notify = _mock_successful_run(mocker, tmp_path, meta_text="not frontmatter at all")
+
+    main.process_item(
+        MagicMock(), _item("fid", "video.mp4"), "folderX", _webhook_config()
+    )
+
+    artifacts = notify.call_args.kwargs["payload"]["artifacts"]
+    assert artifacts["meta"] == {"topic": "", "tags": []}
+
+
+def test_webhook_not_fired_when_file_skipped(mocker, tmp_path):
+    notify = mocker.patch("src.main.webhook.notify_complete")
+
+    # Nothing to do: mp3 and txt exist and no preset is configured.
+    cfg = make_config(
+        stt_provider="deepgram",
+        deepgram_api_key="dg-x",
+        webhook_url="https://example.com/hooks/gdstt",
+    )
+    telemetry = main.process_item(
+        MagicMock(),
+        _item("fid", "video.mp4", has_mp3=True, has_txt=True),
+        "folderA",
+        cfg,
+    )
+
+    assert telemetry is None
+    notify.assert_not_called()
+
+
+def test_webhook_receives_the_configured_proxy(mocker, tmp_path):
+    """The proxy is honoured inside notify_complete; this pins the wiring. Without
+    it, a proxied deployment silently stops delivering — notify_complete swallows the
+    connection error and the file still processes."""
+    notify = _mock_successful_run(mocker, tmp_path)
+
+    main.process_item(
+        MagicMock(),
+        _item("fid", "video.mp4"),
+        "folderX",
+        _webhook_config(proxy_url="http://proxy:3128"),
+    )
+
+    assert notify.call_args.kwargs["proxy_url"] == "http://proxy:3128"
+
+
+def test_webhook_not_fired_for_an_mp3_only_pass(mocker, tmp_path):
+    """STT disabled and only the mp3 artifact wanted: there is no transcript and no
+    preset output, so POSTing blanks would overwrite a good record on the receiver."""
+    notify = mocker.patch("src.main.webhook.notify_complete")
+    mocker.patch("src.main.drive.download", return_value=tmp_path / "video.mp4")
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    mocker.patch("src.main.drive.upload")
+
+    cfg = _webhook_config(stt_provider="", presets=(), drive_mp3_artifact=True)
+    telemetry = main.process_item(
+        MagicMock(), _item("fid", "video.mp4"), "folderX", cfg
+    )
+
+    assert telemetry is not None
+    assert telemetry.mp3_uploaded is True
+    notify.assert_not_called()
+
+
+def test_webhook_not_refired_when_only_a_late_mp3_is_added(mocker, tmp_path):
+    """Enabling drive_mp3_artifact after transcripts already exist backfills the mp3
+    only; the file's webhook already fired on the cycle that produced the transcript."""
+    notify = mocker.patch("src.main.webhook.notify_complete")
+    mocker.patch("src.main.drive.download", return_value=tmp_path / "video.mp4")
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    mocker.patch("src.main.drive.upload")
+
+    cfg = _webhook_config(presets=(), drive_mp3_artifact=True)
+    telemetry = main.process_item(
+        MagicMock(),
+        _item("fid", "video.mp4", has_txt=True, txt_id="t1", has_mp3=False),
+        "folderX",
+        cfg,
+    )
+
+    assert telemetry is not None
+    notify.assert_not_called()
+
+
+def test_webhook_not_fired_on_failure(mocker, tmp_path):
+    notify = _mock_successful_run(mocker, tmp_path)
+    mocker.patch("src.main.transcribe_file", side_effect=STTError("deepgram down"))
+
+    with pytest.raises(STTError):
+        main.process_item(
+            MagicMock(), _item("fid", "video.mp4"), "folderX", _webhook_config()
+        )
+
+    notify.assert_not_called()
+
+
+def test_webhook_exception_does_not_fail_the_file(mocker, tmp_path):
+    notify = _mock_successful_run(mocker, tmp_path)
+    notify.side_effect = RuntimeError("receiver exploded")
+
+    # notify_complete swallows its own errors, but a bug there must not undo a file
+    # that already transcribed and uploaded every artifact.
+    telemetry = main.process_item(
+        MagicMock(), _item("fid", "video.mp4"), "folderX", _webhook_config()
+    )
+
+    assert telemetry is not None
+    assert telemetry.txt_uploaded is True
+
+
+def test_process_summary_log_omits_artifact_text(mocker, tmp_path, caplog):
+    service = MagicMock()
+    mp4_path = tmp_path / "video.mp4"
+
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.drive.upload")
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: secret words")
+    mocker.patch(
+        "src.main.preset_pipeline.run_presets",
+        return_value={
+            "transcript-cleanup": PresetResult(
+                name="transcript-cleanup", text="Alice: confidential"
+            ),
+        },
+    )
+
+    with caplog.at_level("INFO"):
+        main.process_item(
+            service, _item("fid", "video.mp4"), "folderX", _two_preset_config()
+        )
+
+    summary = [r.getMessage() for r in caplog.records if "Process summary" in r.msg]
+    assert len(summary) == 1
+    assert "confidential" not in summary[0]
+    assert "secret words" not in summary[0]

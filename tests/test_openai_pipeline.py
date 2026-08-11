@@ -19,7 +19,7 @@ from src.stt.base import STTError
 
 def _config(**over) -> Config:
     base = dict(
-        folder_ids=[],
+        folders=[],
         poll_interval=600,
         bitrate="96k",
         data_dir=Path("data"),

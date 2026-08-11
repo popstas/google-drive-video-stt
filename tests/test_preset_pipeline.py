@@ -13,7 +13,7 @@ from src.preset_pipeline import PresetResult, aggregate_error, run_presets
 
 def _config(**over) -> Config:
     base = dict(
-        folder_ids=[],
+        folders=[],
         poll_interval=600,
         bitrate="96k",
         data_dir=Path("data"),

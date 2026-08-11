@@ -19,7 +19,6 @@ COPY pyproject.toml uv.lock LICENSE README.md ./
 RUN uv sync --frozen --no-install-project --no-dev
 
 COPY src ./src
-COPY config ./config
 
 RUN uv sync --frozen --no-dev
 

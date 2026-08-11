@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, replace
 from importlib.resources import files
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
 
@@ -37,14 +38,40 @@ OUTPUT_TARGETS = ("drive", "folder")
 DEEPGRAM_DIARIZE_MODELS = ("latest", "v1")
 DEEPGRAM_AUDIO_SOURCES = ("m4a_copy", "mp3_96k", "mp3_192k")
 DEEPGRAM_TXT_FORMATTERS = ("word_speaker", "utterance")
-DEEPGRAM_DEFAULT_KEYTERMS_FILE = Path("config/deepgram-keyterms.txt")
-DEEPGRAM_KEYTERMS_ASSET = "deepgram-keyterms.txt"
+DEEPGRAM_DEFAULT_KEYTERMS_FILE = Path("deepgram-keyterms-example.txt")
+DEEPGRAM_KEYTERMS_ASSET = "deepgram-keyterms-example.txt"
 DEEPGRAM_MAX_KEYTERMS = 100
+
+# Placeholder a preset prompt may carry to receive the config's ``tags.allowed``
+# list at load time. The built-in ``meta`` prompt uses it; any prompt may.
+ALLOWED_TAGS_PLACEHOLDER = "{{allowed_tags}}"
+
+
+FOLDER_IDS_MIGRATION_ERROR = (
+    "folder_ids is no longer supported; use\n"
+    "  folders:\n"
+    "    - folder_id: <id>\n"
+    "      name: <employee name>\n"
+    "      email: <employee email>"
+)
+
+
+@dataclass(frozen=True)
+class EmployeeFolder:
+    """One watched Drive folder and the employee it belongs to.
+
+    ``name``/``email`` are optional: a folder whose employee is unknown still polls,
+    and downstream consumers (the completion webhook) send empty strings for it.
+    """
+
+    folder_id: str
+    name: str = ""
+    email: str = ""
 
 
 @dataclass(frozen=True)
 class Config:
-    folder_ids: list[str]
+    folders: tuple[EmployeeFolder, ...]
     poll_interval: int
     bitrate: str
     data_dir: Path
@@ -77,6 +104,14 @@ class Config:
     # in the generated config.yml.
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    # The tag allow-list the ``meta`` preset may pick from. Empty means the preset
+    # has nothing to choose between and returns no tags.
+    tags_allowed: tuple[str, ...] = ()
+    # Completion-webhook target. A blank URL disables the webhook; the token, when
+    # set, is sent as ``Authorization: Bearer <token>``. See ``webhook`` in the
+    # generated config.yml.
+    webhook_url: str = ""
+    webhook_token: str = ""
     presets: tuple[Preset, ...] = ()
     # Google OAuth is config-owned and inline-first. ``google_credentials``/
     # ``google_token`` hold inline mappings (the OAuth client JSON and the saved
@@ -89,6 +124,13 @@ class Config:
     google_credentials_file: Path | None = None
     google_token_file: Path | None = None
     config_file: Path | None = None
+
+    def folder_by_id(self, folder_id: str) -> EmployeeFolder | None:
+        """Return the folder with ``folder_id``, or None when it isn't configured."""
+        for folder in self.folders:
+            if folder.folder_id == folder_id:
+                return folder
+        return None
 
 
 class UniqueKeyLoader(yaml.SafeLoader):
@@ -119,11 +161,84 @@ def _parse_config_yaml(text: str) -> object:
     return yaml.load(text, Loader=UniqueKeyLoader)
 
 
-def _parse_folder_ids(raw: str) -> list[str]:
-    return [item.strip() for item in raw.split(",") if item.strip()]
+def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
+    """Parse the ``folders:`` block into ``EmployeeFolder`` entries.
+
+    Each entry must be a mapping carrying a non-empty, unique ``folder_id``; ``name``
+    and ``email`` are optional and default to empty strings.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(
+            "folders must be a list of {folder_id, name, email} mappings, "
+            f"got: {raw!r}"
+        )
+    folders: list[EmployeeFolder] = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"folders[{index}] must be a mapping with folder_id/name/email, "
+                f"got: {entry!r}"
+            )
+        folder_id = _yaml_str(entry.get("folder_id"))
+        if not folder_id:
+            raise ValueError(f"folders[{index}] must define a non-empty folder_id")
+        if any(folder.folder_id == folder_id for folder in folders):
+            # Otherwise the folder is polled once per entry and folder_by_id silently
+            # attributes every file in it to whichever employee was listed first.
+            raise ValueError(
+                f"folders[{index}] repeats folder_id {folder_id!r}; "
+                "each folder must be listed once"
+            )
+        folders.append(
+            EmployeeFolder(
+                folder_id=folder_id,
+                name=_yaml_str(entry.get("name")),
+                email=_yaml_str(entry.get("email")),
+            )
+        )
+    return tuple(folders)
 
 
-def _resolve_prompt_text(preset: Preset, config_file: Path | None) -> str:
+def _parse_tags_allowed(raw: object) -> tuple[str, ...]:
+    """Parse the ``tags.allowed`` list into a tuple of non-empty tag names."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"tags.allowed must be a list of tags, got: {raw!r}")
+    return tuple(tag for tag in (_yaml_str(entry) for entry in raw) if tag)
+
+
+def _render_allowed_tags(tags_allowed: tuple[str, ...]) -> str:
+    """Render ``tags.allowed`` as the bullet list that replaces the placeholder.
+
+    An empty allow-list renders an explicit "none" line rather than a blank
+    section, so a prompt handed no tags tells the model to return an empty list
+    instead of leaving it free to invent one.
+    """
+    if not tags_allowed:
+        return "(none configured — return an empty tags list)"
+    return "\n".join(f"- {tag}" for tag in tags_allowed)
+
+
+def _render_prompt_placeholders(text: str, tags_allowed: tuple[str, ...]) -> str:
+    """Substitute the supported ``{{...}}`` placeholders in a resolved prompt.
+
+    Today that is only ``{{allowed_tags}}`` (the ``meta`` preset's tag allow-list).
+    A prompt without the placeholder is returned unchanged, so this is safe to run
+    over every preset's text.
+    """
+    if ALLOWED_TAGS_PLACEHOLDER not in text:
+        return text
+    return text.replace(ALLOWED_TAGS_PLACEHOLDER, _render_allowed_tags(tags_allowed))
+
+
+def _resolve_prompt_text(
+    preset: Preset,
+    config_file: Path | None,
+    tags_allowed: tuple[str, ...] = (),
+) -> str:
     """Resolve a preset's final prompt text from instructions or prompt_file.
 
     Resolution priority: inline ``instructions`` win; otherwise ``prompt_file`` is
@@ -132,9 +247,12 @@ def _resolve_prompt_text(preset: Preset, config_file: Path | None) -> str:
     config file exists), then the packaged asset by base name. A ``prompt_file``
     that resolves but is missing/unreadable/empty raises ``ValueError``; a preset
     with neither instructions nor prompt_file also raises.
+
+    The resolved text has its ``{{...}}`` placeholders rendered from ``tags_allowed``
+    before it is returned, so the pipeline never sees an unrendered prompt.
     """
     if preset.instructions.strip():
-        return preset.instructions
+        return _render_prompt_placeholders(preset.instructions, tags_allowed)
     if not preset.prompt_file:
         raise ValueError(
             f"preset {preset.name!r} must define instructions or prompt_file"
@@ -151,25 +269,30 @@ def _resolve_prompt_text(preset: Preset, config_file: Path | None) -> str:
                     f"preset {preset.name!r} prompt_file {preset.prompt_file!r} "
                     f"is empty: {candidate}"
                 )
-            return text
+            return _render_prompt_placeholders(text, tags_allowed)
 
     try:
-        return load_packaged_prompt(os.path.basename(preset.prompt_file))
+        text = load_packaged_prompt(os.path.basename(preset.prompt_file))
     except ValueError as exc:
         raise ValueError(
             f"preset {preset.name!r} prompt_file {preset.prompt_file!r} "
             f"could not be resolved: {exc}"
         ) from exc
+    return _render_prompt_placeholders(text, tags_allowed)
 
 
 def _resolve_presets(
     config_presets: dict | None,
     config_file: Path | None = None,
+    tags_allowed: tuple[str, ...] = (),
 ) -> tuple[Preset, ...]:
     """Merge config presets over built-ins, resolve prompts, validate, and freeze."""
     merged = merge_presets(BUILTIN_PRESETS, config_presets)
     resolved = {
-        name: replace(preset, instructions=_resolve_prompt_text(preset, config_file))
+        name: replace(
+            preset,
+            instructions=_resolve_prompt_text(preset, config_file, tags_allowed),
+        )
         for name, preset in merged.items()
     }
     validate_dag(resolved)
@@ -265,14 +388,30 @@ def _parse_bool(raw: str, *, default: bool) -> bool:
     raise ValueError(f"Expected boolean value, got: {raw!r}")
 
 
-def _load_deepgram_keyterms(enabled: bool, keyterms_file: Path) -> tuple[str, ...]:
+def _load_deepgram_keyterms(
+    enabled: bool, keyterms_file: Path, *, explicit: bool = True
+) -> tuple[str, ...]:
     if not enabled:
         return ()
 
     try:
         raw_lines = keyterms_file.read_text(encoding="utf-8-sig").splitlines()
     except OSError as exc:
-        raise ValueError(f"DEEPGRAM_KEYTERMS_FILE could not be read: {keyterms_file}") from exc
+        # Keyterms default to on, but the default file only exists because
+        # `config init` copies the example beside the config. A config that predates
+        # that (or one whose operator deleted the sample, as the README suggests)
+        # must still start: keyterm prompting is an optimisation, not a requirement.
+        # An explicitly configured path that cannot be read stays a hard error.
+        if not explicit:
+            logger.warning(
+                "stt.deepgram.keyterms_file %s not found; continuing without keyterm "
+                "prompting. Run `gdstt config init` or set stt.deepgram.keyterms_file.",
+                keyterms_file,
+            )
+            return ()
+        raise ValueError(
+            f"stt.deepgram.keyterms_file could not be read: {keyterms_file}"
+        ) from exc
 
     keyterms = tuple(
         line.strip()
@@ -281,7 +420,7 @@ def _load_deepgram_keyterms(enabled: bool, keyterms_file: Path) -> tuple[str, ..
     )
     if len(keyterms) > DEEPGRAM_MAX_KEYTERMS:
         raise ValueError(
-            f"DEEPGRAM_KEYTERMS_FILE may contain at most {DEEPGRAM_MAX_KEYTERMS} "
+            f"stt.deepgram.keyterms_file may contain at most {DEEPGRAM_MAX_KEYTERMS} "
             f"keyterms, got: {len(keyterms)}"
         )
     return keyterms
@@ -385,6 +524,49 @@ def _yaml_bool(value: object, *, default: bool) -> bool:
     raise ValueError(f"Expected boolean value, got: {value!r}")
 
 
+def _validate_webhook_url(url: str) -> None:
+    """Reject a webhook URL that could never be delivered.
+
+    Delivery is fire-and-forget with no retry and ``notify_complete`` swallows every
+    exception, so a typo like a missing scheme would otherwise load clean and then
+    drop every notification with the only trace in a per-file warning. Unlike the
+    plaintext case below, this is a config error rather than an operator choice.
+    """
+    target = url.strip()
+    if not target:
+        return
+    parsed = urlparse(target)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(
+            "webhook.url must be an absolute http:// or https:// URL, got: "
+            f"{url!r}"
+        )
+
+
+def _warn_on_plaintext_webhook(url: str) -> None:
+    """Warn once at load when the completion webhook targets a plaintext receiver.
+
+    The payload carries PII (employee email plus the full transcript) and the request
+    carries the bearer token, so an ``http://`` receiver exposes all of it to any
+    on-path observer. Loopback is exempt — it never leaves the host — and this warns
+    rather than raises because internal plaintext receivers are a legitimate (if
+    unwise) operator choice, not a config error we should refuse to start on.
+    """
+    target = url.strip()
+    if not target:
+        return
+    parsed = urlparse(target)
+    if parsed.scheme != "http":
+        return
+    if (parsed.hostname or "") in {"localhost", "127.0.0.1", "::1"}:
+        return
+    logger.warning(
+        "webhook.url uses http://; the bearer token and the transcript payload "
+        "(including the employee email) will cross the network in clear text. "
+        "Use https:// unless the receiver is loopback."
+    )
+
+
 def _config_from_yaml(
     raw: dict,
     config_file: Path,
@@ -401,12 +583,21 @@ def _config_from_yaml(
     run = _as_mapping(raw.get("run"), "run")
     notifications = _as_mapping(raw.get("notifications"), "notifications")
     telegram = _as_mapping(notifications.get("telegram"), "notifications.telegram")
+    tags = _as_mapping(raw.get("tags"), "tags")
+    webhook = _as_mapping(raw.get("webhook"), "webhook")
     config_presets = _as_mapping(raw.get("presets"), "presets")
 
     run_enabled = _yaml_bool(run.get("enabled"), default=True)
 
     telegram_bot_token = _yaml_str(telegram.get("bot_token"))
     telegram_chat_id = _yaml_str(telegram.get("chat_id"))
+
+    tags_allowed = _parse_tags_allowed(tags.get("allowed"))
+
+    webhook_url = _yaml_str(webhook.get("url"))
+    webhook_token = _yaml_str(webhook.get("token"))
+    _validate_webhook_url(webhook_url)
+    _warn_on_plaintext_webhook(webhook_url)
 
     (
         google_credentials,
@@ -415,13 +606,11 @@ def _config_from_yaml(
         google_token_file,
     ) = _resolve_google_auth(google, base)
 
-    folder_ids_raw = raw.get("folder_ids") or []
-    if isinstance(folder_ids_raw, str):
-        folder_ids = _parse_folder_ids(folder_ids_raw)
-    elif isinstance(folder_ids_raw, (list, tuple)):
-        folder_ids = [str(item).strip() for item in folder_ids_raw if str(item).strip()]
-    else:
-        raise ValueError("folder_ids must be a list or comma-separated string")
+    # Clean break: a config still on the old flat list must be rewritten by hand so
+    # each folder gains its employee, rather than silently polling nameless folders.
+    if "folder_ids" in raw:
+        raise ValueError(FOLDER_IDS_MIGRATION_ERROR)
+    folders = _parse_folders(raw.get("folders"))
 
     poll_raw = raw.get("poll_interval", 600)
     try:
@@ -456,7 +645,7 @@ def _config_from_yaml(
     openai_batch = _yaml_bool(openai.get("batch"), default=False)
     openai_batch_wait = _yaml_bool(openai.get("batch_wait"), default=True)
     openai_max_parallel = _parse_max_parallel(openai.get("max_parallel"), default=4)
-    presets = _resolve_presets(config_presets, config_file)
+    presets = _resolve_presets(config_presets, config_file, tags_allowed)
 
     deepgram_api_key = ""
     deepgram_model = _yaml_str(deepgram.get("model"), "nova-3") or "nova-3"
@@ -472,9 +661,16 @@ def _config_from_yaml(
     deepgram_keyterms_enabled = _yaml_bool(
         deepgram.get("keyterms_enabled"), default=True
     )
+    deepgram_keyterms_raw = _yaml_str(deepgram.get("keyterms_file"))
+    # `config init` writes the default example path verbatim, so a present value that
+    # merely repeats the default is not an operator choice: it gets the same
+    # missing-file-warns-and-continues path as an omitted value.
+    deepgram_keyterms_explicit = (
+        bool(deepgram_keyterms_raw.strip())
+        and deepgram_keyterms_raw.strip() != DEEPGRAM_DEFAULT_KEYTERMS_FILE.as_posix()
+    )
     deepgram_keyterms_file = _resolve_relative_to(
-        _yaml_str(deepgram.get("keyterms_file"), str(DEEPGRAM_DEFAULT_KEYTERMS_FILE))
-        or str(DEEPGRAM_DEFAULT_KEYTERMS_FILE),
+        deepgram_keyterms_raw or str(DEEPGRAM_DEFAULT_KEYTERMS_FILE),
         base,
     )
     deepgram_keyterms: tuple[str, ...] = ()
@@ -530,10 +726,11 @@ def _config_from_yaml(
             deepgram_keyterms = _load_deepgram_keyterms(
                 deepgram_keyterms_enabled,
                 deepgram_keyterms_file,
+                explicit=deepgram_keyterms_explicit,
             )
 
     return Config(
-        folder_ids=folder_ids,
+        folders=folders,
         poll_interval=poll_interval,
         bitrate=bitrate,
         data_dir=data_dir,
@@ -561,6 +758,9 @@ def _config_from_yaml(
         deepgram_keyterms=deepgram_keyterms,
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
+        tags_allowed=tags_allowed,
+        webhook_url=webhook_url,
+        webhook_token=webhook_token,
         presets=presets,
         google_credentials=google_credentials,
         google_token=google_token,
@@ -660,8 +860,9 @@ def _default_config_dict(
 ) -> dict:
     """Build a full default ``config.yml`` mapping for ``config init``/``link``.
 
-    The default preset chain is ``transcript-cleanup -> keypoints + action-items``
-    with all three presets enabled; every prompt_file uses ``/``-style relative
+    The default preset chain is
+    ``transcript-cleanup -> keypoints + action-items + meta`` with all four presets
+    enabled; every prompt_file uses ``/``-style relative
     paths so the generated YAML is portable. ``prompt_dir`` (when given) is a
     ``/``-joined path the prompts were copied to and that the prompt_file entries
     point at; otherwise the default ``prompts/<name>.md`` layout is used.
@@ -673,8 +874,8 @@ def _default_config_dict(
         return _default_prompt_file(name)
 
     # Default chain (all enabled out of the box): transcript-cleanup runs first and
-    # both keypoints and action-items depend on it. Order matters in the generated
-    # YAML, so transcript-cleanup is written above keypoints.
+    # keypoints, action-items, and meta all depend on it. Order matters in the
+    # generated YAML, so transcript-cleanup is written above its dependents.
     presets: dict[str, dict] = {
         "transcript-cleanup": {
             "enabled": True,
@@ -690,10 +891,15 @@ def _default_config_dict(
             "depends_on": ["transcript-cleanup"],
             "prompt_file": prompt_path("action-items"),
         },
+        "meta": {
+            "enabled": True,
+            "depends_on": ["transcript-cleanup"],
+            "prompt_file": prompt_path("meta"),
+        },
     }
 
     config: dict[str, object] = {
-        "folder_ids": [],
+        "folders": [],
         "poll_interval": 600,
         "bitrate": "96k",
         "data_dir": data_dir or ".",
@@ -729,6 +935,10 @@ def _default_config_dict(
                 "chat_id": "",
             },
         },
+        # Seeded empty: the `meta` preset picks tags only from this list.
+        "tags": {"allowed": []},
+        # Seeded empty: a blank url disables the completion webhook.
+        "webhook": {"url": "", "token": ""},
         # Google auth is inline-first and config-owned. The generated config ships an
         # empty block (no *_file pointers) so the data_dir fallback applies until the
         # operator runs `gdstt auth import-credentials` / `auth use-files`.
@@ -776,7 +986,7 @@ def load_packaged_keyterms() -> str:
 
 
 def copy_deepgram_keyterms_asset(config_dir: Path, *, overwrite: bool = False) -> Path:
-    """Copy the packaged Deepgram keyterms file beside a generated config."""
+    """Copy the packaged Deepgram keyterms example beside a generated config."""
     dest = config_dir / DEEPGRAM_DEFAULT_KEYTERMS_FILE
     if dest.exists() and not overwrite:
         return dest
@@ -817,7 +1027,10 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
     locations. See :func:`_relpath_for_config`.
     """
     return {
-        "folder_ids": list(config.folder_ids),
+        "folders": [
+            {"folder_id": folder.folder_id, "name": folder.name, "email": folder.email}
+            for folder in config.folders
+        ],
         "poll_interval": config.poll_interval,
         "bitrate": config.bitrate,
         "data_dir": _relpath_for_config(config.data_dir, config_file),
@@ -864,6 +1077,10 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
                 "chat_id": config.telegram_chat_id,
             },
         },
+        # The tag allow-list is operator-owned data with no other home: omitting it
+        # here would drop it from the file on any whole-Config rewrite.
+        "tags": {"allowed": list(config.tags_allowed)},
+        "webhook": {"url": config.webhook_url, "token": config.webhook_token},
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
         # the prompt text stays owned by the .md assets; disabled built-ins (e.g.
@@ -964,7 +1181,7 @@ def init_config(
     the runtime reads: an explicit ``config_path`` wins; otherwise the active
     config is ``<GDSTT_HOME>/config.yml`` when ``GDSTT_HOME`` is set, falling back
     to ``./data/config.yml`` when it is unset. The default preset chain is
-    ``transcript-cleanup -> keypoints + action-items`` with all three presets
+    ``transcript-cleanup -> keypoints + action-items + meta`` with all four presets
     enabled. Prompt assets are always copied beside the config: into
     ``prompt_dir`` when given (and the ``prompt_file`` entries point there), else
     into ``<config_dir>/prompts/``.
@@ -1031,6 +1248,48 @@ MASKED_LEAF_KEYS: frozenset[str] = frozenset(
     {"client_secret", "refresh_token", "token", "access_token", "api_key", "bot_token"}
 )
 MASK = "***"
+# URL-valued keys whose credentials (userinfo), path and query string are redacted
+# unless --show-secrets is passed: a webhook receiver commonly authenticates via a
+# token, and it may sit in any of the three — Slack/Discord/Teams put it in the path,
+# others in the query — so the raw URL is as sensitive as `webhook.token`. Only the
+# scheme and host stay visible, which is enough to confirm the target.
+REDACTED_URL_KEY_PATHS: tuple[tuple[str, ...], ...] = (("webhook", "url"),)
+
+
+def _redact_url(value: object) -> object:
+    """Strip userinfo, path and query from a URL string, leaving scheme/host visible."""
+    if not isinstance(value, str) or not value.strip():
+        return value
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return MASK
+    netloc = parsed.netloc
+    if "@" in netloc:
+        netloc = f"{MASK}@{netloc.rsplit('@', 1)[1]}"
+    path = parsed.path
+    if path.strip("/"):
+        path = f"/{MASK}"
+    redacted = parsed._replace(
+        netloc=netloc,
+        path=path,
+        query=MASK if parsed.query else "",
+        fragment=MASK if parsed.fragment else "",
+    )
+    return redacted.geturl()
+
+
+def _redact_url_paths(data: dict, paths: tuple[tuple[str, ...], ...]) -> None:
+    """Redact each existing URL path in ``data`` in place."""
+    for path in paths:
+        node: object = data
+        for key in path[:-1]:
+            if not isinstance(node, dict):
+                node = None
+                break
+            node = node.get(key)
+        if isinstance(node, dict) and path[-1] in node:
+            node[path[-1]] = _redact_url(node[path[-1]])
 
 
 def _load_effective_yaml_dict(config_path: str | Path | None = None) -> tuple[Path, dict]:
@@ -1075,6 +1334,7 @@ def _mask_config_dict(data: dict) -> dict:
             node = node.get(key)
         if isinstance(node, dict) and path[-1] in node and node[path[-1]] not in (None, ""):
             node[path[-1]] = MASK
+    _redact_url_paths(masked, REDACTED_URL_KEY_PATHS)
     return masked
 
 
@@ -1133,11 +1393,23 @@ def _mask_get_value(parts: list[str], value: object) -> object:
     A secret scalar leaf (api keys, tokens, client_secret, refresh_token) is replaced
     wholesale; a mapping/list value (e.g. ``google.credentials`` / ``google.token``)
     is deep-masked so nested secret leaves are hidden while structure stays visible.
+    URL leaves that may carry a token (``webhook.url``) keep their target visible but
+    lose credentials and query string.
     """
     if isinstance(value, (dict, list)):
-        return _mask_value(value)
+        masked = _mask_value(value)
+        if isinstance(masked, dict):
+            suffixes = tuple(
+                path[len(parts) :]
+                for path in REDACTED_URL_KEY_PATHS
+                if tuple(parts) == path[: len(parts)] and len(path) > len(parts)
+            )
+            _redact_url_paths(masked, suffixes)
+        return masked
     if parts[-1] in MASKED_LEAF_KEYS and value not in (None, ""):
         return MASK
+    if tuple(parts) in REDACTED_URL_KEY_PATHS:
+        return _redact_url(value)
     return value
 
 

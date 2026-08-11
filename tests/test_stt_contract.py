@@ -12,7 +12,7 @@ from src.stt.deepgram_provider import DeepgramProvider
 
 def _cfg(provider: str) -> Config:
     return Config(
-        folder_ids=[],
+        folders=[],
         poll_interval=600,
         bitrate="96k",
         data_dir=Path("data"),

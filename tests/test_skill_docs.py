@@ -194,8 +194,36 @@ def test_skill_documents_config_yml_and_preset_dag():
     # Preset DAG vocabulary the operator needs to author/inspect presets.
     assert "depends_on" in text
     assert "artifact_type" in text
-    assert "transcript-cleanup -> keypoints + action-items" in text
+    assert "transcript-cleanup -> keypoints + action-items + meta" in text
     assert "transcript -> keypoints" not in text
+
+
+def test_skill_documents_folders_not_removed_folder_ids():
+    """``folder_ids`` was replaced by ``folders: [{folder_id, name, email}]``; the
+    skill must teach the new shape and never send an operator back to the old key."""
+    text = SKILL_PATH.read_text(encoding="utf-8")
+
+    assert "folders" in text
+    assert "folder_id, name, email" in text
+    # The removed key may only appear while explaining that it is gone.
+    for line in text.splitlines():
+        if "folder_ids" in line:
+            assert "удалён" in line, f"stale folder_ids reference in the skill: {line!r}"
+
+
+def test_skill_documents_meta_preset_and_completion_webhook():
+    text = SKILL_PATH.read_text(encoding="utf-8")
+
+    # The `meta` preset: its artifact, and that tags come only from the allow-list.
+    assert ".meta.md" in text
+    assert "tags.allowed" in text
+    assert "{{allowed_tags}}" in text
+    # The webhook: config keys, payload keys, and the fire-and-forget contract.
+    assert "webhook.url" in text
+    assert "webhook.token" in text
+    assert "fire-and-forget" in text
+    for key in ("file", "employee", "transcript", "artifacts"):
+        assert key in text, f"skill must document the webhook payload key {key!r}"
 
 
 def test_skill_documents_config_owned_posture():
@@ -233,6 +261,70 @@ def test_agents_doc_documents_config_yml_and_preset_dag():
     assert "artifact_type" in text
     # The GDSTT_HOME directory bootstrap is the breaking change operators must know.
     assert "GDSTT_HOME" in text
+    # `meta` is a second built-in preset alongside `keypoints`. Match the artifact
+    # suffix, not the bare word — "meta" alone also hits "metadata" and would pass
+    # even if the preset were never documented.
+    assert ".meta.md" in text
+
+
+def test_docs_document_the_folders_migration():
+    """``folder_ids`` is removed. README/AGENTS must teach ``folders`` and mention
+    the old key only to explain the migration."""
+    readme = README_PATH.read_text(encoding="utf-8")
+    agents = AGENTS_PATH.read_text(encoding="utf-8")
+
+    skill = SKILL_PATH.read_text(encoding="utf-8")
+
+    assert "folders:" in readme
+    assert "folder_id: abc" in readme
+    assert "folders: [{folder_id, name, email}]" in agents
+    assert "is **removed**" in agents
+
+    # Every surviving mention must sit in a paragraph that explains the removal or
+    # the read-only property that replaced it — never in one that still teaches the
+    # old key. Checked per paragraph so the guard survives prose re-wrapping.
+    markers = ("removed", "удалён", "read-only property", "no longer")
+    for name, text in (("README.md", readme), ("AGENTS.md", agents), ("SKILL.md", skill)):
+        for paragraph in text.split("\n\n"):
+            if "folder_ids" not in paragraph:
+                continue
+            assert any(marker in paragraph for marker in markers), (
+                f"{name} still teaches folder_ids as a live setting:\n{paragraph}"
+            )
+
+
+def test_docs_document_the_completion_webhook_and_meta_preset():
+    readme = README_PATH.read_text(encoding="utf-8")
+    agents = AGENTS_PATH.read_text(encoding="utf-8")
+
+    # Webhook: config keys, the payload, and that a failure never fails the file.
+    assert "webhook.url" in readme
+    assert "webhook.token" in readme
+    assert "Authorization: Bearer" in readme
+    assert "fire-and-forget" in readme.lower()
+    assert "webhook" in agents.lower()
+
+    # meta preset: the artifact, the allow-list, and the placeholder.
+    assert ".meta.md" in readme
+    assert "tags.allowed" in readme
+    assert "{{allowed_tags}}" in readme
+    assert "tags.allowed" in agents
+
+
+def test_docs_point_at_the_single_keyterms_example():
+    """The three keyterms copies collapsed to one packaged example; no doc may
+    still send an operator to the deleted ``config/`` copy."""
+    readme = README_PATH.read_text(encoding="utf-8")
+    skill = SKILL_PATH.read_text(encoding="utf-8")
+    agents = AGENTS_PATH.read_text(encoding="utf-8")
+
+    assert "deepgram-keyterms-example.txt" in readme
+    assert "data/deepgram-keyterms.txt" in readme
+
+    for name, text in (("README.md", readme), ("SKILL.md", skill), ("AGENTS.md", agents)):
+        assert "config/deepgram-keyterms.txt" not in text, (
+            f"{name} still references the deleted config/ keyterms copy"
+        )
 
 
 def test_docs_describe_config_keys_not_env_runtime_defaults():

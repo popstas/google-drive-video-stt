@@ -2,8 +2,8 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.5.2
-last_updated: 2026-06-20
+version: 2.6.0
+last_updated: 2026-07-17
 ---
 
 # gdstt CLI
@@ -41,13 +41,7 @@ Drive или локальную папку. Предпочитай безопа�
 ```bash
 gdstt <command> [args]
 uv run python -m src.cli <command> [args]
-```
-
-На Windows в локальном чекауте:
-
-```powershell
-.\.venv\Scripts\gdstt.exe <command> [args]
-uv run python -m src.cli <command> [args]
+.\.venv\Scripts\gdstt.exe <command> [args]   # Windows, локальный чекаут
 ```
 
 Используй `PYTHONIOENCODING=utf-8` или установленный `gdstt.exe`, когда печатаешь
@@ -55,14 +49,11 @@ uv run python -m src.cli <command> [args]
 
 ## Границы команд
 
-Drive-only и bootstrap-команды используют `load_config(validate_providers=False)`
-и не тратят кредиты: `auth`, `doctor`, `list` / `status`, `speakers set`.
-
-Обрабатывающие команды валидируют конфиг провайдера и могут тратить кредиты
-Deepgram (и, при включённых OpenAI-пресетах, OpenAI): `run`, `run-once`,
-`process`, `latest`, `transcribe`.
-
-`relabel` - локальное преобразование файла: Drive не трогает и ничего не тратит.
+- **Не тратят кредиты** (Drive-only и bootstrap, `load_config(validate_providers=False)`):
+  `auth`, `doctor`, `list` / `status`, `speakers set`.
+- **Могут тратить** Deepgram (и OpenAI при включённых пресетах), валидируют конфиг
+  провайдера: `run`, `run-once`, `process`, `reprocess`, `latest`, `transcribe`.
+- `relabel` - локальное преобразование файла: Drive не трогает и ничего не тратит.
 
 ## Команды
 
@@ -98,7 +89,7 @@ OAuth client (Desktop app) JSON и записать inline под `google.creden
 
 ### `latest [--folder ID] [--dry-run] [--max-size SIZE] [--confirm-large]`
 
-Обработать самый свежий mp4 в папке (первой из `folder_ids`, если не задан
+Обработать самый свежий mp4 в папке (первой из `folders`, если не задан
 `--folder`). Сначала `--dry-run`, чтобы подтвердить, какой файл будет обработан.
 Понятно логирует, если mp4 в папке нет.
 
@@ -126,7 +117,7 @@ STT), `1..N`=пресеты в порядке цепочки (тратит OpenA
 
 ### `list` / `status`
 
-Показать состояние соседних MP3/TXT для `folder_ids` (или `--folder`) без обработки.
+Показать состояние соседних MP3/TXT для настроенных `folders` (или `--folder`) без обработки.
 
 ### `run`
 
@@ -159,8 +150,9 @@ STT), `1..N`=пресеты в порядке цепочки (тратит OpenA
 ### `doctor [--drive]`
 
 Показать путь к `config.yml`, наличие credentials/token, источник Google-auth
-(без секретов), число folder-id, STT-провайдера и DAG пресетов с номерами стадий для
-`reprocess` (0=транскрипт, 1..N=пресеты). `--drive` ещё проверяет папки.
+(без секретов), список папок с сотрудником (`<folder-id>: Имя <email>`),
+STT-провайдера и DAG пресетов с номерами стадий для `reprocess`
+(0=транскрипт, 1..N=пресеты). `--drive` ещё проверяет папки.
 
 ### `config init [--force]`
 
@@ -168,29 +160,23 @@ STT), `1..N`=пресеты в порядке цепочки (тратит OpenA
 `GDSTT_HOME` не задан - `./data/config.yml`. Никаких OS-дефолтных путей, dotenv,
 миграции и авто-генерации: отсутствующий или пустой файл - явная ошибка настройки,
 указывающая на `gdstt config init`. `--config PATH` - разовый файловый override
-(тесты/диагностика), не сохраняется. Путь печатает `config path`.
-
-Приоритет резолвера:
-
-```text
---config PATH                 # разовый override
-GDSTT_HOME/config.yml         # директория инстанса
-./data/config.yml             # дефолт, когда GDSTT_HOME не задан
-```
+(тесты/диагностика), не сохраняется, и имеет приоритет над обоими. Путь печатает
+`config path`.
 
 Подкоманды `config`:
 
 - `config init [--data-dir DIR] [--output-dir DIR] [--prompt-dir DIR] [--force]` -
-  свежий полный конфиг: цепочка `transcript-cleanup -> keypoints + action-items`,
-  `openai.batch: true`, промпты и `config/deepgram-keyterms.txt` рядом под
-  `<GDSTT_HOME>`. `--output-dir` -> folder; `--prompt-dir` -> промпты туда.
+  свежий полный конфиг: цепочка
+  `transcript-cleanup -> keypoints + action-items + meta`, `openai.batch: true`,
+  промпты и `deepgram-keyterms-example.txt` рядом под `<GDSTT_HOME>`.
+  `--output-dir` -> folder; `--prompt-dir` -> промпты туда.
 - `config path` - путь к активному конфигу без валидации секретов.
 - `config get [KEY] [--show-secrets]` / `config set KEY VALUE` / `config unset KEY` -
   прочитать (секреты замаскированы, `--show-secrets` их раскрывает), записать+провалидировать или удалить точечный ключ.
 
 **Несколько инстансов.** Дай каждому свою директорию и укажи на неё `GDSTT_HOME`
 (`export GDSTT_HOME=/srv/gdstt-a`); весь инстанс - `config.yml`, `prompts/`,
-`config/deepgram-keyterms.txt`, credentials/token - лежит под одним home. Секреты
+файл keyterms, credentials/token - лежит под одним home. Секреты
 (`openai.api_key`, `stt.deepgram.api_key`, inline `google.token`/`credentials`) в
 синхронизируемом/общем home не храни. Артефакты в свою папку -
 `output.dir`+`output.target=folder`; конфиг/промпты - через `--config` или
@@ -289,9 +275,15 @@ GDSTT_HOME/config.yml         # директория инстанса
 умолчанию `.<имя>.md`, метка `artifact_type=<имя>`); независимые пресеты идут
 параллельно. Конфиг-пресеты переопределяют встроенные по полям, добавляют новые и
 отключают встроенный через `enabled: false`. Дефолтная цепочка
-`transcript-cleanup -> keypoints + action-items` работает из коробки.
+`transcript-cleanup -> keypoints + action-items + meta` работает из коробки.
 Идемпотентность - по
 пресетам: повторный прогон делает только недостающие артефакты.
+
+Второй встроенный пресет - `meta`: пишет `<base>.meta.md` из одного YAML-frontmatter
+блока - `topic:` (одно предложение, о чём разговор) и `tags:` **только** из
+`tags.allowed` в `config.yml` (идёт в промпт через `{{allowed_tags}}`; пустой список -
+пустые теги). Выдуманные теги отсекаются на разборе, битый frontmatter даёт пустой
+`topic` и не роняет файл. Словарь тегов меняется правкой `tags.allowed`, без кода.
 
 **Откуда берётся промпт пресета (приоритет).** `instructions` (inline в YAML) >
 `prompt_file` (`.md`: как есть -> относительно папки конфига -> упакованный ассет
@@ -308,9 +300,7 @@ GDSTT_HOME/config.yml         # директория инстанса
 presets:
   transcript-cleanup: { prompt_file: prompts/transcript-cleanup.md }
   keypoints: { depends_on: [transcript-cleanup] }   # переопределяет встроенный
-  action-items:
-    depends_on: [transcript-cleanup]
-    prompt_file: prompts/action-items.md
+  action-items: { depends_on: [transcript-cleanup], prompt_file: prompts/action-items.md }
 ```
 
 **Конфликты (валидация на загрузке).** Дубль-ключи в YAML (в т.ч. два пресета под
@@ -343,7 +333,6 @@ presets:
 
 | имя в расшифровке | заметка |
 |---|---|
-| `<имя>` | `[[<Имя Фамилия>]]` |
 | `<имя>` | `[[<Имя Фамилия>]]` |
 
 - В `MAP.json` поле `default` тогда указывает на `[[<Имя Фамилия>]]` вместо
@@ -389,6 +378,15 @@ presets:
 ## Ключевые заметки
 
 - Deepgram - единственный STT-провайдер; `stt.provider=""` оставляет режим только-MP3.
+- Папки - `folders: [{folder_id, name, email}]`, по записи на сотрудника
+  (`name`/`email` необязательны). Старый `folder_ids` **удалён**: конфиг с этим
+  ключом падает на загрузке с подсказкой про `folders`; чинится только в `config.yml`.
+- `webhook.url` (+ опциональный `webhook.token` -> `Authorization: Bearer`) шлёт POST
+  раз на файл и только при успехе: `{file, employee, transcript, artifacts}`, где
+  `artifacts` - тексты пресетов по именам, а `meta` разобран в `{topic, tags}`.
+  Доставка fire-and-forget: сбой логируется (только тип исключения), файл всё равно
+  обработан, ретраев нет. В payload есть PII (email и полный транскрипт) - эндпоинт
+  должен быть HTTPS и с токеном.
 - Идемпотентность - через `appProperties.source_video_id`, пер-артефактный
   `appProperties.artifact_type` (каждый пресет детектится отдельно через `artifact_ids`
   в `list_folder_state`) и совпадение по стему (legacy); соседние файлы обновляются на месте.
