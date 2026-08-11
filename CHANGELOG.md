@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add the Planfix comment client
 - Add call_booking and planfix configuration
 - Add the call-booking journal and matching
 - Parse meeting start time from recording names
