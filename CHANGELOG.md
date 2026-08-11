@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Features
+
+- Parse meeting start time from recording names
+
 ### Documentation
 
 - Plan the Planfix call-booking implementation
