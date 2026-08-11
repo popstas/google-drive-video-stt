@@ -29,6 +29,10 @@
 - Plan the Planfix call-booking implementation
 - Design the Planfix call-booking integration
 
+### Testing
+
+- Cover the fix-wave findings in call booking and the manual-command gate
+
 ## v0.3.0 - 2026-08-11
 
 ### Features
