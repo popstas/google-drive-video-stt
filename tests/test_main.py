@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -12,6 +13,8 @@ from googleapiclient.errors import HttpError
 from src import main
 from src.auth import AuthError
 from src.booking_gate import BookingDecision
+from src.call_booking import CallBooking
+from src.call_booking import append as append_booking
 from src.config import Config, EmployeeFolder
 from src.presets import BUILTIN_PRESETS, Preset
 from src.preset_pipeline import PresetResult
@@ -2945,6 +2948,78 @@ def test_process_target_ignores_the_mark_and_the_gate(monkeypatch, gate_config):
     process_item.assert_called_once()
     assert marked == []
     assert process_item.call_args.kwargs.get("booking_decision") is None
+
+
+def test_process_target_folder_branch_ignores_the_mark_and_the_gate(
+    monkeypatch, gate_config
+):
+    """The folder branch shares ``_pending_items`` with ``run_once`` -- the one place
+    a regression could leak the gate into manual processing. `process_target` must
+    still process a marked item without ever consulting the gate.
+    """
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_folder_items(monkeypatch, [gate_item("v1", booking_match="none")])
+    resolve = MagicMock()
+    monkeypatch.setattr(main.booking_gate, "resolve", resolve)
+    marked = []
+    monkeypatch.setattr(
+        main.booking_gate, "mark_unmatched", lambda svc, fid: marked.append(fid)
+    )
+    process_item = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.process_target(MagicMock(), GATE_FOLDER_ID, gate_config, is_folder=True)
+
+    process_item.assert_called_once()
+    resolve.assert_not_called()
+    assert marked == []
+
+
+def test_run_once_matches_a_real_booking_through_the_real_gate(monkeypatch, gate_config):
+    """Integration coverage for the seam every other gate test mocks around: Drive
+    file name -> meeting_time.parse_meeting_start -> journal load -> match ->
+    decision. Only the Drive listing and process_item are mocked; a real Config and
+    a real ``booking_gate.resolve`` run against a journal seeded with
+    ``call_booking.append``.
+    """
+    # "2026/08/08 09:00 GMT+04:00" is one of the formats parse_meeting_start
+    # accepts (see src/meeting_time.py); it resolves to 2026-08-08T05:00:00Z.
+    file_name = "Call with Kate - 2026/08/08 09:00 GMT+04:00 – Recording.mp4"
+    video_start_utc = datetime(2026, 8, 8, 5, 0, tzinfo=timezone.utc)
+
+    append_booking(
+        gate_config.call_bookings_file,
+        CallBooking(
+            task_id="851030",
+            manager_email="kate@example.com",
+            start_time=video_start_utc + timedelta(minutes=5),
+        ),
+    )
+    patch_folder_items(
+        monkeypatch,
+        [
+            {
+                "file": {"id": "v1", "name": file_name, "mimeType": "video/mp4"},
+                "has_mp3": True,
+                "has_txt": False,
+                "mp3_id": None,
+                "mp3_name": None,
+                "txt_id": None,
+                "artifact_ids": {},
+                "booking_match": "",
+                "planfix_comment_task_id": "",
+            }
+        ],
+    )
+    process_item = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), gate_config)
+
+    process_item.assert_called_once()
+    decision = process_item.call_args.kwargs["booking_decision"]
+    assert decision.is_matched is True
+    assert decision.task_id == "851030"
 
 
 # --- Planfix comment ------------------------------------------------------------

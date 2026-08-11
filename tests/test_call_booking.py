@@ -1,5 +1,8 @@
+import fcntl
+import os
 from datetime import datetime, timedelta, timezone
 
+from src import call_booking
 from src.call_booking import CallBooking, append, load, match
 
 
@@ -22,6 +25,36 @@ def test_append_then_load_round_trips(tmp_path):
     append(path, booking)
 
     assert load(path, now=_utc(11, 12)) == [booking]
+
+
+def test_append_flushes_and_fsyncs_before_releasing_the_lock(tmp_path, monkeypatch):
+    """Regression: the lock must guard the actual write(2), not just the buffer.
+
+    ``handle.write()`` only fills Python's userspace buffer; the real write(2)
+    syscall happens wherever that buffer is next flushed. If ``LOCK_UN`` fires
+    before the flush, the lock protects nothing -- a concurrent writer's own
+    flush/close can interleave its bytes with this line before either actually
+    reaches the file, tearing the record that ``load()`` then silently drops.
+    """
+    calls: list[str] = []
+    real_flock = fcntl.flock
+    real_fsync = os.fsync
+
+    def recording_flock(fd, op):
+        if op == fcntl.LOCK_UN:
+            calls.append("unlock")
+        return real_flock(fd, op)
+
+    def recording_fsync(fd):
+        calls.append("fsync")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(call_booking.fcntl, "flock", recording_flock)
+    monkeypatch.setattr(call_booking.os, "fsync", recording_fsync)
+
+    append(tmp_path / "call_bookings.jsonl", _booking())
+
+    assert calls == ["fsync", "unlock"]
 
 
 def test_load_returns_empty_for_missing_file(tmp_path):

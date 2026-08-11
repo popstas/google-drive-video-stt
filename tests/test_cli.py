@@ -1263,6 +1263,10 @@ def test_doctor_reports_call_booking_without_leaking_the_token(tmp_path, capsys)
             "authorization_token": "super-secret",
             "listen_port": 9100,
         },
+        planfix={
+            "create_comment_url": "https://crm.example.com/planfix_create_comment",
+            "token": "another-super-secret",
+        },
     )
 
     cli.main(["--config", str(config_path), "doctor"])
@@ -1271,3 +1275,8 @@ def test_doctor_reports_call_booking_without_leaking_the_token(tmp_path, capsys)
     assert "call_booking" in out
     assert "9100" in out
     assert "super-secret" not in out
+    # planfix.token uses the identical set/unset expression as call_booking's token
+    # and must be covered the same way -- a distinct secret so this assertion can't
+    # pass by accident from the call_booking one above matching a substring of it.
+    assert "planfix" in out
+    assert "another-super-secret" not in out

@@ -129,6 +129,27 @@ def test_is_running_tracks_the_started_server(tmp_path):
     assert booking_server.is_running() is False
 
 
+def test_is_running_is_false_once_the_server_thread_has_died(tmp_path):
+    # is_running() gates whether a recording may be permanently marked
+    # booking_match=none (see its docstring). If serve_forever dies on its own --
+    # e.g. an unhandled OSError out of the accept loop -- without anyone calling
+    # BookingServer.shutdown(), the module must not keep reporting the receiver as
+    # up just because it is still registered.
+    instance = booking_server.serve(
+        host="127.0.0.1", port=0, token="t", journal_path=tmp_path / "j.jsonl"
+    )
+    try:
+        assert booking_server.is_running() is True
+
+        instance._httpd.shutdown()
+        instance._thread.join(timeout=5)
+        assert instance._thread.is_alive() is False
+
+        assert booking_server.is_running() is False
+    finally:
+        instance.shutdown()
+
+
 def test_rejects_a_negative_content_length(server):
     # int("-1") parses fine and is truthy, so a naive length check lets this through
     # and a naive rfile.read(length) reads until EOF -- i.e. forever, since the
