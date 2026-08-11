@@ -112,6 +112,21 @@ class Config:
     # generated config.yml.
     webhook_url: str = ""
     webhook_token: str = ""
+    # Inbound call-booking receiver. Disabled by default: enabling it opens a
+    # listening port, which a config written before this feature never asked for.
+    call_booking_enabled: bool = False
+    call_booking_listen_host: str = "0.0.0.0"
+    call_booking_listen_port: int = 8080
+    call_booking_token: str = ""
+    call_booking_threshold_minutes: int = 15
+    # When true, the polling loop refuses to transcribe a recording that matched no
+    # booked call and marks it on Drive. Manual commands ignore this.
+    call_booking_disable_recognition: bool = False
+    # Planfix comment target. A blank URL disables the comment; ``planfix_presets``
+    # names the preset artifacts concatenated into the comment body, in order.
+    planfix_create_comment_url: str = ""
+    planfix_token: str = ""
+    planfix_presets: tuple[str, ...] = ("keypoints",)
     presets: tuple[Preset, ...] = ()
     # Google OAuth is config-owned and inline-first. ``google_credentials``/
     # ``google_token`` hold inline mappings (the OAuth client JSON and the saved
@@ -131,6 +146,17 @@ class Config:
             if folder.folder_id == folder_id:
                 return folder
         return None
+
+    @property
+    def call_bookings_file(self) -> Path:
+        """Where the booking journal lives: alongside the active config file.
+
+        The config file already resolves to the instance directory (``GDSTT_HOME``,
+        the mounted volume under Docker), so the journal survives container restarts
+        without a second path knob.
+        """
+        base = self.config_file.parent if self.config_file else self.data_dir
+        return base / "call_bookings.jsonl"
 
 
 class UniqueKeyLoader(yaml.SafeLoader):
@@ -199,6 +225,35 @@ def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
             )
         )
     return tuple(folders)
+
+
+def _validate_call_booking(
+    *,
+    enabled: bool,
+    token: str,
+    disable_recognition: bool,
+    folders: tuple[EmployeeFolder, ...],
+) -> None:
+    """Reject call-booking settings that would fail silently at runtime.
+
+    Both cases are quiet in production and expensive to diagnose: an open endpoint
+    that accepts anyone's bookings, and a folder that can never match a booking and so
+    would never be transcribed again.
+    """
+    if enabled and not token.strip():
+        raise ValueError(
+            "call_booking.enabled is true but call_booking.authorization_token is "
+            "empty; the receiver would accept unauthenticated bookings"
+        )
+    if not disable_recognition:
+        return
+    emailless = [f.folder_id for f in folders if not f.email.strip()]
+    if emailless:
+        raise ValueError(
+            "call_booking.disable_recognition is true, so every folder must have an "
+            "email to match bookings against; these do not: "
+            + ", ".join(emailless)
+        )
 
 
 def _parse_tags_allowed(raw: object) -> tuple[str, ...]:
@@ -524,6 +579,33 @@ def _yaml_bool(value: object, *, default: bool) -> bool:
     raise ValueError(f"Expected boolean value, got: {value!r}")
 
 
+def _parse_positive_int(value: object, *, default: int, name: str) -> int:
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer, got: {value!r}") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be positive, got: {parsed}")
+    return parsed
+
+
+def _parse_planfix_presets(value: object) -> tuple[str, ...]:
+    """Read ``planfix.presets``, defaulting to the single ``keypoints`` preset."""
+    if value is None:
+        return ("keypoints",)
+    if not isinstance(value, list):
+        raise ValueError(f"planfix.presets must be a list, got: {value!r}")
+    names = []
+    for entry in value:
+        name = _yaml_str(entry)
+        if not name:
+            raise ValueError(f"planfix.presets entries must be names, got: {entry!r}")
+        names.append(name)
+    return tuple(names)
+
+
 def _validate_webhook_url(url: str) -> None:
     """Reject a webhook URL that could never be delivered.
 
@@ -585,6 +667,8 @@ def _config_from_yaml(
     telegram = _as_mapping(notifications.get("telegram"), "notifications.telegram")
     tags = _as_mapping(raw.get("tags"), "tags")
     webhook = _as_mapping(raw.get("webhook"), "webhook")
+    call_booking = _as_mapping(raw.get("call_booking"), "call_booking")
+    planfix = _as_mapping(raw.get("planfix"), "planfix")
     config_presets = _as_mapping(raw.get("presets"), "presets")
 
     run_enabled = _yaml_bool(run.get("enabled"), default=True)
@@ -599,6 +683,27 @@ def _config_from_yaml(
     _validate_webhook_url(webhook_url)
     _warn_on_plaintext_webhook(webhook_url)
 
+    call_booking_enabled = _yaml_bool(call_booking.get("enabled"), default=False)
+    call_booking_listen_host = (
+        _yaml_str(call_booking.get("listen_host"), "0.0.0.0") or "0.0.0.0"
+    )
+    call_booking_listen_port = _parse_positive_int(
+        call_booking.get("listen_port"), default=8080, name="call_booking.listen_port"
+    )
+    call_booking_token = _yaml_str(call_booking.get("authorization_token"))
+    call_booking_threshold_minutes = _parse_positive_int(
+        call_booking.get("threshold_minutes"),
+        default=15,
+        name="call_booking.threshold_minutes",
+    )
+    call_booking_disable_recognition = _yaml_bool(
+        call_booking.get("disable_recognition"), default=False
+    )
+
+    planfix_create_comment_url = _yaml_str(planfix.get("create_comment_url"))
+    planfix_token = _yaml_str(planfix.get("token"))
+    planfix_presets = _parse_planfix_presets(planfix.get("presets"))
+
     (
         google_credentials,
         google_token,
@@ -611,6 +716,12 @@ def _config_from_yaml(
     if "folder_ids" in raw:
         raise ValueError(FOLDER_IDS_MIGRATION_ERROR)
     folders = _parse_folders(raw.get("folders"))
+    _validate_call_booking(
+        enabled=call_booking_enabled,
+        token=call_booking_token,
+        disable_recognition=call_booking_disable_recognition,
+        folders=folders,
+    )
 
     poll_raw = raw.get("poll_interval", 600)
     try:
@@ -761,6 +872,15 @@ def _config_from_yaml(
         tags_allowed=tags_allowed,
         webhook_url=webhook_url,
         webhook_token=webhook_token,
+        call_booking_enabled=call_booking_enabled,
+        call_booking_listen_host=call_booking_listen_host,
+        call_booking_listen_port=call_booking_listen_port,
+        call_booking_token=call_booking_token,
+        call_booking_threshold_minutes=call_booking_threshold_minutes,
+        call_booking_disable_recognition=call_booking_disable_recognition,
+        planfix_create_comment_url=planfix_create_comment_url,
+        planfix_token=planfix_token,
+        planfix_presets=planfix_presets,
         presets=presets,
         google_credentials=google_credentials,
         google_token=google_token,
@@ -939,6 +1059,22 @@ def _default_config_dict(
         "tags": {"allowed": []},
         # Seeded empty: a blank url disables the completion webhook.
         "webhook": {"url": "", "token": ""},
+        # Seeded disabled: enabling this opens a listening port, so it must be an
+        # explicit choice rather than something a `config init` turns on.
+        "call_booking": {
+            "enabled": False,
+            "listen_host": "0.0.0.0",
+            "listen_port": 8080,
+            "authorization_token": "",
+            "threshold_minutes": 15,
+            "disable_recognition": False,
+        },
+        # Seeded empty: a blank url disables the Planfix comment.
+        "planfix": {
+            "create_comment_url": "",
+            "token": "",
+            "presets": ["keypoints"],
+        },
         # Google auth is inline-first and config-owned. The generated config ships an
         # empty block (no *_file pointers) so the data_dir fallback applies until the
         # operator runs `gdstt auth import-credentials` / `auth use-files`.

@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add the call-booking journal and matching
 - Parse meeting start time from recording names
 
 ### Documentation
