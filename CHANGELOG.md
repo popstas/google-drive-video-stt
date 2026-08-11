@@ -9,6 +9,10 @@
 - Add the call-booking journal and matching
 - Parse meeting start time from recording names
 
+### Bug Fixes
+
+- Mask call_booking.authorization_token in config get
+
 ### Documentation
 
 - Plan the Planfix call-booking implementation
