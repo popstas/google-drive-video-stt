@@ -169,10 +169,19 @@ Deliberately small, so the new behavior stays testable on its own:
   `list_folder_state`. The listing already requests `appProperties`, so this reads
   two more keys off data it is fetching anyway — no extra API call.
 - `src/config.py` — the `call_booking` and `planfix` sections plus two validations.
-- `src/main.py` — roughly six lines of gate at the top of `process_item`, the Planfix
-  send next to the existing `notify_complete` block, the marked-file filter in
-  `run_once`, a `skipped_unmatched` counter in the cycle summary, and the server
-  start in `main()`.
+- `src/main.py` — the gate in `run_once` (marked-file filter, the block-and-mark
+  decision, and a `skipped_unmatched` counter in the cycle summary), a
+  `booking_decision` parameter on `process_item`, the Planfix send next to the
+  existing `notify_complete` block, and the server start in `main()`.
+
+  The gate sits in `run_once` rather than inside `process_item` because
+  `run_once` already does `cycle_processed += 1` whenever `process_item` returns —
+  including its `None` "nothing to do" return. A gate that skipped by returning
+  `None` would therefore count every blocked recording as processed. Deciding in
+  `run_once` keeps the counter honest and confines the gate to the automatic path by
+  construction. `process_item` still calls `booking_gate.resolve` itself when no
+  decision is passed in, which is what gives the manual commands their `task_id`
+  without giving them the gate.
 - `src/cli.py` — `gdstt bookings list` prints the journal after dedupe and pruning
   (task id, manager email, start time), which is the first thing to look at when a
   recording did not match. `gdstt bookings rematch <file-id>` clears the
@@ -192,7 +201,7 @@ POST /  +  Authorization: Bearer <token>
   → 204
 ```
 
-### Automatic cycle (`gdstt run` → `run_once` → `process_item`, `enforce_booking_gate=True`)
+### Automatic cycle (`gdstt run` / `gdstt run-once` → `run_once` → `process_item`)
 
 ```
 mp4 from list_folder_state
@@ -218,8 +227,8 @@ manual folder processing, which contradicts the gate-applies-to-`run`-only decis
 
 ### Manual paths (`process`, `latest`, `transcribe`, `reprocess`)
 
-Identical, except `enforce_booking_gate` defaults to `False`: `resolve` still runs so
-a matched call still gets its Planfix comment, but nothing is blocked and nothing is
+These call `process_item` without a `booking_decision`, so it resolves one itself: a
+matched call still gets its Planfix comment, but nothing is blocked and nothing is
 marked. Processing a previously marked file by hand is the supported way to undo a
 mark, alongside `gdstt bookings rematch`.
 

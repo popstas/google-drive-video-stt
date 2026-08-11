@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+
+### Documentation
+
+- Design the Planfix call-booking integration
+
 ## v0.3.0 - 2026-08-11
 
 ### Features
