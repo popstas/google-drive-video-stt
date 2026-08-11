@@ -177,6 +177,18 @@ blank url is a `logger.debug` no-op, and any failure logs only the exception *ty
 so the token cannot leak. The whole block is additionally wrapped in `try/except` —
 a payload-build bug must not undo an already-uploaded file.
 
+**Call bookings and Planfix** (`src/booking_server.py`, `src/call_booking.py`,
+`src/meeting_time.py`, `src/booking_gate.py`, `src/planfix.py`): when
+`call_booking.enabled` is set, `main()` starts a stdlib HTTP receiver in a daemon
+thread. `POST /` (bearer-authenticated, `{start_time, task_id, manager_email}`)
+appends a booking to `<GDSTT_HOME>/call_bookings.jsonl`; `GET /health` answers 200.
+`run_once` resolves each pending mp4 against that journal via `booking_gate.resolve`:
+the meeting start time is parsed out of the Drive file name (not `createdTime`,
+which is the *upload* time — start plus the call's length), matched against the
+folder employee's email within `call_booking.threshold_minutes`, nearest booking
+wins. On the success path `process_item` posts the `planfix.presets` artifacts, each
+under its own heading, into the matched task via `planfix.create_comment_url`.
+
 **Error handling is tiered**: `RefreshError`/`AuthError` propagate up to `main()` and
 cause `SystemExit(1)` so the container restarts (after re-running `src.auth`); all other
 exceptions are logged + sent to Telegram via `notify.notify_error` and the loop continues.
@@ -261,6 +273,24 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   `artifact_type=keypoints` and map onto the `keypoints` preset with no migration.
 - New or changed operator behavior should be reflected in
   `tests/test_skill_docs.py` and `skills/gdstt-cli/SKILL.md`.
+- The booking gate applies to the polling loop only. `run_once` resolves the
+  decision, blocks the file, and counts `skipped_unmatched`; the manual commands
+  (`process`, `latest`, `transcribe`, `reprocess`) let `process_item` resolve its own
+  decision, which yields the `task_id` without the gate. Processing a marked file by
+  hand is the supported way to revive it, alongside `gdstt bookings rematch`.
+- `booking_match=none` is written **only** while `booking_server.is_running()`. If
+  the receiver never bound its port, every recording looks unmatched, and marking
+  them would silently retire the whole backlog; with the receiver down the loop skips
+  without marking and the files wait.
+- The Planfix comment is idempotent through the `planfix_comment_task_id`
+  appProperty, written only after a successful POST. `process_item` reaches its
+  success path again whenever a later cycle backfills a newly configured preset, and
+  without the marker that pass would post a duplicate comment.
+- `load_config` rejects `call_booking.enabled` without an `authorization_token`, and
+  `disable_recognition` while any `folders` entry lacks an `email` — that folder
+  could never match a booking, so it would never be transcribed again.
+- `bookings list` / `bookings rematch` use `load_config(validate_providers=False)`;
+  `rematch` touches only Drive metadata and spends nothing.
 
 ## Skill layering policy
 

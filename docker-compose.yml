@@ -11,6 +11,11 @@ services:
       GDSTT_HOME: /app/data
     volumes:
       - ./data:/app/data
+    ports:
+      # The call-booking receiver. Keep it behind a reverse proxy that terminates TLS:
+      # the bearer token and the booking payload must not cross the network in plain
+      # text. Change both sides together with call_booking.listen_port in config.yml.
+      - "8080:8080"
     logging:
       driver: json-file
       options:

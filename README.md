@@ -844,6 +844,52 @@ persistence). The smoke script also verifies that a generated config can pass
 provider validation without reaching external services and explicitly loads
 `keypoints.md` from the `src` package to assert prompt packaging.
 
+## Call bookings and Planfix
+
+An external system can tell gdstt about upcoming calls so each recording is linked to
+its Planfix task.
+
+1. Enable the receiver in `config.yml`:
+
+   ```yaml
+   call_booking:
+     enabled: true
+     listen_host: 0.0.0.0
+     listen_port: 8080
+     authorization_token: <a long random string>
+     threshold_minutes: 15
+     disable_recognition: false
+   planfix:
+     create_comment_url: https://<your-host>/agent/leads/tool/planfix_create_comment
+     token: <planfix webhook token>
+     presets: [keypoints]
+   ```
+
+   `authorization_token` must be ASCII: header values are decoded as Latin-1, so a
+   token with any non-ASCII character can never authenticate.
+
+2. Publish port 8080 (already in `docker-compose.yml`) and put a TLS-terminating
+   reverse proxy in front of it. The bearer token and the booking payload must not
+   cross the network in plain text.
+
+3. Point the external system at `POST https://<your-host>/` with
+   `Authorization: Bearer <authorization_token>` and this body:
+
+   ```json
+   {"start_time": "2026-08-11T07:00:00.000000Z", "task_id": "851030", "manager_email": "manager@example.com"}
+   ```
+
+   `task_id` must be numeric. `GET /health` returns 200 for probes.
+
+4. `manager_email` is matched against the `email` of the `folders` entry the
+   recording lives in, and `start_time` against the meeting time in the recording's
+   name, within `threshold_minutes`.
+
+Set `disable_recognition: true` once bookings are flowing to stop transcribing
+recordings that match no booked call. Those get marked on Drive and skipped for good;
+`gdstt bookings list` shows what the matcher had, and `gdstt bookings rematch <file-id>`
+revives one.
+
 ## Project layout
 
 ```
