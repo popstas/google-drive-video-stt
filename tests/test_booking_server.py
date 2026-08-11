@@ -1,11 +1,13 @@
 import http.client
 import json
+import socket
 from datetime import datetime, timezone
 
 import pytest
 
 from src import booking_server
 from src.call_booking import load
+from src.config import Config
 
 
 @pytest.fixture
@@ -125,3 +127,119 @@ def test_is_running_tracks_the_started_server(tmp_path):
         instance.shutdown()
 
     assert booking_server.is_running() is False
+
+
+def test_rejects_a_negative_content_length(server):
+    # int("-1") parses fine and is truthy, so a naive length check lets this through
+    # and a naive rfile.read(length) reads until EOF -- i.e. forever, since the
+    # client keeps the connection open waiting for a response. Give this one a short
+    # timeout so a regression fails fast instead of hanging the suite.
+    instance, journal = server
+    conn = http.client.HTTPConnection("127.0.0.1", instance.port, timeout=2)
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer secret-token",
+        "Content-Length": "-1",
+    }
+    conn.request("POST", "/", body=json.dumps(VALID), headers=headers)
+    response = conn.getresponse()
+    response.read()
+    conn.close()
+
+    assert response.status == 400
+    assert not journal.exists()
+
+
+def test_rejects_a_non_ascii_token(server):
+    # hmac.compare_digest raises TypeError on non-ASCII str operands; a wrong,
+    # non-ASCII token must still come back as 401, not a 500 from an unhandled
+    # exception on the unauthenticated path.
+    instance, journal = server
+
+    assert _post(instance, VALID, token="sécret") == 401
+    assert not journal.exists()
+
+
+def test_rejects_a_non_ascii_decimal_task_id(server):
+    # isdecimal() accepts non-ASCII digits (e.g. Arabic-Indic), which int() would
+    # then silently normalize -- the stored task_id would disagree with what was
+    # actually sent.
+    instance, _ = server
+
+    assert _post(instance, {**VALID, "task_id": "١٢٣"}) == 400
+
+
+def test_serve_raises_oserror_on_bind_failure_and_stays_not_running(tmp_path):
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen(1)
+    port = blocker.getsockname()[1]
+    try:
+        assert booking_server.is_running() is False
+        with pytest.raises(OSError):
+            booking_server.serve(
+                host="127.0.0.1", port=port, token="t", journal_path=tmp_path / "j.jsonl"
+            )
+        assert booking_server.is_running() is False
+    finally:
+        blocker.close()
+
+
+def test_running_flag_clears_even_if_teardown_raises(tmp_path, monkeypatch):
+    # The flag must be cleared before any teardown step that could itself raise --
+    # otherwise a failure in shutdown()/server_close() leaves is_running() stuck
+    # True against a receiver that is no longer actually there.
+    instance = booking_server.serve(
+        host="127.0.0.1", port=0, token="t", journal_path=tmp_path / "j.jsonl"
+    )
+    original_close = instance._httpd.server_close
+
+    def _boom():
+        original_close()
+        raise RuntimeError("simulated teardown failure")
+
+    monkeypatch.setattr(instance._httpd, "server_close", _boom)
+
+    with pytest.raises(RuntimeError):
+        instance.shutdown()
+
+    assert booking_server.is_running() is False
+
+
+def _make_config(tmp_path, **overrides):
+    defaults = dict(
+        folders=(),
+        poll_interval=60,
+        bitrate="128k",
+        data_dir=tmp_path,
+        proxy_url="",
+        stt_provider="",
+        openai_api_key="",
+        deepgram_api_key="",
+        stt_language="en",
+        call_booking_enabled=True,
+        call_booking_listen_host="127.0.0.1",
+        call_booking_listen_port=0,
+        call_booking_token="secret-token",
+    )
+    defaults.update(overrides)
+    return Config(**defaults)
+
+
+def test_start_returns_none_when_disabled(tmp_path):
+    config = _make_config(tmp_path, call_booking_enabled=False)
+
+    assert booking_server.start(config) is None
+    assert booking_server.is_running() is False
+
+
+def test_start_returns_a_bound_server_when_enabled(tmp_path):
+    config = _make_config(tmp_path, call_booking_enabled=True)
+
+    instance = booking_server.start(config)
+    try:
+        assert instance is not None
+        assert instance.port != 0
+        assert booking_server.is_running() is True
+    finally:
+        instance.shutdown()
