@@ -13,6 +13,7 @@
 
 ### Bug Fixes
 
+- Harden the call-booking receiver against bad input and teardown races
 - Mask call_booking.authorization_token in config get
 
 ### Documentation

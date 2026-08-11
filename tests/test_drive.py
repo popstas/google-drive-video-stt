@@ -507,3 +507,33 @@ def test_find_newest_mp4_empty_folder_returns_none():
     service.files.return_value.list.return_value.execute.return_value = {"files": []}
 
     assert drive.find_newest_mp4(service, "folder1") is None
+
+
+def test_list_folder_state_surfaces_booking_properties():
+    mp4 = [
+        {
+            "id": "v1",
+            "name": "call - 2026/08/08 09:00 GMT+04:00 – Recording.mp4",
+            "mimeType": drive.MP4_MIME,
+            "appProperties": {
+                "booking_match": "none",
+                "planfix_comment_task_id": "851030",
+            },
+        }
+    ]
+    service = _make_list_service({"mp4": mp4, "mp3": [], "txt": []})
+
+    items = drive.list_folder_state(service, "f1")
+
+    assert items[0]["booking_match"] == "none"
+    assert items[0]["planfix_comment_task_id"] == "851030"
+
+
+def test_list_folder_state_defaults_booking_properties_to_blank():
+    mp4 = [{"id": "v1", "name": "call.mp4", "mimeType": drive.MP4_MIME}]
+    service = _make_list_service({"mp4": mp4, "mp3": [], "txt": []})
+
+    items = drive.list_folder_state(service, "f1")
+
+    assert items[0]["booking_match"] == ""
+    assert items[0]["planfix_comment_task_id"] == ""
