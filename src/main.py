@@ -13,7 +13,17 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 import requests
 
-from src import drive, meta as meta_module, notify, output, postprocess, preset_pipeline, webhook
+from src import (
+    booking_gate,
+    booking_server,
+    drive,
+    meta as meta_module,
+    notify,
+    output,
+    postprocess,
+    preset_pipeline,
+    webhook,
+)
 from src.auth import AuthError, build_drive_service
 from src.config import Config, is_run_enabled, load_config
 from src.extractor import extract_m4a_copy, extract_mp3
@@ -508,6 +518,7 @@ def process_item(
     *,
     reprocess_txt: bool = False,
     reprocess_presets: list[str] | None = None,
+    booking_decision: booking_gate.BookingDecision | None = None,
 ) -> _ProcessTelemetry | None:
     file_info = item["file"]
     file_id = file_info["id"]
@@ -534,6 +545,11 @@ def process_item(
 
     if not needs_mp3 and not needs_txt and not needs_presets:
         return
+
+    # `run_once` resolves this itself so it can gate and count; the manual commands do
+    # not, and get a decision here purely so a matched call still reaches Planfix.
+    if booking_decision is None:
+        booking_decision = booking_gate.resolve(file_info, folder_id, config)
 
     provider = _processing_provider(config, needs_txt=needs_txt)
     processing_mode = _processing_mode(needs_mp3=needs_mp3, needs_txt=needs_txt)
@@ -969,6 +985,7 @@ def run_once(
     cycle_failed = 0
     cycle_retry_total = 0
     cycle_skipped_size = 0
+    cycle_skipped_unmatched = 0
     cycle_folder_errors = 0
 
     for folder in config.folders:
@@ -997,6 +1014,12 @@ def run_once(
 
         _apply_local_output_state(items, config)
         pending = _pending_items(items, config)
+        # A marked recording is settled: reconsidering it every cycle would re-log and
+        # re-decide forever. `gdstt bookings rematch` or any manual command revives it.
+        pending = [
+            item for item in pending
+            if item.get("booking_match") != drive.BOOKING_MATCH_NONE
+        ]
         pending_before_size = len(pending)
         pending = _items_allowed_by_size(
             pending,
@@ -1019,8 +1042,46 @@ def run_once(
                 _log_dry_run(folder_id, item, config, reprocess_txt=False)
             continue
         for item in pending:
+            decision = booking_gate.resolve(item["file"], folder_id, config)
+            if (
+                decision.state == booking_gate.UNMATCHED
+                and config.call_booking_disable_recognition
+            ):
+                file_name = item.get("file", {}).get("name")
+                if booking_server.is_running():
+                    # Permanent by design: the booking arrives before the call, so a
+                    # recording with no booking is not a client call.
+                    try:
+                        booking_gate.mark_unmatched(service, item["file"]["id"])
+                    except (RefreshError, AuthError):
+                        raise
+                    except Exception:
+                        # A transient Drive failure here must not kill the polling
+                        # loop; the file stays unmarked and is retried next cycle.
+                        logger.exception(
+                            "Failed to mark %s in folder %s as unmatched; will "
+                            "retry next cycle",
+                            file_name, folder_id,
+                        )
+                    else:
+                        logger.info(
+                            "Skipping %s in folder %s: no booked call (%s); marked "
+                            "so it is not reconsidered (undo with `gdstt bookings "
+                            "rematch`)",
+                            file_name, folder_id, decision.reason,
+                        )
+                else:
+                    logger.warning(
+                        "Skipping %s in folder %s: no booked call (%s), but the "
+                        "booking receiver is not listening, so it is not marked",
+                        file_name, folder_id, decision.reason,
+                    )
+                cycle_skipped_unmatched += 1
+                continue
             try:
-                telemetry = process_item(service, item, folder_id, config)
+                telemetry = process_item(
+                    service, item, folder_id, config, booking_decision=decision
+                )
                 cycle_processed += 1
                 cycle_retry_total += _retry_count_from_process_result(telemetry)
             except (RefreshError, AuthError):
@@ -1042,7 +1103,8 @@ def run_once(
 
     logger.info(
         "Cycle summary [provider=%s, outcome=%s, folders=%d, pending=%d, processed=%d, failed=%d, "
-        "retry_total=%d, skipped_size=%d, folder_errors=%d, dry_run=%s, duration_s=%.3f]",
+        "retry_total=%d, skipped_size=%d, skipped_unmatched=%d, folder_errors=%d, dry_run=%s, "
+        "duration_s=%.3f]",
         config.stt_provider or "artifact-only",
         _cycle_outcome(
             dry_run=dry_run,
@@ -1055,6 +1117,7 @@ def run_once(
         cycle_failed,
         cycle_retry_total,
         cycle_skipped_size,
+        cycle_skipped_unmatched,
         cycle_folder_errors,
         dry_run,
         time.monotonic() - cycle_started_at,

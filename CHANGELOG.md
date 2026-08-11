@@ -5,6 +5,7 @@
 
 ### Features
 
+- Resolve booking matches and mark unmatched recordings
 - Add the inbound call-booking receiver
 - Add the Planfix comment client
 - Add call_booking and planfix configuration

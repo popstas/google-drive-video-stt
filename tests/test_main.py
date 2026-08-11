@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from google.auth.exceptions import RefreshError
+from googleapiclient.errors import HttpError
 
 from src import main
 from src.auth import AuthError
+from src.booking_gate import BookingDecision
 from src.config import Config, EmployeeFolder
 from src.presets import BUILTIN_PRESETS, Preset
 from src.preset_pipeline import PresetResult
@@ -929,7 +932,7 @@ def test_run_once_continues_on_per_file_error(mocker):
 
     processed_ids = []
 
-    def fake_process(svc, item, folder, c):
+    def fake_process(svc, item, folder, c, *, booking_decision=None):
         if item["file"]["id"] == "bad":
             raise RuntimeError("ffmpeg failed")
         processed_ids.append(item["file"]["id"])
@@ -1188,7 +1191,7 @@ def test_run_once_logs_folder_and_cycle_summary(mocker, caplog):
     assert "Folder f1 summary [total=2, pending=1, skipped_size=0, dry_run=False]" in caplog.text
     assert (
         "Cycle summary [provider=deepgram, outcome=success, folders=1, pending=1, "
-        "processed=1, failed=0, retry_total=0, skipped_size=0, "
+        "processed=1, failed=0, retry_total=0, skipped_size=0, skipped_unmatched=0, "
         "folder_errors=0, dry_run=False, duration_s=1.250]"
     ) in caplog.text
 
@@ -2735,3 +2738,210 @@ def test_process_summary_log_omits_artifact_text(mocker, tmp_path, caplog):
     assert len(summary) == 1
     assert "confidential" not in summary[0]
     assert "secret words" not in summary[0]
+
+
+# --- call-booking gate helpers -------------------------------------------------
+
+GATE_FOLDER_ID = "f1"
+
+
+@pytest.fixture
+def gate_config(tmp_path):
+    """A config with the receiver enabled and the gate armed."""
+    config_file = tmp_path / "config.yml"
+    config_file.write_text("", encoding="utf-8")
+    return Config(
+        folders=(
+            EmployeeFolder(
+                folder_id=GATE_FOLDER_ID, name="Kate", email="kate@example.com"
+            ),
+        ),
+        poll_interval=600,
+        bitrate="96k",
+        data_dir=tmp_path,
+        proxy_url="",
+        stt_provider="deepgram",
+        openai_api_key="sk",
+        deepgram_api_key="dg",
+        stt_language="ru",
+        call_booking_enabled=True,
+        call_booking_disable_recognition=True,
+        call_booking_threshold_minutes=15,
+        config_file=config_file,
+    )
+
+
+def gate_item(file_id="v1", *, booking_match="", planfix_comment_task_id=""):
+    """One `list_folder_state` item for an mp4 that still needs a transcript."""
+    return {
+        "file": {"id": file_id, "name": f"{file_id}.mp4", "mimeType": "video/mp4"},
+        "has_mp3": True,
+        "has_txt": False,
+        "mp3_id": None,
+        "mp3_name": None,
+        "txt_id": None,
+        "artifact_ids": {},
+        "booking_match": booking_match,
+        "planfix_comment_task_id": planfix_comment_task_id,
+    }
+
+
+def patch_folder_items(monkeypatch, items):
+    monkeypatch.setattr(main.drive, "list_folder_state", lambda service, fid: items)
+
+
+def patch_decision(monkeypatch, decision):
+    monkeypatch.setattr(
+        main.booking_gate, "resolve", lambda file_info, folder_id, config: decision
+    )
+
+
+UNMATCHED_DECISION = BookingDecision(state="unmatched", reason="no-booking")
+MATCHED_DECISION = BookingDecision(state="matched", task_id="851030")
+
+
+def test_run_once_skips_and_marks_an_unmatched_recording(monkeypatch, gate_config):
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_decision(monkeypatch, UNMATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    marked = []
+    monkeypatch.setattr(
+        main.booking_gate, "mark_unmatched", lambda svc, fid: marked.append(fid)
+    )
+    process_item = MagicMock()
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), gate_config)
+
+    process_item.assert_not_called()
+    assert marked == ["v1"]
+
+
+def test_run_once_survives_a_drive_failure_while_marking(monkeypatch, gate_config, caplog):
+    """A transient Drive error from mark_unmatched must not kill the polling loop.
+
+    Carried from the Task 6 review: mark_unmatched/clear_mark do not catch Drive
+    API exceptions themselves, so run_once must contain the failure.
+    """
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_decision(monkeypatch, UNMATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+
+    def raise_http_error(svc, fid):
+        raise HttpError(MagicMock(status=503), b"unavailable")
+
+    monkeypatch.setattr(main.booking_gate, "mark_unmatched", raise_http_error)
+    process_item = MagicMock()
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    with caplog.at_level(logging.INFO):
+        main.run_once(MagicMock(), gate_config)
+
+    process_item.assert_not_called()
+    assert "Failed to mark" in caplog.text
+    assert "skipped_unmatched=1" in caplog.text
+
+
+def test_run_once_does_not_mark_when_the_receiver_is_down(
+    monkeypatch, gate_config, caplog
+):
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: False)
+    patch_decision(monkeypatch, UNMATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    marked = []
+    monkeypatch.setattr(
+        main.booking_gate, "mark_unmatched", lambda svc, fid: marked.append(fid)
+    )
+    process_item = MagicMock()
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    with caplog.at_level(logging.WARNING):
+        main.run_once(MagicMock(), gate_config)
+
+    process_item.assert_not_called()
+    assert marked == []
+    assert "not listening" in caplog.text
+
+
+def test_run_once_counts_skipped_unmatched_separately(monkeypatch, gate_config, caplog):
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_decision(monkeypatch, UNMATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    monkeypatch.setattr(main.booking_gate, "mark_unmatched", lambda svc, fid: None)
+
+    with caplog.at_level(logging.INFO):
+        main.run_once(MagicMock(), gate_config)
+
+    assert "skipped_unmatched=1" in caplog.text
+    assert "processed=0" in caplog.text
+
+
+def test_run_once_never_revisits_an_already_marked_recording(monkeypatch, gate_config):
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    resolve = MagicMock()
+    monkeypatch.setattr(main.booking_gate, "resolve", resolve)
+    patch_folder_items(monkeypatch, [gate_item("v1", booking_match="none")])
+    process_item = MagicMock()
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), gate_config)
+
+    process_item.assert_not_called()
+    resolve.assert_not_called()
+
+
+def test_run_once_processes_a_matched_recording(monkeypatch, gate_config):
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_decision(monkeypatch, MATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    process_item = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), gate_config)
+
+    process_item.assert_called_once()
+    assert process_item.call_args.kwargs["booking_decision"] == MATCHED_DECISION
+
+
+def test_run_once_processes_when_disable_recognition_is_off(monkeypatch, gate_config):
+    permissive = replace(gate_config, call_booking_disable_recognition=False)
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_decision(monkeypatch, UNMATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    marked = []
+    monkeypatch.setattr(
+        main.booking_gate, "mark_unmatched", lambda svc, fid: marked.append(fid)
+    )
+    process_item = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), permissive)
+
+    process_item.assert_called_once()
+    assert marked == []
+
+
+def test_process_target_ignores_the_mark_and_the_gate(monkeypatch, gate_config):
+    """Manual processing is the supported way to undo a mark."""
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_folder_items(monkeypatch, [gate_item("v1", booking_match="none")])
+    monkeypatch.setattr(
+        main.drive,
+        "get_file_metadata",
+        lambda service, fid: {
+            "id": "v1", "name": "v1.mp4", "mimeType": "video/mp4",
+            "parents": [GATE_FOLDER_ID],
+        },
+    )
+    marked = []
+    monkeypatch.setattr(
+        main.booking_gate, "mark_unmatched", lambda svc, fid: marked.append(fid)
+    )
+    process_item = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.process_target(MagicMock(), "v1", gate_config, is_folder=False)
+
+    process_item.assert_called_once()
+    assert marked == []
+    assert process_item.call_args.kwargs.get("booking_decision") is None
