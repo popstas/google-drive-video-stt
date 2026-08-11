@@ -1230,6 +1230,23 @@ def main(*, config_path: str | Path | None = None) -> None:
         )
         raise SystemExit(1) from exc
 
+    try:
+        booking_server.start(config)
+    except OSError as exc:
+        # Degrade, do not exit: transcription is the primary job. With the receiver
+        # down the gate refuses to mark anything (see `run_once`), so nothing is lost --
+        # unmatched files simply wait.
+        logger.exception("Booking receiver failed to start; continuing without it")
+        notify.notify_error(
+            f"Booking receiver failed to start on "
+            f"{config.call_booking_listen_host}:{config.call_booking_listen_port}: "
+            f"{exc}. Call bookings are not being received; recordings will not be "
+            f"marked as unmatched until it is back.",
+            telegram_bot_token=config.telegram_bot_token,
+            telegram_chat_id=config.telegram_chat_id,
+            proxy_url=config.proxy_url,
+        )
+
     paused_logged = False
     while True:
         if not is_run_enabled(config_path=config_path):

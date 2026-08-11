@@ -3095,3 +3095,54 @@ def test_process_item_withholds_the_comment_when_a_preset_produced_nothing(
     )
 
     sent.assert_not_called()
+
+
+# --- start the receiver from the polling loop ----------------------------------
+
+
+class _StopLoop(Exception):
+    """Raised from a patched time.sleep to break main()'s infinite loop."""
+
+
+def stop_after_one_cycle(monkeypatch, config):
+    """Patch main() down to one cycle. Returns the run_once mock."""
+    monkeypatch.setattr(main, "load_config", lambda **kwargs: config)
+    monkeypatch.setattr(main, "build_drive_service", lambda **kwargs: MagicMock())
+    monkeypatch.setattr(main, "is_run_enabled", lambda **kwargs: True)
+    run_once = MagicMock()
+    monkeypatch.setattr(main, "run_once", run_once)
+
+    def _sleep(_seconds):
+        raise _StopLoop
+
+    monkeypatch.setattr(main.time, "sleep", _sleep)
+    return run_once
+
+
+def test_main_starts_the_receiver_when_enabled(monkeypatch, gate_config):
+    start = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr(main.booking_server, "start", start)
+    stop_after_one_cycle(monkeypatch, gate_config)
+
+    with pytest.raises(_StopLoop):
+        main.main()
+
+    start.assert_called_once_with(gate_config)
+
+
+def test_main_survives_a_receiver_bind_failure(monkeypatch, gate_config, caplog):
+    monkeypatch.setattr(
+        main.booking_server, "start", MagicMock(side_effect=OSError("port in use"))
+    )
+    notified = MagicMock()
+    monkeypatch.setattr(main.notify, "notify_error", notified)
+    run_once = stop_after_one_cycle(monkeypatch, gate_config)
+
+    with caplog.at_level(logging.ERROR), pytest.raises(_StopLoop):
+        main.main()
+
+    # The polling loop is the primary job; a dead receiver degrades the gate but must
+    # not stop transcription.
+    run_once.assert_called_once()
+    notified.assert_called_once()
+    assert "booking receiver" in caplog.text.lower()

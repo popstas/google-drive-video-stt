@@ -5,6 +5,7 @@
 
 ### Features
 
+- Post meeting keypoints into the matched Planfix task
 - Gate the polling loop on booked calls
 - Resolve booking matches and mark unmatched recordings
 - Add the inbound call-booking receiver
