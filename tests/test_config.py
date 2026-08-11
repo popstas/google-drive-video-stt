@@ -1849,6 +1849,33 @@ def test_config_get_masks_webhook_token(tmp_path):
     assert config_get("webhook.url", config_path=config_file) == "https://example.com/***"
 
 
+def test_config_get_masks_call_booking_authorization_token(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set(
+        "call_booking.authorization_token", "call-SECRET", config_path=config_file
+    )
+
+    # The receiver authenticates bookings with this bearer token; it must be masked
+    # in both the whole-config dump and a single-key lookup, like webhook.token.
+    whole = config_get(config_path=config_file)
+    assert "call-SECRET" not in whole
+    assert "***" in whole
+    assert (
+        config_get("call_booking.authorization_token", config_path=config_file)
+        == "***"
+    )
+
+    # --show-secrets reveals it, same as any other masked leaf.
+    assert (
+        config_get(
+            "call_booking.authorization_token",
+            config_path=config_file,
+            show_secrets=True,
+        )
+        == "call-SECRET"
+    )
+
+
 def test_config_get_redacts_webhook_url_query_and_credentials(tmp_path):
     config_file = _base_config_file(tmp_path)
     config_set(

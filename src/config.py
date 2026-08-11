@@ -1381,7 +1381,15 @@ MASKED_KEY_PATHS: tuple[tuple[str, ...], ...] = (
 # Leaf key names whose values are masked wherever they appear (covers nested
 # credentials/token blocks copied verbatim into the YAML).
 MASKED_LEAF_KEYS: frozenset[str] = frozenset(
-    {"client_secret", "refresh_token", "token", "access_token", "api_key", "bot_token"}
+    {
+        "client_secret",
+        "refresh_token",
+        "token",
+        "access_token",
+        "api_key",
+        "bot_token",
+        "authorization_token",
+    }
 )
 MASK = "***"
 # URL-valued keys whose credentials (userinfo), path and query string are redacted
