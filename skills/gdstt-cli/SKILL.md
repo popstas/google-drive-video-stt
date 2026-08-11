@@ -350,7 +350,7 @@ presets:
 
 ### A recording was skipped and never transcribed
 
-The polling loop skips a recording when `call_booking.disable_recognition` is on and it matched no booked call, and marks it so it is not reconsidered. Diagnose in order:
+The polling loop skips a recording when `call_booking.disable_recognition` is on and it matched no booked call, and marks it so it is not reconsidered. The mark is written only while the receiver is confirmed listening — if it failed to bind its port, unmatched recordings are skipped and retried on the next cycle rather than marked. Diagnose in order:
 
 1. `gdstt bookings list` — is there a booking for that manager at that time at all?
 2. Does the recording's Drive name carry a meeting time (`… - 2026/08/08 09:00 GMT+04:00 – Recording`)? A renamed or hand-uploaded file has none and can never match.

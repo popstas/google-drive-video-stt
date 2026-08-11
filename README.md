@@ -888,7 +888,9 @@ its Planfix task.
 Set `disable_recognition: true` once bookings are flowing to stop transcribing
 recordings that match no booked call. Those get marked on Drive and skipped for good;
 `gdstt bookings list` shows what the matcher had, and `gdstt bookings rematch <file-id>`
-revives one.
+revives one. The mark is written only while the receiver is listening; if it failed
+to bind its port, unmatched recordings are skipped and retried on the next cycle
+rather than marked.
 
 ## Project layout
 
