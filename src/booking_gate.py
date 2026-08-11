@@ -7,15 +7,12 @@ ask about a file without downloading it.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Any
 
 from src import call_booking, drive
 from src.config import Config
 from src.meeting_time import parse_meeting_start
-
-logger = logging.getLogger(__name__)
 
 DISABLED = "disabled"
 MATCHED = "matched"

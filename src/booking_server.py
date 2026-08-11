@@ -35,10 +35,12 @@ def is_running() -> bool:
 
     The gate consults this before marking a recording as permanently unmatched: if no
     receiver ever came up, every recording *looks* unmatched, and marking them would
-    silently retire the whole backlog.
+    silently retire the whole backlog. Being registered is not enough -- if
+    ``serve_forever`` has died on its own (e.g. an unhandled ``OSError`` out of the
+    accept loop) nothing clears ``_running``, so the thread must also still be alive.
     """
     with _running_lock:
-        return _running is not None
+        return _running is not None and _running._thread.is_alive()
 
 
 def _parse_start_time(raw: object) -> datetime | None:

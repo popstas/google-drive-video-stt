@@ -868,7 +868,8 @@ its Planfix task.
    `authorization_token` must be ASCII: header values are decoded as Latin-1, so a
    token with any non-ASCII character can never authenticate.
 
-2. Publish port 8080 (already in `docker-compose.yml`) and put a TLS-terminating
+2. Uncomment the `ports:` block for port 8080 in `docker-compose.yml` (it ships
+   commented out, since the receiver is off by default) and put a TLS-terminating
    reverse proxy in front of it. The bearer token and the booking payload must not
    cross the network in plain text.
 

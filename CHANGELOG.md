@@ -23,6 +23,7 @@
 
 ### Documentation
 
+- Note the receiver-listening precondition for booking_match=none
 - Document the call-booking receiver and Planfix comments
 - Plan the Planfix call-booking implementation
 - Design the Planfix call-booking integration

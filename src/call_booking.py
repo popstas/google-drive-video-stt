@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -75,6 +76,14 @@ def append(path: Path, booking: CallBooking) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
             handle.write(line + "\n")
+            # The lock only protects the actual write(2) syscall, which happens here,
+            # not wherever Python's buffer next happens to flush. Without this,
+            # LOCK_UN below releases the lock while the line still sits in the
+            # userspace buffer, so a concurrent writer's flush/close can interleave
+            # its bytes with this line before either reaches the file -- a torn
+            # record that load() silently drops, losing a booking.
+            handle.flush()
+            os.fsync(handle.fileno())
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
