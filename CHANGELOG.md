@@ -1,7 +1,7 @@
 # Changelog
 
 
-## Unreleased
+## v0.3.0 - 2026-08-11
 
 ### Features
 
@@ -23,6 +23,7 @@
 
 ### Documentation
 
+- Publish the talks-reducer threshold report
 - Record the talks-reducer threshold result
 - Design the talks-reducer threshold benchmark
 - Add plan for employee folders, meta preset, and webhooks
