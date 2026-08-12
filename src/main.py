@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import logging
 import json
+import ssl
 import tempfile
 import time
 import traceback
@@ -59,7 +60,15 @@ def _is_transient_runtime_error(exc: Exception) -> bool:
         return False
     if isinstance(exc, drive.DownloadIntegrityError):
         return True
-    if isinstance(exc, (TimeoutError, requests.ConnectionError, requests.Timeout)):
+    # requests' exceptions only cover our own HTTP calls. The Google API client runs on
+    # httplib2, which lets socket and TLS failures through as builtins -- a dropped
+    # keep-alive connection arrives as BrokenPipeError, unrelated to requests.ConnectionError.
+    # Without the builtins here those never reach the retry path and a routine reconnect
+    # escalates into a failed cycle and an alert.
+    if isinstance(
+        exc,
+        (TimeoutError, ConnectionError, ssl.SSLError, requests.ConnectionError, requests.Timeout),
+    ):
         return True
     status = _http_status_code(exc)
     return status in _TRANSIENT_HTTP_STATUS_CODES

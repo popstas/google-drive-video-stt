@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import ssl
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -806,6 +807,51 @@ def test_run_once_retries_transient_listing_error(mocker, caplog):
     assert list_mock.call_count == 2
     sleep_mock.assert_called_once()
     process_mock.assert_called_once()
+    notify_mock.assert_not_called()
+    assert "retry_total=1" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        # httplib2 (what the Google API client uses) surfaces a dropped connection as a
+        # builtin BrokenPipeError, not as one of requests' exceptions. Observed in
+        # production: Drive closed a reused keep-alive socket and the whole cycle failed.
+        BrokenPipeError(32, "Broken pipe"),
+        ConnectionResetError(104, "Connection reset by peer"),
+        ConnectionAbortedError(103, "Software caused connection abort"),
+        ssl.SSLError("record layer failure"),
+    ],
+)
+def test_transient_classifier_accepts_socket_level_errors(exc):
+    assert main._is_transient_runtime_error(exc) is True
+
+
+@pytest.mark.parametrize("exc", [RefreshError("token gone"), AuthError("token gone")])
+def test_transient_classifier_still_rejects_auth_errors(exc):
+    assert main._is_transient_runtime_error(exc) is False
+
+
+def test_run_once_retries_broken_pipe_from_listing(mocker, caplog):
+    service = MagicMock()
+    cfg = make_config(folders=["f1"])
+
+    list_mock = mocker.patch(
+        "src.main.drive.list_folder_state",
+        side_effect=[BrokenPipeError(32, "Broken pipe"), [_item("v1", "a.mp4")]],
+    )
+    sleep_mock = mocker.patch("src.main.time.sleep")
+    process_mock = mocker.patch("src.main.process_item")
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    with caplog.at_level("INFO"):
+        main.run_once(service, cfg)
+
+    assert list_mock.call_count == 2
+    sleep_mock.assert_called_once()
+    process_mock.assert_called_once()
+    # A retried socket drop must stay silent: alerting on it trains the operator to
+    # ignore the channel that carries the real failures.
     notify_mock.assert_not_called()
     assert "retry_total=1" in caplog.text
 
