@@ -27,7 +27,7 @@ speech-to-text pipelines.
 - Built-in `meta` preset recording a one-sentence conversation subject, tags drawn
   only from `tags.allowed`, and a referral channel drawn only from
   `referrals.allowed`
-- One combined `.stt` document per call (keypoints + meta + transcript) and a local
+- One combined `.stt` document per call (keypoints + meta + transcript) and a
   `<stem>.meta.yml` alongside every other artifact
 - Optional fire-and-forget completion webhook posting `{file, employee, transcript,
   artifacts}` once per processed file
@@ -532,11 +532,14 @@ than failing the file — a bad LLM reply must never cost you a processed record
 Tune the vocabularies by editing `tags.allowed` / `referrals.allowed`; no code
 change is needed.
 
-Every processed recording also gets a local `<stem>.meta.yml` (never uploaded to
-Drive) merging these four model fields with facts the code already knows — manager,
-client, date, duration, Planfix task id, models used — and a combined `<stem>.stt`
-document (keypoints, then this meta block, then the transcript) that folder mode
-publishes to Drive when `output.also_drive: true`.
+Every processed recording also gets a `<stem>.meta.yml` merging these four model
+fields with facts the code already knows — manager, client, date, duration, Planfix
+task id, models used — and a combined `<stem>.stt` document (keypoints, then this
+meta block, then the transcript). Where they land depends on `output.target`: the
+default `drive` target uploads both as ordinary Drive siblings, same as every other
+artifact; `folder` mode keeps every artifact local, including `.meta.yml`, and
+`output.also_drive: true` additionally publishes **only** the `.stt` to Drive —
+`.meta.yml` itself is never published on its own.
 
 `config init` enables `meta` for you. Unlike `keypoints`, it is **opt-in** for
 configs written before it existed — otherwise upgrading would silently add an
@@ -611,12 +614,12 @@ updated in place when one already exists). With `folder`, the service writes
 `<output_dir>/<base_name>.txt` (and `.keypoints.md`), creating `output.dir` if it
 is missing. `output.dir` is required when `output.target=folder`.
 
-Every artifact — including the local-only `<base>.meta.yml` and the combined
+In `folder` mode, every artifact — including `<base>.meta.yml` and the combined
 `<base>.stt` — always lands in `output.dir` regardless of `output.also_drive`; the
-local artifact set is what marks a recording processed. In `folder` mode, setting
+local artifact set is what marks a recording processed. Setting
 `output.also_drive: true` additionally publishes **only** the `.stt` document as a
 Drive sibling — one file per recording next to the source MP4, not a copy of every
-artifact.
+artifact, and never `.meta.yml` itself.
 
 ## Usage
 

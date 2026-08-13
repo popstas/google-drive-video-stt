@@ -269,7 +269,7 @@ STT-провайдера и DAG пресетов с номерами стади�
 
 Второй встроенный пресет - `meta`: пишет `<base>.meta.md` из YAML-frontmatter - `subject:` (одно предложение), `tags:` **только** из `tags.allowed` (`{{allowed_tags}}`), `referral:`/`referral_note:` **только** из `referrals.allowed` (`{{allowed_referrals}}`; заполняется, только если клиент сам назвал источник, иначе пусто). Выдумки отсекаются на разборе; битый frontmatter даёт все четыре поля пустыми и не роняет файл. Словари меняются правкой `tags.allowed`/`referrals.allowed`, без кода.
 
-Каждая запись также получает локальный `<base>.meta.yml` (никогда не в Drive) - эти четыре поля плюс уже известные факты (менеджер, клиент, дата, Planfix task id, модели) - и `<base>.stt` (keypoints + мета-блок + транскрипт), единственный артефакт, публикуемый в Drive при `output.also_drive: true` (секции - из `output.stt_presets`).
+Каждая запись также получает `<base>.meta.yml` (эти четыре поля плюс уже известные факты - менеджер, клиент, дата, Planfix task id, модели) и `<base>.stt` (keypoints + мета-блок + транскрипт, секции - из `output.stt_presets`). При `output.target=drive` (дефолт) оба уходят в Drive как обычные соседние файлы; при `output.target=folder` оба остаются только локально в `output.dir`, и `output.also_drive: true` дополнительно публикует в Drive только `.stt` - `.meta.yml` в Drive при этом не попадает.
 
 **Откуда берётся промпт пресета (приоритет).** `instructions` (inline в YAML) >
 `prompt_file` (`.md`: как есть -> относительно папки конфига -> упакованный ассет

@@ -5,6 +5,7 @@
 
 ### Features
 
+- Enable the meta preset by default and retire action-items
 - Open the Planfix comment with the call's subject, tags, and referral
 - Publish only the .stt document to Drive
 - Write a .stt document and a meta.yml for every processed recording
