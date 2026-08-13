@@ -79,6 +79,48 @@ def extract_interlocutor_names(file_name: str, limit: int = 2) -> list[str]:
     return names
 
 
+_ORG_MARKER_RE = re.compile("|".join(_ORG_TOKENS), re.IGNORECASE)
+
+
+def split_participants(file_name: str) -> tuple[str, list[str]]:
+    """Split a recording name into ``(manager, clients)`` using the ExpertizeMe marker.
+
+    Meet writes the organizer two ways: attached to the name
+    (``Angelica Munkueva(ExpertizeMe) и Mels``) or as its own conjunction-separated
+    token (``Ольга х ExpertizeMe``). Both mean the same thing, so both are read here.
+
+    A name with no marker returns an empty manager and every name as a client: the
+    caller must be able to tell "the organizer is unmarked" from "the organizer is
+    this person", and guessing would put the client's name in the manager's field.
+    """
+    stem = os.path.splitext(file_name)[0]
+    stem = _DURATION_PREFIX_RE.sub("", stem)
+
+    date_match = _DATE_RE.search(stem)
+    if date_match:
+        stem = stem[: date_match.start()]
+
+    head = _TITLE_SEP_RE.split(stem)[0]
+
+    manager = ""
+    names: list[str] = []
+    for raw in _NAME_SEP_RE.split(head):
+        marked = bool(_ORG_MARKER_RE.search(raw))
+        part = _PARENTHETICAL_RE.sub(" ", raw).strip()
+        part = _ORG_MARKER_RE.sub("", part).strip()
+        if not part or _MEET_CODE_RE.match(part):
+            # A bare marker token: the organizer is whoever was named just before it.
+            if marked and names:
+                manager = manager or names.pop()
+            continue
+        if marked:
+            manager = manager or part
+            continue
+        if part not in names:
+            names.append(part)
+    return manager, [name for name in names if name != manager]
+
+
 def clean_transcript(text: str) -> str:
     """Normalize whitespace: unify newlines, drop trailing spaces, collapse blank runs."""
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")

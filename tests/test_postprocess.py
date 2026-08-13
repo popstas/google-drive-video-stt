@@ -290,3 +290,26 @@ def test_postprocess_transcript_end_to_end():
     assert "Speaker 3" not in out
     assert "Alice:" in out
     assert "Bob:" in out
+
+
+# --- manager/client split ---------------------------------------------------
+
+def test_split_participants_reads_the_marker_attached_to_a_name():
+    manager, clients = postprocess.split_participants(
+        "30-минутная онлайн-встреча Angelica Munkueva(ExpertizeMe) и Mels "
+        "- 2026/08/13 14:29 CEST - Recording.mp4"
+    )
+    assert manager == "Angelica Munkueva"
+    assert clients == ["Mels"]
+
+
+def test_split_participants_reads_the_marker_as_its_own_token():
+    manager, clients = postprocess.split_participants("Ольга х ExpertizeMe - 2026/07/02 21:56 CEST")
+    assert manager == "Ольга"
+    assert clients == []
+
+
+def test_split_participants_without_a_marker_names_no_manager():
+    manager, clients = postprocess.split_participants("Alice and Bob - 2026/07/02 21:56 CEST")
+    assert manager == ""
+    assert clients == ["Alice", "Bob"]
