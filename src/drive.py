@@ -320,14 +320,36 @@ def update_file(
 def set_file_app_properties(
     service: Any,
     file_id: str,
-    app_properties: dict[str, str],
+    app_properties: dict[str, str | None],
 ) -> dict:
-    """Merge appProperties onto a Drive file without changing its content."""
+    """Merge appProperties onto a Drive file without changing its content.
+
+    Drive counts every ``files.update`` as an edit: it moves ``modifiedTime``, sets
+    ``lastModifyingUser`` and appends "You edited an item" to the activity feed.
+    These properties are our own bookkeeping, not a user edit, and people sort these
+    shared folders by "Last modified" -- so the date has to survive the write.
+    Reading the current value and sending it straight back in the same request keeps
+    it exactly where it was.
+
+    Preservation is unconditional rather than opt-in: every call site writes
+    bookkeeping, and a flag is something a future call site forgets to pass.
+    """
+    current = (
+        service.files()
+        .get(fileId=file_id, fields="modifiedTime", supportsAllDrives=True)
+        .execute()
+    )
+    body: dict[str, Any] = {"appProperties": app_properties}
+    modified_time = current.get("modifiedTime")
+    if modified_time:
+        # A blank value would clear the date rather than preserve it, so only send
+        # one Drive actually gave us.
+        body["modifiedTime"] = modified_time
     return (
         service.files()
         .update(
             fileId=file_id,
-            body={"appProperties": app_properties},
+            body=body,
             fields="id, name, appProperties",
             supportsAllDrives=True,
         )

@@ -220,16 +220,79 @@ def test_update_file_accepts_app_properties(tmp_path, mocker):
 
 def test_set_file_app_properties_updates_metadata_only():
     service = MagicMock()
+    service.files.return_value.get.return_value.execute.return_value = {
+        "modifiedTime": "2026-01-02T03:04:05.678Z"
+    }
     service.files.return_value.update.return_value.execute.return_value = {"id": "v1"}
 
     drive.set_file_app_properties(service, "v1", {"speaker_names": "[\"A\", \"B\"]"})
 
     service.files.return_value.update.assert_called_once_with(
         fileId="v1",
-        body={"appProperties": {"speaker_names": "[\"A\", \"B\"]"}},
+        body={
+            "appProperties": {"speaker_names": "[\"A\", \"B\"]"},
+            "modifiedTime": "2026-01-02T03:04:05.678Z",
+        },
         fields="id, name, appProperties",
         supportsAllDrives=True,
     )
+
+
+def test_set_file_app_properties_preserves_the_modified_time():
+    """Writing a property must not move the file's date.
+
+    Drive counts any files.update as an edit. People sort these shared folders by
+    "Last modified", so a bookkeeping write that bumps the date corrupts the column.
+    """
+    service = MagicMock()
+    service.files.return_value.get.return_value.execute.return_value = {
+        "modifiedTime": "2025-03-14T18:24:53.633Z"
+    }
+    service.files.return_value.update.return_value.execute.return_value = {"id": "v1"}
+
+    drive.set_file_app_properties(service, "v1", {"booking_match": "none"})
+
+    service.files.return_value.get.assert_called_once_with(
+        fileId="v1",
+        fields="modifiedTime",
+        supportsAllDrives=True,
+    )
+    service.files.return_value.update.assert_called_once_with(
+        fileId="v1",
+        body={
+            "appProperties": {"booking_match": "none"},
+            "modifiedTime": "2025-03-14T18:24:53.633Z",
+        },
+        fields="id, name, appProperties",
+        supportsAllDrives=True,
+    )
+
+
+def test_set_file_app_properties_preserves_the_date_when_deleting_a_property():
+    """The rematch path sends a null value to delete a property; same rule applies."""
+    service = MagicMock()
+    service.files.return_value.get.return_value.execute.return_value = {
+        "modifiedTime": "2025-03-14T18:24:53.633Z"
+    }
+    service.files.return_value.update.return_value.execute.return_value = {"id": "v1"}
+
+    drive.set_file_app_properties(service, "v1", {"booking_match": None})
+
+    body = service.files.return_value.update.call_args.kwargs["body"]
+    assert body["appProperties"] == {"booking_match": None}
+    assert body["modifiedTime"] == "2025-03-14T18:24:53.633Z"
+
+
+def test_set_file_app_properties_omits_modified_time_when_drive_returns_none():
+    """A response without modifiedTime must not send a null date and 400 the request."""
+    service = MagicMock()
+    service.files.return_value.get.return_value.execute.return_value = {}
+    service.files.return_value.update.return_value.execute.return_value = {"id": "v1"}
+
+    drive.set_file_app_properties(service, "v1", {"booking_match": "none"})
+
+    body = service.files.return_value.update.call_args.kwargs["body"]
+    assert "modifiedTime" not in body
 
 
 def test_list_folder_state_includes_txt_id():

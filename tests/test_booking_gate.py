@@ -94,20 +94,30 @@ def test_booking_in_window_matches(config):
 
 def test_mark_unmatched_writes_the_property():
     service = MagicMock()
+    service.files.return_value.get.return_value.execute.return_value = {
+        "modifiedTime": "2026-01-02T03:04:05.678Z"
+    }
 
     mark_unmatched(service, "v1")
 
     service.files.return_value.update.assert_called_once()
     _, kwargs = service.files.return_value.update.call_args
     assert kwargs["body"] == {
-        "appProperties": {drive.BOOKING_MATCH_PROPERTY: drive.BOOKING_MATCH_NONE}
+        "appProperties": {drive.BOOKING_MATCH_PROPERTY: drive.BOOKING_MATCH_NONE},
+        "modifiedTime": "2026-01-02T03:04:05.678Z",
     }
 
 
 def test_clear_mark_nulls_the_property():
     service = MagicMock()
+    service.files.return_value.get.return_value.execute.return_value = {
+        "modifiedTime": "2026-01-02T03:04:05.678Z"
+    }
 
     clear_mark(service, "v1")
 
     _, kwargs = service.files.return_value.update.call_args
-    assert kwargs["body"] == {"appProperties": {drive.BOOKING_MATCH_PROPERTY: None}}
+    assert kwargs["body"] == {
+        "appProperties": {drive.BOOKING_MATCH_PROPERTY: None},
+        "modifiedTime": "2026-01-02T03:04:05.678Z",
+    }
