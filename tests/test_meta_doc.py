@@ -127,3 +127,18 @@ def test_build_carries_the_task_url(config_with_folder):
 
 def test_build_leaves_the_task_url_empty_when_unconfigured(config_with_folder):
     assert _document(config_with_folder)["planfix_task_url"] == ""
+
+
+def test_video_url_is_the_browser_link():
+    assert (
+        meta_doc.video_url("FILE1") == "https://drive.google.com/file/d/FILE1/view"
+    )
+
+
+def test_video_url_is_empty_without_a_file():
+    assert meta_doc.video_url("") == ""
+
+
+def test_build_uses_the_shared_video_url(config_with_folder):
+    """The document and the CLI must show the same link for the same recording."""
+    assert _document(config_with_folder)["video_url"] == meta_doc.video_url("FILE1")

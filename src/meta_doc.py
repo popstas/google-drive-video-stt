@@ -73,6 +73,15 @@ def _client(file_name: str) -> str:
 TASK_ID_PLACEHOLDER = "<task-id>"
 
 
+def video_url(file_id: str) -> str:
+    """Where a Drive recording opens in a browser.
+
+    Shared with the CLI so the link an operator is shown and the link written into the
+    meta document can never drift apart.
+    """
+    return f"https://drive.google.com/file/d/{file_id}/view" if file_id else ""
+
+
 def task_url(template: str, task_id: str) -> str:
     """Render a Planfix task's web address from the configured template.
 
@@ -121,7 +130,7 @@ def build(
         "planfix_task_id": planfix_task_id,
         "planfix_task_url": task_url(config.planfix_task_url, planfix_task_id),
         "video_id": file_id,
-        "video_url": f"https://drive.google.com/file/d/{file_id}/view",
+        "video_url": video_url(file_id),
         "source_name": file_name,
         "stt_model": f"{config.stt_provider}/{config.deepgram_model}",
         "llm_model": config.openai_model,

@@ -569,9 +569,15 @@ def cmd_planfix_sent(args: argparse.Namespace) -> None:
         print("No recording carries a sent-comment marker.")
         return
 
-    for created, task_id, manager, name, file_id in sorted(rows):
-        url = meta_doc.task_url(config.planfix_task_url, task_id)
-        print(f"{created}\t{task_id}\t{manager}\t{name}\t{url}\t{file_id}")
+    # One record per block rather than one per line: the two links are the point of
+    # this command, and a terminal only makes them clickable when they stand alone.
+    for index, (created, task_id, manager, name, file_id) in enumerate(sorted(rows)):
+        if index:
+            print()
+        print(f"{created}\t{manager}")
+        print(meta_doc.task_url(config.planfix_task_url, task_id) or f"task {task_id}")
+        print(meta_doc.video_url(file_id))
+        print(name)
 
 
 def cmd_bookings_restore_dates(args: argparse.Namespace) -> None:
