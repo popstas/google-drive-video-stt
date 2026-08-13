@@ -136,12 +136,18 @@ def _run_one(
     file_name: str,
     config: Config,
     speaker_names: list[str] | None,
+    manager_name: str,
     dep_results: Mapping[str, PresetResult],
 ) -> PresetResult:
     if preset.depends_on:
         input_text = _dependency_input(preset, dep_results)
     else:
-        input_text = build_prompt(transcript, file_name, speaker_names=speaker_names)
+        input_text = build_prompt(
+            transcript,
+            file_name,
+            speaker_names=speaker_names,
+            manager_name=manager_name,
+        )
 
     use_batch = preset.batch if preset.batch is not None else config.openai_batch
     # batch_wait resolution: per-preset override wins, else the global default
@@ -180,6 +186,7 @@ def run_presets(
     presets: Mapping[str, Preset] | Iterable[Preset],
     *,
     speaker_names: list[str] | None = None,
+    manager_name: str = "",
     only: Iterable[str] | None = None,
     precomputed: Mapping[str, str] | None = None,
 ) -> dict[str, PresetResult]:
@@ -253,6 +260,7 @@ def run_presets(
                             file_name=file_name,
                             config=config,
                             speaker_names=speaker_names,
+                            manager_name=manager_name,
                             dep_results={
                                 dep: results[dep]
                                 for dep in preset_map[name].depends_on

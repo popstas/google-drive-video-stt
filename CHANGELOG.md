@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+
+### Features
+
+- Send the Planfix comment as HTML instead of Markdown
+
 ## v0.5.1 - 2026-08-13
 
 ### Bug Fixes

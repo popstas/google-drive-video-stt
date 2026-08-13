@@ -3081,6 +3081,84 @@ def planfix_config(gate_config):
     )
 
 
+def test_resolve_speaker_names_hands_the_folder_owner_over_as_the_manager(monkeypatch):
+    """The one identity we know for certain is the folder's owner."""
+    seen = {}
+
+    class FakePipeline:
+        last_usage = {"input_tokens": 11, "output_tokens": 3}
+
+        def __init__(self, **kwargs):
+            seen["model"] = kwargs.get("model")
+
+        def run(self, instructions, input_text):
+            seen["input"] = input_text
+            return '{"1": "Mels", "2": "Angelica Munkueva"}', {}
+
+        def close(self):
+            seen["closed"] = True
+
+    monkeypatch.setattr(main, "OpenAIPipeline", FakePipeline)
+    config = make_config(
+        folders=[EmployeeFolder("f1", name="Анжелика Мункуева", email="a@e.org")],
+        openai_api_key="key",
+    )
+    transcript = (
+        "[00:00:01] Speaker 1: Здравствуйте, я по заявке.\n"
+        "[00:00:04] Speaker 2: Добрый день, я из ExpertizeMe.\n"
+    )
+    usage: dict[str, dict[str, int]] = {}
+
+    names = main._resolve_speaker_names(
+        transcript,
+        "Angelica Munkueva(ExpertizeMe) и Mels - 2026/08/13 14:29 CEST - Recording",
+        "f1",
+        config,
+        usage=usage,
+    )
+
+    assert names == ["Mels", "Angelica Munkueva"]
+    assert "Анжелика Мункуева" in seen["input"]
+    assert seen["closed"] is True
+    assert usage["openai_speaker_roles"] == {"input_tokens": 11, "output_tokens": 3}
+
+
+def test_resolve_speaker_names_is_skipped_without_an_openai_key(monkeypatch):
+    def explode(**kwargs):
+        raise AssertionError("must not build a pipeline without a key")
+
+    monkeypatch.setattr(main, "OpenAIPipeline", explode)
+    config = make_config(folders=[EmployeeFolder("f1", name="Анжелика")], openai_api_key="")
+
+    assert (
+        main._resolve_speaker_names(
+            "[00:00:01] Speaker 1: раз\n[00:00:04] Speaker 2: два",
+            "Alice and Bob - 2026/08/13 14:29 CEST - Recording",
+            "f1",
+            config,
+        )
+        is None
+    )
+
+
+def test_resolve_speaker_names_returns_none_when_the_name_has_one_participant(monkeypatch):
+    def explode(**kwargs):
+        raise AssertionError("nothing to disambiguate, must not spend a call")
+
+    monkeypatch.setattr(main, "OpenAIPipeline", explode)
+    config = make_config(folders=[EmployeeFolder("f1", name="Анжелика")], openai_api_key="key")
+
+    assert (
+        main._resolve_speaker_names(
+            "[00:00:01] Speaker 1: раз\n[00:00:04] Speaker 2: два",
+            "Планёрка - 2026/08/13 14:29 CEST - Recording",
+            "f1",
+            config,
+        )
+        is None
+    )
+
+
 def test_planfix_description_concatenates_presets_in_order():
     description = main._planfix_description(
         {"keypoints": "Задачи: раз", "action-items": "Сделать два", "meta": "topic: x"},
