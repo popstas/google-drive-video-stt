@@ -1,17 +1,39 @@
 # Changelog
 
 
-## Unreleased
+## v0.4.0 - 2026-08-13
+
+### Features
+
+- Add gdstt bookings list and rematch
+- Start the booking receiver alongside the polling loop
+- Post meeting keypoints into the matched Planfix task
+- Gate the polling loop on booked calls
+- Resolve booking matches and mark unmatched recordings
+- Add the inbound call-booking receiver
+- Add the Planfix comment client
+- Add call_booking and planfix configuration
+- Add the call-booking journal and matching
+- Parse meeting start time from recording names
 
 ### Bug Fixes
 
+- Close call-booking journal write/lock and listening-check gaps
+- Harden the call-booking receiver against bad input and teardown races
+- Mask call_booking.authorization_token in config get
 - Retry socket-level Drive failures instead of failing the cycle
 
 ### Documentation
 
+- Note the receiver-listening precondition for booking_match=none
+- Document the call-booking receiver and Planfix comments
 - Design restoring Drive modifiedTime after appProperty writes
 - Plan the Planfix call-booking implementation
 - Design the Planfix call-booking integration
+
+### Testing
+
+- Cover the fix-wave findings in call booking and the manual-command gate
 
 ## v0.3.0 - 2026-08-11
 
