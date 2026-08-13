@@ -60,6 +60,13 @@ def test_build_merges_model_fields_with_known_facts(config_with_folder):
     assert document["video_url"] == "https://drive.google.com/file/d/FILE1/view"
 
 
+def test_build_leaves_the_client_empty_without_a_manager_marker(config_with_folder):
+    document = _document(
+        config_with_folder, file_name="Alice and Bob - 2026/07/02 21:56 CEST.mp4"
+    )
+    assert document["client"] == ""
+
+
 def test_build_reads_the_date_from_the_recording_name(config_with_folder):
     assert _document(config_with_folder)["date"] == "2026-08-13T12:29:00+00:00"
 

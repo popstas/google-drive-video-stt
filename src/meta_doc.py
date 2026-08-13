@@ -56,7 +56,16 @@ def _duration(transcript: str) -> str:
 
 
 def _client(file_name: str) -> str:
-    _, clients = postprocess.split_participants(file_name)
+    """The first client name, or empty when no manager marker was found.
+
+    A marker-less name (``split_participants`` returns every name as a "client")
+    is not proof one of them is actually a client -- it may just be an
+    organizer-less recording. Guessing would present Meet's own filename
+    fragments as a client's name, so the field stays empty instead.
+    """
+    manager, clients = postprocess.split_participants(file_name)
+    if not manager:
+        return ""
     return clients[0] if clients else ""
 
 

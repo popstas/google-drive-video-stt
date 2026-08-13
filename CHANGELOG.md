@@ -5,6 +5,7 @@
 
 ### Features
 
+- Assemble a meta document describing each call
 - Teach the meta preset to record the client's referral source
 - Add output.also_drive to publish artifacts to Drive from folder mode
 - Send the Planfix comment as HTML instead of Markdown
