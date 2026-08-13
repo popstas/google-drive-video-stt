@@ -2440,6 +2440,20 @@ def test_output_also_drive_is_rejected_with_target_drive(tmp_path):
         _load_config(tmp_path, {"output": {"target": "drive", "also_drive": True}})
 
 
+def test_stt_presets_defaults_to_keypoints(tmp_path):
+    assert _load_config(tmp_path, {}).stt_presets == ("keypoints",)
+
+
+def test_stt_presets_is_read_from_output(tmp_path):
+    config = _load_config(tmp_path, {"output": {"stt_presets": ["keypoints", "action-items"]}})
+    assert config.stt_presets == ("keypoints", "action-items")
+
+
+def test_stt_presets_must_be_a_list(tmp_path):
+    with pytest.raises(ValueError, match="output.stt_presets"):
+        _load_config(tmp_path, {"output": {"stt_presets": "keypoints"}})
+
+
 # --- referrals.allowed --------------------------------------------------------
 
 

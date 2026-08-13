@@ -95,6 +95,10 @@ class Config:
     # recording look unprocessed (the has_txt flag would stop coming from local files),
     # and the whole backlog would be re-transcribed at real cost.
     output_also_drive: bool = False
+    # Which preset artifacts open the ``.stt`` document, in this order. Presets with no
+    # artifact are skipped at assembly time rather than rejected here: a preset can be
+    # disabled without invalidating the config.
+    stt_presets: tuple[str, ...] = ("keypoints",)
     openai_keypoints: bool = False
     openai_model: str = "gpt-5.4-mini"
     openai_batch: bool = False
@@ -648,6 +652,21 @@ def _parse_planfix_presets(value: object) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _parse_stt_presets(value: object) -> tuple[str, ...]:
+    """Read ``output.stt_presets``, defaulting to the single ``keypoints`` preset."""
+    if value is None:
+        return ("keypoints",)
+    if not isinstance(value, list):
+        raise ValueError(f"output.stt_presets must be a list, got: {value!r}")
+    names = []
+    for entry in value:
+        name = _yaml_str(entry)
+        if not name:
+            raise ValueError(f"output.stt_presets entries must be names, got: {entry!r}")
+        names.append(name)
+    return tuple(names)
+
+
 def _validate_webhook_url(url: str) -> None:
     """Reject a webhook URL that could never be delivered.
 
@@ -852,6 +871,7 @@ def _config_from_yaml(
             "output.also_drive only applies when output.target=folder; "
             "target=drive already writes to Drive"
         )
+    stt_presets = _parse_stt_presets(output.get("stt_presets"))
 
     if validate_providers:
         if presets and not openai_api_key:
@@ -906,6 +926,7 @@ def _config_from_yaml(
         output_target=output_target,
         output_dir=output_dir,
         output_also_drive=output_also_drive,
+        stt_presets=stt_presets,
         openai_keypoints=openai_keypoints,
         openai_model=openai_model,
         openai_batch=openai_batch,
@@ -1226,6 +1247,7 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
         "output": {
             "target": config.output_target,
             "dir": _relpath_for_config(config.output_dir, config_file),
+            "stt_presets": list(config.stt_presets),
         },
         "stt": {
             "provider": config.stt_provider,

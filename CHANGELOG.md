@@ -12,6 +12,7 @@
 
 ### Bug Fixes
 
+- Leave meta client empty when the recording name has no manager marker
 - Decide which speaker is which person instead of guessing from turn order
 
 ### Documentation
