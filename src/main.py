@@ -451,17 +451,58 @@ def _write_call_documents(
     output.write_artifact(
         service, base_name=stem, suffix=".meta.yml", text=meta_yaml,
         folder_id=folder_id, config=config, tmp_dir=tmp_dir,
+        existing_id=item.get("meta_yml_id"),
     )
     output.write_artifact(
         service, base_name=stem, suffix=".stt", text=text, folder_id=folder_id,
         config=config, tmp_dir=tmp_dir,
-        app_properties={
-            drive.SOURCE_VIDEO_ID_PROPERTY: file_id,
-            drive.ARTIFACT_TYPE_PROPERTY: "stt",
-        },
+        existing_id=item.get("stt_id"),
+        # No source_video_id: the transcript (`.txt`) is looked up on Drive by that
+        # same appProperty, and `.stt` also uploads as text/plain, so carrying it
+        # here would risk the `.stt` winning that lookup and being fed to the preset
+        # stage -- or overwritten -- as if it were the transcript. `drive.py` also
+        # excludes `.stt`/`.meta.yml` from that lookup by name, belt and suspenders.
+        app_properties={drive.ARTIFACT_TYPE_PROPERTY: "stt"},
         mime_type=drive.TXT_MIME,
     )
     return document
+
+
+def _try_write_call_documents(
+    service: Any,
+    file_id: str,
+    file_name: str,
+    folder_id: str,
+    transcript: str,
+    artifacts: dict[str, str],
+    config: Config,
+    tmp_dir: Path,
+    *,
+    item: dict,
+    booking_decision: booking_gate.BookingDecision,
+) -> dict[str, object] | None:
+    """Call ``_write_call_documents``, degrading to no document on failure.
+
+    The ``.stt``/``.meta.yml`` write happens after the ``.txt`` and every preset
+    artifact are already persisted. Letting a write failure here propagate would
+    re-raise out of ``process_item`` and leave the recording looking fully
+    processed on the next cycle (``has_txt`` true, no missing presets) -- so the
+    webhook and the Planfix comment, which run after this returns, would never
+    fire, and no later cycle would retry them. A document that "takes no part in
+    the bookkeeping" by design must not be able to fail a recording that already
+    transcribed successfully.
+    """
+    try:
+        return _write_call_documents(
+            service, file_id, file_name, folder_id, transcript, artifacts,
+            config, tmp_dir, item=item, booking_decision=booking_decision,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not write the .stt/.meta.yml documents for %s: %s",
+            file_name, type(exc).__name__,
+        )
+        return None
 
 
 def _local_artifact_paths(item: dict) -> dict[str, Path]:
@@ -900,7 +941,7 @@ def process_item(
                     local_artifact_paths=_local_artifact_paths(item),
                     only_presets=reprocess_presets,
                 )
-                meta_document = _write_call_documents(
+                meta_document = _try_write_call_documents(
                     service, file_id, file_name, folder_id, text, artifacts,
                     config, tmp_dir, item=item, booking_decision=booking_decision,
                 )
@@ -934,7 +975,7 @@ def process_item(
                     local_artifact_paths=_local_artifact_paths(item),
                     only_presets=reprocess_presets,
                 )
-                meta_document = _write_call_documents(
+                meta_document = _try_write_call_documents(
                     service, file_id, file_name, folder_id, text, artifacts,
                     config, tmp_dir, item=item, booking_decision=booking_decision,
                 )

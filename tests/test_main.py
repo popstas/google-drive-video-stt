@@ -91,7 +91,7 @@ def make_config(
 def _item(
     file_id="fid", name="video.mp4", *, has_mp3=False, has_txt=False,
     mp3_id=None, mp3_name=None, txt_id=None, keypoints_id=None,
-    artifact_ids=None, size=None,
+    artifact_ids=None, size=None, stt_id=None, meta_yml_id=None,
 ):
     file_info = {"id": file_id, "name": name}
     if size is not None:
@@ -106,6 +106,8 @@ def _item(
         "mp3_id": mp3_id,
         "mp3_name": mp3_name,
         "txt_id": txt_id,
+        "stt_id": stt_id,
+        "meta_yml_id": meta_yml_id,
         "artifact_ids": ids,
     }
 
@@ -1641,20 +1643,19 @@ def test_process_item_overwrites_existing_keypoints_on_reprocess(mocker, tmp_pat
         drive_mp3_artifact=False,
     )
     item = _item(
-        "fid", "video.mp4", has_txt=True, txt_id="t1", keypoints_id="k1"
+        "fid", "video.mp4", has_txt=True, txt_id="t1", keypoints_id="k1",
+        stt_id="s1", meta_yml_id="y1",
     )
     main.process_item(service, item, "folderX", cfg, reprocess_txt=True)
 
-    # Both the .txt and the .keypoints.md siblings are overwritten in place,
-    # not re-uploaded as duplicates.
+    # The .txt, the .keypoints.md, the .stt, and the .meta.yml siblings are all
+    # overwritten in place, not re-uploaded as duplicates.
     update_ids = [call.args[1] for call in update_mock.call_args_list]
     assert "t1" in update_ids
     assert "k1" in update_ids
-    # .meta.yml/.stt have no id to update in place yet, so they land as fresh
-    # uploads every cycle.
-    assert upload_mock.call_count == 2
-    uploaded_names = {call.kwargs["name"] for call in upload_mock.call_args_list}
-    assert uploaded_names == {"video.meta.yml", "video.stt"}
+    assert "s1" in update_ids
+    assert "y1" in update_ids
+    upload_mock.assert_not_called()
 
 
 def test_process_item_skips_keypoints_when_disabled(mocker, tmp_path):
@@ -3484,3 +3485,82 @@ def test_write_call_documents_writes_the_meta_yml_when_the_preset_produced_nothi
     assert (cfg.output_dir / f"{_STT_STEM}.meta.yml").exists()
     assert document["subject"] == ""
     assert document["client"] == "Mels"
+
+
+def test_process_item_survives_a_failed_stt_meta_write(mocker, tmp_path, caplog):
+    """A `.stt`/`.meta.yml` write failure must not cost the recording its webhook or
+    Planfix comment: by the time `_write_call_documents` runs, the `.txt` and every
+    preset artifact are already persisted, so a re-raise here would leave the next
+    cycle seeing a fully-processed recording (has_txt, no missing presets) that
+    never got notified and never will be retried.
+    """
+    notify = _mock_successful_run(mocker, tmp_path)
+    mocker.patch(
+        "src.main._write_call_documents", side_effect=RuntimeError("disk full")
+    )
+
+    with caplog.at_level(logging.WARNING):
+        telemetry = main.process_item(
+            MagicMock(), _item("fid", "video.mp4"), "folderX", _webhook_config()
+        )
+
+    assert telemetry is not None
+    assert telemetry.meta_document is None
+    notify.assert_called_once()
+    assert any(
+        "stt" in record.message.lower() and "video.mp4" in record.message
+        for record in caplog.records
+    )
+
+
+def test_apply_local_output_state_stt_and_meta_yml_do_not_mark_a_recording_processed(
+    tmp_path,
+):
+    """The load-bearing invariant: a `.stt`/`.meta.yml` sitting in `output_dir` with
+    no `.txt` sibling must not make `_apply_local_output_state`/`_pending_items`
+    think the recording is done. Only `.txt` and the preset artifacts may do that
+    (see `_write_call_documents`'s docstring) -- getting this wrong would silently
+    stop re-selecting recordings that were never actually transcribed.
+    """
+    out_dir = tmp_path / "results"
+    out_dir.mkdir()
+    (out_dir / "video.stt").write_text("assembled", encoding="utf-8")
+    (out_dir / "video.meta.yml").write_text("subject: ''\n", encoding="utf-8")
+
+    cfg = make_config(
+        stt_provider="deepgram",
+        drive_mp3_artifact=False,
+        output_target="folder",
+        output_dir=out_dir,
+    )
+    items = [_item("fid", "video.mp4")]
+    main._apply_local_output_state(items, cfg)
+
+    assert items[0]["has_txt"] is False
+    assert main._pending_items(items, cfg) == items
+
+
+def test_apply_local_output_state_stt_and_meta_yml_do_not_block_a_processed_recording(
+    tmp_path,
+):
+    """The converse of the test above: once the real `.txt` is present (and every
+    preset artifact, none configured here), a `.stt`/`.meta.yml` sitting alongside it
+    must not make the recording look pending again.
+    """
+    out_dir = tmp_path / "results"
+    out_dir.mkdir()
+    (out_dir / "video.txt").write_text("Speaker 1: hi", encoding="utf-8")
+    (out_dir / "video.stt").write_text("assembled", encoding="utf-8")
+    (out_dir / "video.meta.yml").write_text("subject: ''\n", encoding="utf-8")
+
+    cfg = make_config(
+        stt_provider="deepgram",
+        drive_mp3_artifact=False,
+        output_target="folder",
+        output_dir=out_dir,
+    )
+    items = [_item("fid", "video.mp4")]
+    main._apply_local_output_state(items, cfg)
+
+    assert items[0]["has_txt"] is True
+    assert main._pending_items(items, cfg) == []

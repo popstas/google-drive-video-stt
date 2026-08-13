@@ -310,6 +310,77 @@ def test_list_folder_state_includes_txt_id():
     assert by_id["v2"]["txt_id"] is None
 
 
+def test_list_folder_state_txt_id_ignores_a_sibling_stt():
+    """A `.stt` shares mimeType text/plain with the transcript and, before drive_stem
+    strips the extension, its stem collides with the `.txt`'s ("a.stt" -> "a", same as
+    "a.txt" -> "a"). It must never be mistaken for the transcript: the preset stage
+    would be fed the assembled .stt document instead of the real transcript, and a
+    fresh `.txt` write would overwrite the .stt's content.
+    """
+    mp4 = [{"id": "v1", "name": "a.mp4", "mimeType": "video/mp4"}]
+    # `.stt` listed after `.txt` so a naive last-write-wins dict would pick it.
+    txt = [
+        {"id": "t1", "name": "a.txt", "mimeType": "text/plain"},
+        {"id": "s1", "name": "a.stt", "mimeType": "text/plain"},
+    ]
+    service = _make_list_service({"mp4": mp4, "mp3": [], "txt": txt})
+
+    items = drive.list_folder_state(service, "folder1")
+
+    assert items[0]["txt_id"] == "t1"
+    assert items[0]["has_txt"] is True
+
+
+def test_list_folder_state_txt_id_ignores_an_stt_carrying_source_video_id():
+    """Even if a `.stt` carried `source_video_id` (it should not, per the .stt
+    upload, but this is the belt-and-suspenders side of that fix), the transcript
+    lookup must still resolve to the real `.txt`, not the `.stt`.
+    """
+    mp4 = [{"id": "v1", "name": "a.mp4", "mimeType": "video/mp4"}]
+    txt = [
+        {
+            "id": "s1",
+            "name": "a.stt",
+            "mimeType": "text/plain",
+            "appProperties": {"source_video_id": "v1", "artifact_type": "stt"},
+        },
+        {"id": "t1", "name": "a.txt", "mimeType": "text/plain"},
+    ]
+    service = _make_list_service({"mp4": mp4, "mp3": [], "txt": txt})
+
+    items = drive.list_folder_state(service, "folder1")
+
+    assert items[0]["txt_id"] == "t1"
+
+
+def test_list_folder_state_includes_stt_id_and_meta_yml_id_by_stem():
+    mp4 = [{"id": "v1", "name": "a.mp4", "mimeType": "video/mp4"}]
+    txt = [
+        {"id": "s1", "name": "a.stt", "mimeType": "text/plain"},
+        {"id": "y1", "name": "a.meta.yml", "mimeType": "text/plain"},
+    ]
+    service = _make_list_service({"mp4": mp4, "mp3": [], "txt": txt})
+
+    items = drive.list_folder_state(service, "folder1")
+
+    assert items[0]["stt_id"] == "s1"
+    assert items[0]["meta_yml_id"] == "y1"
+    # No .txt present: the .stt/.meta.yml siblings must not be mistaken for one.
+    assert items[0]["txt_id"] is None
+    assert items[0]["has_txt"] is False
+
+
+def test_list_folder_state_stt_id_and_meta_yml_id_default_to_none():
+    mp4 = [{"id": "v1", "name": "a.mp4", "mimeType": "video/mp4"}]
+    txt = [{"id": "t1", "name": "a.txt", "mimeType": "text/plain"}]
+    service = _make_list_service({"mp4": mp4, "mp3": [], "txt": txt})
+
+    items = drive.list_folder_state(service, "folder1")
+
+    assert items[0]["stt_id"] is None
+    assert items[0]["meta_yml_id"] is None
+
+
 def test_list_folder_state_includes_keypoints_id_by_stem():
     mp4 = [
         {"id": "v1", "name": "a.mp4", "mimeType": "video/mp4"},

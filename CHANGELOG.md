@@ -5,6 +5,7 @@
 
 ### Features
 
+- Write a .stt document and a meta.yml for every processed recording
 - Assemble keypoints, meta, and transcript into one .stt document
 - Assemble a meta document describing each call
 - Teach the meta preset to record the client's referral source

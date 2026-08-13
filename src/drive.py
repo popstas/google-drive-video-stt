@@ -167,20 +167,39 @@ def find_newest_mp4(service: Any, folder_id: str) -> dict | None:
 def list_folder_state(service: Any, folder_id: str) -> list[dict]:
     """Return mp4 files with sibling flags.
 
-    Each item is ``{file, has_mp3, has_txt, mp3_id, mp3_name, txt_id, artifact_ids}``
-    where ``artifact_ids`` maps each produced preset's ``artifact_type`` appProperty
-    to its Drive file id (e.g. ``{"keypoints": "k1"}``). The OpenAI stage consults
-    this to skip presets that already have an artifact. Legacy
-    ``<video-stem>.keypoints.md`` files uploaded before the appProperty existed are
-    folded onto the ``keypoints`` preset by stem.
+    Each item is ``{file, has_mp3, has_txt, mp3_id, mp3_name, txt_id, stt_id,
+    meta_yml_id, artifact_ids}`` where ``artifact_ids`` maps each produced preset's
+    ``artifact_type`` appProperty to its Drive file id (e.g. ``{"keypoints": "k1"}``).
+    The OpenAI stage consults this to skip presets that already have an artifact.
+    Legacy ``<video-stem>.keypoints.md`` files uploaded before the appProperty
+    existed are folded onto the ``keypoints`` preset by stem.
     """
     mp4_files = _list_files_by_mime(service, folder_id, MP4_MIME)
     mp3_files = _list_files_by_mime(service, folder_id, MP3_MIME)
-    txt_files = _list_files_by_mime(service, folder_id, TXT_MIME)
+    text_files = _list_files_by_mime(service, folder_id, TXT_MIME)
     md_files = _list_files_by_mime(service, folder_id, MD_MIME)
+
+    # ``text/plain`` is shared by the transcript (``.txt``), the assembled call
+    # document (``.stt``), and the merged meta document (``.meta.yml``). Splitting
+    # by name suffix keeps the transcript lookup (below) scoped to real transcripts:
+    # without this, ``drive_stem("video.stt") == "video"`` would collide with
+    # ``video.txt`` in the legacy stem index, and a ``.stt`` could get fed to the
+    # preset stage as if it were the transcript, or overwritten by one.
+    txt_files = [f for f in text_files if f["name"].endswith(".txt")]
+    stt_files = [f for f in text_files if f["name"].endswith(".stt")]
+    meta_yml_files = [f for f in text_files if f["name"].endswith(".meta.yml")]
 
     mp3_by_stem = {drive_stem(f["name"]): f for f in mp3_files}
     txt_by_stem = {drive_stem(f["name"]): f for f in txt_files}
+    # `.stt`/`.meta.yml` carry no `source_video_id` (dropped from the `.stt` upload
+    # specifically to keep it out of `txt_by_source_id` below; `.meta.yml` never had
+    # one), so a reprocess is matched by stem alone -- same as the legacy keypoints
+    # fallback, and reliable here because both names are always exactly
+    # ``<stem>.stt``/``<stem>.meta.yml``.
+    stt_by_stem = {drive_stem(f["name"]): f for f in stt_files}
+    meta_yml_by_stem = {
+        _strip_suffix(f["name"], ".meta.yml"): f for f in meta_yml_files
+    }
     # Keypoints are uploaded as ``<video-stem>.keypoints.md``; strip the
     # ``.keypoints`` suffix so they match back to the source video stem.
     #
@@ -210,6 +229,8 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
         stem = drive_stem(mp4["name"])
         mp3 = mp3_by_source_id.get(mp4["id"]) or mp3_by_stem.get(stem)
         txt = txt_by_source_id.get(mp4["id"]) or txt_by_stem.get(stem)
+        stt = stt_by_stem.get(stem)
+        meta_yml = meta_yml_by_stem.get(stem)
 
         artifact_ids: dict[str, str] = {}
         # Legacy bare-stem keypoints first; an authoritative source_video_id
@@ -228,6 +249,12 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
             "mp3_id": mp3["id"] if mp3 else None,
             "mp3_name": mp3["name"] if mp3 else None,
             "txt_id": txt["id"] if txt else None,
+            # Not consulted by any pending/processed decision (see
+            # ``_write_call_documents`` in main.py): a reprocess uses these purely
+            # to overwrite the previous ``.stt``/``.meta.yml`` in place on Drive
+            # instead of leaving a duplicate behind.
+            "stt_id": stt["id"] if stt else None,
+            "meta_yml_id": meta_yml["id"] if meta_yml else None,
             "artifact_ids": artifact_ids,
             "booking_match": mp4_props.get(BOOKING_MATCH_PROPERTY, ""),
             "planfix_comment_task_id": mp4_props.get(
@@ -235,6 +262,10 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
             ),
         })
     return items
+
+
+def _strip_suffix(name: str, suffix: str) -> str:
+    return name[: -len(suffix)] if name.endswith(suffix) else name
 
 
 def _strip_keypoints_suffix(stem: str) -> str:
