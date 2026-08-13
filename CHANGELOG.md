@@ -5,6 +5,7 @@
 
 ### Features
 
+- Print both links from gdstt planfix sent
 - Add gdstt planfix sent and a planfix_task_url meta field
 - Separate the Planfix comment sections with blank lines
 - Drop the preset name from the Planfix comment and mark the keypoints sections

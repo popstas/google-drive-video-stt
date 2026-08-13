@@ -1369,3 +1369,75 @@ def test_doctor_reports_call_booking_without_leaking_the_token(tmp_path, capsys)
     # pass by accident from the call_booking one above matching a substring of it.
     assert "planfix" in out
     assert "another-super-secret" not in out
+
+
+def _sent_files(count):
+    return [
+        {
+            "id": f"v{n}",
+            "name": f"call-{n}.mp4",
+            "createdTime": f"2026-08-{n:02d}T10:00:00.000Z",
+            "appProperties": {"planfix_comment_task_id": f"90000{n}"},
+        }
+        for n in range(1, count + 1)
+    ]
+
+
+def _run_sent(tmp_path, monkeypatch, files, extra=(), **config_kwargs):
+    config_path = write_cli_config(
+        tmp_path, folders=[{"folder_id": "f1", "email": "a@example.com"}], **config_kwargs
+    )
+    monkeypatch.setattr(cli.auth, "build_drive_service", lambda **kwargs: MagicMock())
+    monkeypatch.setattr(cli.drive, "list_mp4_timestamps", lambda svc, folder_id: files)
+    cli.main(["--config", str(config_path), "planfix", "sent", *extra])
+
+
+def test_planfix_sent_lists_only_recordings_with_a_marker(tmp_path, monkeypatch, capsys):
+    files = _sent_files(1) + [
+        {"id": "v9", "name": "never-sent.mp4", "createdTime": "2026-08-09T10:00:00.000Z"}
+    ]
+    _run_sent(tmp_path, monkeypatch, files)
+
+    out = capsys.readouterr().out
+    assert "call-1.mp4" in out
+    assert "never-sent.mp4" not in out
+
+
+def test_planfix_sent_puts_the_newest_first(tmp_path, monkeypatch, capsys):
+    """The question this answers is 'what happened lately'."""
+    _run_sent(tmp_path, monkeypatch, _sent_files(3))
+
+    out = capsys.readouterr().out
+    assert out.index("call-3.mp4") < out.index("call-2.mp4") < out.index("call-1.mp4")
+
+
+def test_planfix_sent_caps_the_list_and_says_so(tmp_path, monkeypatch, capsys):
+    """A truncated list that looks complete hides calls nobody will go looking for."""
+    _run_sent(tmp_path, monkeypatch, _sent_files(3), extra=["--limit", "2"])
+
+    out = capsys.readouterr().out
+    assert "call-1.mp4" not in out
+    assert "2 of 3 shown" in out
+
+
+def test_planfix_sent_limit_zero_prints_everything(tmp_path, monkeypatch, capsys):
+    _run_sent(tmp_path, monkeypatch, _sent_files(3), extra=["--limit", "0"])
+
+    out = capsys.readouterr().out
+    assert "call-1.mp4" in out
+    assert "shown" not in out
+
+
+def test_planfix_sent_falls_back_to_the_bare_task_id(tmp_path, monkeypatch, capsys):
+    """Without planfix.task_url there is no link to build; don't print a broken one."""
+    _run_sent(tmp_path, monkeypatch, _sent_files(1))
+
+    out = capsys.readouterr().out
+    assert "task 900001" in out
+    assert "https://drive.google.com/file/d/v1/view" in out
+
+
+def test_planfix_sent_reports_an_empty_log(tmp_path, monkeypatch, capsys):
+    _run_sent(tmp_path, monkeypatch, [])
+
+    assert "No recording carries a sent-comment marker." in capsys.readouterr().out

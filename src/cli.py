@@ -545,6 +545,9 @@ def cmd_planfix_sent(args: argparse.Namespace) -> None:
     POST, so it -- not the booking journal -- is the record of what was sent: a booking
     can exist for a comment that never landed, and the journal is pruned besides. The
     manager comes from the folder the recording sits in.
+
+    Newest first and capped by ``--limit``, because the question this answers is almost
+    always "what happened lately".
     """
     config = load_config(config_path=args.config, validate_providers=False)
     service = auth.build_drive_service(config=config)
@@ -569,15 +572,25 @@ def cmd_planfix_sent(args: argparse.Namespace) -> None:
         print("No recording carries a sent-comment marker.")
         return
 
+    # Newest first: this is a "what happened lately" listing, and the calls an operator
+    # is asking about are the ones that just happened.
+    rows.sort(reverse=True)
+    shown = rows if args.limit <= 0 else rows[: args.limit]
+
     # One record per block rather than one per line: the two links are the point of
     # this command, and a terminal only makes them clickable when they stand alone.
-    for index, (created, task_id, manager, name, file_id) in enumerate(sorted(rows)):
+    for index, (created, task_id, manager, name, file_id) in enumerate(shown):
         if index:
             print()
         print(f"{created}\t{manager}")
         print(meta_doc.task_url(config.planfix_task_url, task_id) or f"task {task_id}")
         print(meta_doc.video_url(file_id))
         print(name)
+
+    # Say what was left out. A truncated list that looks complete is worse than a long
+    # one, because nobody goes looking for the calls they were never told about.
+    if len(shown) < len(rows):
+        print(f"\n{len(shown)} of {len(rows)} shown; --limit 0 for all")
 
 
 def cmd_bookings_restore_dates(args: argparse.Namespace) -> None:
@@ -984,6 +997,12 @@ def build_parser() -> argparse.ArgumentParser:
     planfix_sub = p_planfix.add_subparsers(dest="planfix_command", required=True)
     p_planfix_sent = planfix_sub.add_parser(
         "sent", help="List recordings whose Planfix comment was delivered"
+    )
+    p_planfix_sent.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="How many of the newest to print; 0 for all (default: 20)",
     )
     p_planfix_sent.set_defaults(func=cmd_planfix_sent)
 
