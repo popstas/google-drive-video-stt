@@ -24,8 +24,11 @@ speech-to-text pipelines.
 - Config-defined DAG of OpenAI presets (each writes its own sibling artifact, e.g.
   the built-in Keypoints pass: `## Задачи` / `## Тезисы` / `## Открытые вопросы`),
   with independent presets run in parallel via the OpenAI Responses API
-- Built-in `meta` preset recording a one-sentence conversation topic plus tags drawn
-  only from the configured `tags.allowed` allow-list
+- Built-in `meta` preset recording a one-sentence conversation subject, tags drawn
+  only from `tags.allowed`, and a referral channel drawn only from
+  `referrals.allowed`
+- One combined `.stt` document per call (keypoints + meta + transcript) and a
+  `<stem>.meta.yml` alongside every other artifact
 - Optional fire-and-forget completion webhook posting `{file, employee, transcript,
   artifacts}` once per processed file
 - Output to Google Drive siblings or to a local folder (`output.target`)
@@ -64,7 +67,9 @@ uv sync --extra dev
 
 Configuration lives in a single `config.yml`. For a fresh install, generate
 one from the packaged defaults — the full chain `transcript-cleanup -> keypoints +
-action-items + meta` is enabled out of the box with `openai.batch: true`:
+meta` is enabled out of the box with `openai.batch: true`. `action-items` ships
+disabled: its output duplicates `keypoints`' `## Задачи` section, so re-enabling it
+is a config edit, not a code change:
 
 ```bash
 gdstt config init      # writes config.yml + prompts/ to the resolved target (see below)
@@ -248,7 +253,8 @@ notifications:
 output:
   target: drive          # drive | folder
   dir: null              # required when target=folder
-  also_drive: false      # folder mode only: publish a Drive copy as well
+  also_drive: false      # folder mode only: publish the .stt document as well
+  stt_presets: [keypoints]   # preset sections opened inside the .stt document
 stt:
   provider: deepgram     # "" / disabled => MP3-only
   language: ru
@@ -270,10 +276,15 @@ openai:
   max_parallel: 4        # cap on presets run concurrently
 tags:
   allowed: [клиентская-консультация, O-1, EB-1]   # the only tags `meta` may pick
+referrals:
+  allowed: [рекомендация, instagram, telegram, youtube, linkedin]   # the only channels `meta` may pick for `referral`
 webhook:
   url: ""                # empty => no completion webhook is sent
   token: ""              # optional; sent as "Authorization: Bearer <token>"
 google: {}               # inline-first auth; empty => data_dir fallback
+planfix:
+  meta_fields: [subject, tags, referral, referral_note, duration, video_url]   # header fields on the Planfix comment
+  task_url: ""           # e.g. https://<account>.planfix.com/task/<task-id>
 presets:
   transcript-cleanup:
     prompt_file: prompts/transcript-cleanup.md   # packaged asset, copied beside the config
@@ -282,9 +293,6 @@ presets:
     depends_on: [transcript-cleanup]   # overrides the built-in keypoints preset
   meta:
     depends_on: [transcript-cleanup]   # overrides the built-in meta preset
-  action-items:
-    depends_on: [transcript-cleanup]
-    instructions: "Extract per-manager action items..."   # inline prompt instead of a file
 ```
 
 Presets define the OpenAI post-processing DAG (see
@@ -308,6 +316,8 @@ variable is read at runtime:
 | `stt.postprocess` | `true` | Clean the transcript and map diarized `Speaker N` labels to the interlocutor names parsed from the file name, merging spurious extra speakers |
 | `output.target` | `drive` | Where artifacts are written: `drive` (sibling files) or `folder` (local `output.dir`) |
 | `output.dir` | — | Required when `output.target=folder`; local directory for transcript/keypoints files |
+| `output.also_drive` | `false` | Folder mode only: also publish the combined `.stt` document (keypoints + meta + transcript) as a Drive sibling. Every artifact still lands in `output.dir` regardless; this only adds the one Drive copy |
+| `output.stt_presets` | `[keypoints]` | Which preset sections (in order) open the `.stt` document, between the title and the meta block |
 | `openai.api_key` | — | Required when any OpenAI preset is enabled |
 | `openai.model` | `gpt-5.4-mini` | Global default model for presets |
 | `openai.batch` | `false` | Global default batch mode. Batch API is ~50% cheaper but slower (not higher quality); batch on an upstream preset delays its downstream presets |
@@ -322,8 +332,11 @@ variable is read at runtime:
 | `stt.deepgram.keyterms_enabled` | `true` | Enables Nova-3 keyterm prompting |
 | `stt.deepgram.keyterms_file` | `deepgram-keyterms-example.txt` | Keyterms file, one term per line, max 100. Resolved beside `config.yml`; point it at your own list (e.g. `data/deepgram-keyterms.txt`). A missing default is a warning; a missing path you set explicitly is an error |
 | `tags.allowed` | (empty) | Allow-list the `meta` preset picks conversation tags from. Empty means `meta` returns no tags |
+| `referrals.allowed` | seeded list (see below) | Allow-list the `meta` preset picks the `referral` channel from. A value outside the list is dropped |
 | `webhook.url` | (empty) | Completion webhook endpoint; must be an absolute `http://` or `https://` URL. Empty disables it; a failure never fails the file |
 | `webhook.token` | (empty) | Optional bearer token sent as `Authorization: Bearer <token>` |
+| `planfix.meta_fields` | `[subject, tags, referral, referral_note, duration, video_url]` | Which meta fields open the Planfix comment, and in what order |
+| `planfix.task_url` | (empty) | Where a task lives in the web UI, e.g. `https://<account>.planfix.com/task/<task-id>`. Fills `planfix_task_url` in the meta document and the link column of `gdstt planfix sent`. Empty leaves both blank |
 
 ## Speech-to-text
 
@@ -434,12 +447,14 @@ Two built-in presets ship with the code. `keypoints` produces a
 `<base>.keypoints.md` document containing `## Задачи` (grouped by
 `### Ответственный`), `## Тезисы`, and `## Открытые вопросы` in plain text.
 `meta` produces a `<base>.meta.md` YAML-frontmatter artifact describing the call
-(see [Conversation meta](#conversation-meta-topic-and-tags)). A generated config
-enables the full chain `transcript-cleanup -> keypoints + action-items + meta` out
-of the box (with `openai.batch: true`); `transcript-cleanup` is written above its
-dependents. Config presets override built-ins field-by-field, add new presets, and
-disable a built-in with `enabled: false`. Running any enabled preset requires
-`openai.api_key` and honors `proxy_url`.
+(see [Conversation meta](#conversation-meta-subject-tags-and-referral)). A
+generated config enables the full chain `transcript-cleanup -> keypoints + meta`
+out of the box (with `openai.batch: true`); `transcript-cleanup` is written above
+its dependents. `action-items` ships disabled — its output duplicates `keypoints`'
+`## Задачи` section — but its prompt asset stays packaged, so turning it back on is
+a `presets:` edit, not a code change. Config presets override built-ins
+field-by-field, add new presets, and disable a built-in with `enabled: false`.
+Running any enabled preset requires `openai.api_key` and honors `proxy_url`.
 
 **Prompt source priority.** Each preset's instructions are resolved as
 `instructions` (inline text in the YAML) > `prompt_file` > error. A `prompt_file`
@@ -489,27 +504,44 @@ For an agent-driven path (reason about speakers, confirm the mapping, relabel
 deterministically, and write the Keypoints document by hand), see
 [`skills/gdstt-cli/SKILL.md`](skills/gdstt-cli/SKILL.md).
 
-### Conversation meta (topic and tags)
+### Conversation meta (subject, tags, and referral)
 
 The built-in `meta` preset summarizes what a call was about in one OpenAI pass and
 writes a `<base>.meta.md` artifact holding nothing but YAML frontmatter:
 
 ```markdown
 ---
-topic: Консультация по визе O-1 для research-профиля
+subject: Консультация по визе O-1 для research-профиля
 tags: [клиентская-консультация, O-1, рекомендательные-письма]
+referral: рекомендация
+referral_note: Посоветовала знакомая из Нью-Йорка
 ---
 ```
 
-`topic` is a single sentence. `tags` are drawn **only** from `tags.allowed` in
-`config.yml`, which is injected into the prompt through `{{allowed_tags}}`; an
-empty allow-list means an empty tags list. The model is asked to constrain itself,
-and `src/meta.py` enforces it independently: `parse_meta` intersects the reply's
-tags with the allow-list and drops anything invented. A missing or malformed
-frontmatter block degrades to an empty topic and no tags rather than failing the
-file — a bad LLM reply must never cost you a processed recording.
+`subject` is a single sentence. `tags` are drawn **only** from `tags.allowed` in
+`config.yml`, injected into the prompt through `{{allowed_tags}}`; an empty
+allow-list means an empty tags list. `referral` is drawn **only** from
+`referrals.allowed`, injected through `{{allowed_referrals}}`, and is filled only
+when the client themselves states where they heard about the company — a manager
+asking with no answer is not a source. `referral_note` carries the client's own
+words about it and stays empty whenever `referral` does. The model is asked to
+constrain itself, and `src/meta.py` enforces it independently: `parse_meta`
+intersects the reply's tags with `tags.allowed`, drops any `referral` outside
+`referrals.allowed`, and drops `referral_note` whenever `referral` was dropped. A
+missing or malformed frontmatter block degrades to all four fields empty rather
+than failing the file — a bad LLM reply must never cost you a processed recording.
 
-Tune the vocabulary by editing `tags.allowed`; no code change is needed.
+Tune the vocabularies by editing `tags.allowed` / `referrals.allowed`; no code
+change is needed.
+
+Every processed recording also gets a `<stem>.meta.yml` merging these four model
+fields with facts the code already knows — manager, client, date, duration, Planfix
+task id, models used — and a combined `<stem>.stt` document (keypoints, then this
+meta block, then the transcript). Where they land depends on `output.target`: the
+default `drive` target uploads both as ordinary Drive siblings, same as every other
+artifact; `folder` mode keeps every artifact local, including `.meta.yml`, and
+`output.also_drive: true` additionally publishes **only** the `.stt` to Drive —
+`.meta.yml` itself is never published on its own.
 
 `config init` enables `meta` for you. Unlike `keypoints`, it is **opt-in** for
 configs written before it existed — otherwise upgrading would silently add an
@@ -539,9 +571,13 @@ success path only, after every artifact has been written:
   "employee": {"name": "Олег Иванов", "email": "oleg@example.com"},
   "transcript": "Ольга: ...",
   "artifacts": {
-    "meta": {"topic": "...", "tags": ["клиентская-консультация"]},
-    "keypoints": "## Задачи\n...",
-    "action-items": "..."
+    "meta": {
+      "subject": "...",
+      "tags": ["клиентская-консультация"],
+      "referral": "рекомендация",
+      "referral_note": "Посоветовала знакомая"
+    },
+    "keypoints": "## Задачи\n..."
   }
 }
 ```
@@ -549,9 +585,9 @@ success path only, after every artifact has been written:
 The employee comes from the `folders` entry the file was found in; a folder with no
 `name`/`email` sends empty strings rather than omitting the key. Every enabled
 preset's output appears under `artifacts` keyed by preset name — raw text, except
-`meta`, which is parsed into `{topic, tags}`. Adding a preset to `config.yml`
-therefore extends the payload with no code change, so a consumer must tolerate new
-keys appearing.
+`meta`, which is parsed into `{subject, tags, referral, referral_note}`. Adding a
+preset to `config.yml` therefore extends the payload with no code change, so a
+consumer must tolerate new keys appearing.
 
 A file normally notifies once, when it is transcribed. It notifies **again** if it
 is later re-selected and produces preset output — after you add a preset to
@@ -579,6 +615,13 @@ default `drive`, they are written as siblings of the source MP4 and uploaded (or
 updated in place when one already exists). With `folder`, the service writes
 `<output_dir>/<base_name>.txt` (and `.keypoints.md`), creating `output.dir` if it
 is missing. `output.dir` is required when `output.target=folder`.
+
+In `folder` mode, every artifact — including `<base>.meta.yml` and the combined
+`<base>.stt` — always lands in `output.dir` regardless of `output.also_drive`; the
+local artifact set is what marks a recording processed. Setting
+`output.also_drive: true` additionally publishes **only** the `.stt` document as a
+Drive sibling — one file per recording next to the source MP4, not a copy of every
+artifact, and never `.meta.yml` itself.
 
 ## Usage
 
@@ -645,12 +688,11 @@ $ gdstt doctor
 folders: 1 configured
   abc123: Олег Иванов <oleg@example.com>
 stt.provider: deepgram
-Presets: 4 enabled (reprocess stages)
+Presets: 3 enabled (reprocess stages)
   0. transcript (Deepgram base)
   1. transcript-cleanup <- transcript
   2. keypoints <- transcript-cleanup
   3. meta <- transcript-cleanup
-  4. action-items <- transcript-cleanup
 ```
 
 `gdstt reprocess <id> [STAGES]` force-reruns those stages even when the artifact
@@ -661,7 +703,7 @@ already exists. `STAGES` is a single number, a range (`lo-hi`), or a comma list 
 gdstt reprocess <id>           # rerun every preset (1..N) from the existing transcript
 gdstt reprocess <id> 2         # rerun only stage 2 (keypoints)
 gdstt reprocess <id> 1-2       # rerun stages 1 and 2 (transcript-cleanup + keypoints)
-gdstt reprocess <id> 2,4       # rerun stages 2 and 4 (keypoints + action-items)
+gdstt reprocess <id> 2,3       # rerun stages 2 and 3 (keypoints + meta)
 gdstt reprocess <id> 0         # re-transcribe (stage 0) and regenerate the whole chain
 gdstt reprocess <id> 2-3 --dry-run   # preview which stages would run, spend nothing
 ```
@@ -913,7 +955,9 @@ src/
   cli.py         gdstt operator CLI (argparse subcommands)
   output.py      Output destination layer (Drive sibling or local folder)
   postprocess.py Local transcript cleanup + speaker-name mapping
-  meta.py        Parse the meta preset's frontmatter (topic + allow-listed tags)
+  meta.py        Parse the meta preset's frontmatter (subject + allow-listed tags/referral)
+  meta_doc.py    Merge meta fields with known facts into <stem>.meta.yml
+  stt_document.py Assemble <stem>.stt from keypoints, meta, and the transcript
   openai_pipeline.py OpenAI Responses keypoints generation (sync + batch)
   relabel_transcript.py Deterministic speaker relabeling from a MAP.json
   stt/

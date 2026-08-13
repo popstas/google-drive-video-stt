@@ -2,8 +2,8 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.8.0
-last_updated: 2026-08-12
+version: 2.9.0
+last_updated: 2026-08-13
 ---
 
 # gdstt CLI
@@ -136,9 +136,16 @@ STT), `1..N`=пресеты в порядке цепочки (тратит OpenA
   Drive-MP4, чтобы следующий цикл опроса пересмотрел запись. Трогает только
   метаданные, кредиты не тратит.
 - `gdstt bookings restore-dates [--dry-run]` - возвращает `modifiedTime` записей,
-  которым его сдвинула простановка метки `booking_match`, обратно на `createdTime`.
-  Запись метки в Drive считается редактированием и ломает сортировку папок по дате.
-  Сначала запускать с `--dry-run` и смотреть список.
+  которым его сдвинула простановка `booking_match`, обратно на `createdTime`: запись
+  метки Drive считает редактированием и ломает сортировку по дате. Сначала `--dry-run`.
+
+### `planfix sent`
+
+`gdstt planfix sent [--limit N]` - записи, чей комментарий реально ушёл, блоком на
+запись, новые сверху (`--limit 0` - все): время, менеджер, ссылка на задачу (из
+`planfix.task_url`), ссылка на Drive, имя. Маркер `planfix_comment_task_id` пишется
+на MP4 только после успешного POST, так что это журнал отправленного - в отличие от
+`bookings list` с бронями (бронь может быть, а комментарий не уйти). Только чтение.
 
 ### `doctor [--drive]`
 
@@ -159,10 +166,9 @@ STT-провайдера и DAG пресетов с номерами стади�
 Подкоманды `config`:
 
 - `config init [--data-dir DIR] [--output-dir DIR] [--prompt-dir DIR] [--force]` -
-  свежий полный конфиг: цепочка
-  `transcript-cleanup -> keypoints + action-items + meta`, `openai.batch: true`,
-  промпты и `deepgram-keyterms-example.txt` рядом под `<GDSTT_HOME>`.
-  `--output-dir` -> folder; `--prompt-dir` -> промпты туда.
+  свежий полный конфиг: цепочка `transcript-cleanup -> keypoints + meta`,
+  `openai.batch: true`, промпты и `deepgram-keyterms-example.txt` рядом под
+  `<GDSTT_HOME>`. `--output-dir` -> folder; `--prompt-dir` -> промпты туда.
 - `config path` - путь к активному конфигу без валидации секретов.
 - `config get [KEY] [--show-secrets]` / `config set KEY VALUE` / `config unset KEY` -
   прочитать (секреты замаскированы, `--show-secrets` их раскрывает), записать+провалидировать или удалить точечный ключ.
@@ -266,17 +272,11 @@ STT-провайдера и DAG пресетов с номерами стади�
 образуют DAG (`depends_on`) - каждый пресет это один проход OpenAI со своими
 инструкциями, пишет свой соседний артефакт `<base><artifact_suffix>` (по
 умолчанию `.<имя>.md`, метка `artifact_type=<имя>`); независимые пресеты идут
-параллельно. Конфиг-пресеты переопределяют встроенные по полям, добавляют новые и
-отключают встроенный через `enabled: false`. Дефолтная цепочка
-`transcript-cleanup -> keypoints + action-items + meta` работает из коробки.
-Идемпотентность - по
-пресетам: повторный прогон делает только недостающие артефакты.
+параллельно. Конфиг-пресеты переопределяют встроенные по полям, добавляют новые и отключают встроенный через `enabled: false`. Дефолтная цепочка `transcript-cleanup -> keypoints + meta` работает из коробки; третий пакетный пресет, `action-items`, по умолчанию отключён (дублирует `## Задачи` из keypoints) - промпт остаётся в пакете, включить снова = правка `presets:`, без кода. Идемпотентность - по пресетам: повторный прогон делает только недостающие артефакты.
 
-Второй встроенный пресет - `meta`: пишет `<base>.meta.md` из одного YAML-frontmatter
-блока - `topic:` (одно предложение, о чём разговор) и `tags:` **только** из
-`tags.allowed` в `config.yml` (идёт в промпт через `{{allowed_tags}}`; пустой список -
-пустые теги). Выдуманные теги отсекаются на разборе, битый frontmatter даёт пустой
-`topic` и не роняет файл. Словарь тегов меняется правкой `tags.allowed`, без кода.
+Второй встроенный пресет - `meta`: пишет `<base>.meta.md` из YAML-frontmatter - `subject:` (одно предложение), `tags:` **только** из `tags.allowed` (`{{allowed_tags}}`), `referral:`/`referral_note:` **только** из `referrals.allowed` (`{{allowed_referrals}}`; заполняется, только если клиент сам назвал источник, иначе пусто). Выдумки отсекаются на разборе; битый frontmatter даёт все четыре поля пустыми и не роняет файл. Словари меняются правкой `tags.allowed`/`referrals.allowed`, без кода.
+
+Каждая запись также получает `<base>.meta.yml` (эти четыре поля плюс уже известные факты - менеджер, клиент, дата, Planfix task id, модели) и `<base>.stt` (keypoints + мета-блок + транскрипт, секции - из `output.stt_presets`). При `output.target=drive` (дефолт) оба уходят в Drive как обычные соседние файлы; при `output.target=folder` оба остаются только локально в `output.dir`, и `output.also_drive: true` дополнительно публикует в Drive только `.stt` - `.meta.yml` в Drive при этом не попадает.
 
 **Откуда берётся промпт пресета (приоритет).** `instructions` (inline в YAML) >
 `prompt_file` (`.md`: как есть -> относительно папки конфига -> упакованный ассет
@@ -293,7 +293,7 @@ STT-провайдера и DAG пресетов с номерами стади�
 presets:
   transcript-cleanup: { prompt_file: prompts/transcript-cleanup.md }
   keypoints: { depends_on: [transcript-cleanup] }   # переопределяет встроенный
-  action-items: { depends_on: [transcript-cleanup], prompt_file: prompts/action-items.md }
+  meta: { depends_on: [transcript-cleanup] }        # переопределяет встроенный
 ```
 
 **Конфликты (валидация на загрузке).** Дубль-ключи в YAML (в т.ч. два пресета под
@@ -387,7 +387,7 @@ The polling loop skips a recording when `call_booking.disable_recognition` is on
   ключом падает на загрузке с подсказкой про `folders`; чинится только в `config.yml`.
 - `webhook.url` (+ опциональный `webhook.token` -> `Authorization: Bearer`) шлёт POST
   раз на файл и только при успехе: `{file, employee, transcript, artifacts}`, где
-  `artifacts` - тексты пресетов по именам, а `meta` разобран в `{topic, tags}`.
+  `artifacts` - тексты пресетов по именам, а `meta` разобран в `{subject, tags, referral, referral_note}`.
   Доставка fire-and-forget: сбой логируется (только тип исключения), файл всё равно
   обработан, ретраев нет. В payload есть PII (email и полный транскрипт) - эндпоинт
   должен быть HTTPS и с токеном.

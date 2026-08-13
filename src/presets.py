@@ -27,7 +27,7 @@ _SRC_PROMPTS_DIR = Path(__file__).resolve().parent / "assets" / "prompts"
 
 # Prompt assets shipped with the package. ``config init`` copies these beside a
 # generated config so the default chain
-# (transcript-cleanup -> keypoints + action-items) works out of the box and extra
+# (transcript-cleanup -> keypoints + meta) works out of the box and extra
 # presets are one edit away.
 PACKAGED_PROMPT_ASSETS: tuple[str, ...] = (
     "keypoints.md",
@@ -72,10 +72,13 @@ def load_packaged_prompt(name: str) -> str:
 INSTRUCTIONS = load_packaged_prompt("keypoints.md")
 
 # Built-in `meta` preset prompt: describe the conversation with a one-sentence
-# topic and tags picked only from the config's `tags.allowed` list, returned as a
-# YAML frontmatter block so `meta.parse_meta` can read it back into structured
-# fields for the completion webhook. The `{{allowed_tags}}` placeholder in the
-# asset is rendered from `Config.tags_allowed` at load time (`config.py`).
+# subject, tags picked only from the config's `tags.allowed` list, and where the
+# client heard about the company (a referral channel picked only from
+# `referrals.allowed`, plus a free-text note), returned as a YAML frontmatter block
+# so `meta.parse_meta` can read it back into structured fields for the completion
+# webhook. The `{{allowed_tags}}`/`{{allowed_referrals}}` placeholders in the asset
+# are rendered from `Config.tags_allowed`/`Config.referrals_allowed` at load time
+# (`config.py`).
 META_INSTRUCTIONS = load_packaged_prompt("meta.md")
 
 

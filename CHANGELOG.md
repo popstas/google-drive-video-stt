@@ -5,11 +5,33 @@
 
 ### Features
 
+- Print both links from gdstt planfix sent
+- Add gdstt planfix sent and a planfix_task_url meta field
+- Separate the Planfix comment sections with blank lines
+- Drop the preset name from the Planfix comment and mark the keypoints sections
+- Enable the meta preset by default and retire action-items
+- Open the Planfix comment with the call's subject, tags, and referral
+- Publish only the .stt document to Drive
+- Write a .stt document and a meta.yml for every processed recording
+- Assemble keypoints, meta, and transcript into one .stt document
+- Assemble a meta document describing each call
+- Teach the meta preset to record the client's referral source
+- Add output.also_drive to publish artifacts to Drive from folder mode
 - Send the Planfix comment as HTML instead of Markdown
 
 ### Bug Fixes
 
+- Stop a meta-header-only Planfix comment from posting and marking the task
+- Correct the false "meta.yml never reaches Drive" claim in the docs
+- Use source_name as the Planfix video_url anchor, normalise multi-line meta values, and cover the meta_document wiring
+- Keep the .stt out of the transcript lookup and stop it duplicating on reprocess
+- Leave meta client empty when the recording name has no manager marker
 - Decide which speaker is which person instead of guessing from turn order
+
+### Documentation
+
+- Add the implementation plan for the .stt artifact and meta document
+- Add spec for the .stt artifact and the meta document
 
 ## v0.5.1 - 2026-08-13
 

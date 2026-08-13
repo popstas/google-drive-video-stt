@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import logging
 import json
+import re
 import ssl
 import tempfile
 import time
@@ -19,6 +21,7 @@ from src import (
     booking_server,
     drive,
     meta as meta_module,
+    meta_doc,
     notify,
     output,
     planfix,
@@ -26,6 +29,7 @@ from src import (
     postprocess,
     preset_pipeline,
     speaker_roles,
+    stt_document,
     webhook,
 )
 from src.auth import AuthError, build_drive_service
@@ -59,6 +63,10 @@ class _ProcessTelemetry:
     usage: dict[str, dict[str, int]] = field(default_factory=dict)
     transcript: str = ""
     artifacts: dict[str, str] = field(default_factory=dict)
+    # The merged meta document `_write_call_documents` built this cycle (None when no
+    # preset stage ran). Task 6 reads this to quote the meta fields into the Planfix
+    # comment instead of re-parsing the `meta` artifact a second time.
+    meta_document: dict[str, object] | None = None
 
 
 def _http_status_code(exc: Exception) -> int | None:
@@ -367,6 +375,137 @@ def _local_artifact_path(config: Config, mp4_name: str, suffix: str) -> Path | N
     return config.output_dir / (drive.safe_local_name(stem) + suffix)
 
 
+def _artifact_text(
+    name: str, artifacts: dict[str, str], config: Config, mp4_name: str
+) -> str:
+    """This cycle's text for a preset, or the artifact an earlier cycle left on disk.
+
+    A cycle that re-ran only the still-missing presets returns just those, so the
+    document would otherwise lose the sections that completed earlier.
+    """
+    text = artifacts.get(name, "")
+    if text.strip():
+        return text
+    preset = next((p for p in config.presets if p.name == name), None)
+    if preset is None:
+        return ""
+    path = _local_artifact_path(config, mp4_name, preset.artifact_suffix)
+    if path is None or not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not read %s for the .stt document: %s", path, type(exc).__name__)
+        return ""
+
+
+def _write_call_documents(
+    service: Any,
+    file_id: str,
+    file_name: str,
+    folder_id: str,
+    transcript: str,
+    artifacts: dict[str, str],
+    config: Config,
+    tmp_dir: Path,
+    *,
+    item: dict,
+    booking_decision: booking_gate.BookingDecision,
+) -> dict[str, object] | None:
+    """Write ``<stem>.meta.yml`` and ``<stem>.stt`` for one recording.
+
+    Returns the meta document so the Planfix comment can quote from it. Both files are
+    written from artifacts that already exist, so this costs no model call. Neither file
+    takes part in the processed/pending bookkeeping: only ``.txt`` and the preset
+    artifacts decide whether a recording still needs work, and a deleted ``.stt`` must
+    never put a recording back into the transcription queue.
+    """
+    stem = drive.drive_stem(file_name)
+    parsed = meta_module.parse_meta(
+        _artifact_text("meta", artifacts, config, file_name),
+        config.tags_allowed,
+        config.referrals_allowed,
+    )
+    task_id = booking_decision.task_id or str(item.get("planfix_comment_task_id") or "")
+    document = meta_doc.build(
+        meta=parsed,
+        file_id=file_id,
+        file_name=file_name,
+        folder_id=folder_id,
+        config=config,
+        transcript=transcript,
+        planfix_task_id=task_id,
+        processed_at=datetime.now(timezone.utc),
+    )
+    meta_yaml = meta_doc.to_yaml(document)
+
+    body = _artifact_text("transcript-cleanup", artifacts, config, file_name) or transcript
+    text = stt_document.assemble(
+        title=stem,
+        sections=[
+            _artifact_text(name, artifacts, config, file_name) for name in config.stt_presets
+        ],
+        meta_yaml=meta_yaml,
+        transcript=body,
+    )
+
+    output.write_artifact(
+        service, base_name=stem, suffix=".meta.yml", text=meta_yaml,
+        folder_id=folder_id, config=config, tmp_dir=tmp_dir,
+        existing_id=item.get("meta_yml_id"),
+    )
+    output.write_artifact(
+        service, base_name=stem, suffix=".stt", text=text, folder_id=folder_id,
+        config=config, tmp_dir=tmp_dir,
+        existing_id=item.get("stt_id"),
+        # No source_video_id: the transcript (`.txt`) is looked up on Drive by that
+        # same appProperty, and `.stt` also uploads as text/plain, so carrying it
+        # here would risk the `.stt` winning that lookup and being fed to the preset
+        # stage -- or overwritten -- as if it were the transcript. `drive.py` also
+        # excludes `.stt`/`.meta.yml` from that lookup by name, belt and suspenders.
+        app_properties={drive.ARTIFACT_TYPE_PROPERTY: "stt"},
+        mime_type=drive.TXT_MIME,
+    )
+    return document
+
+
+def _try_write_call_documents(
+    service: Any,
+    file_id: str,
+    file_name: str,
+    folder_id: str,
+    transcript: str,
+    artifacts: dict[str, str],
+    config: Config,
+    tmp_dir: Path,
+    *,
+    item: dict,
+    booking_decision: booking_gate.BookingDecision,
+) -> dict[str, object] | None:
+    """Call ``_write_call_documents``, degrading to no document on failure.
+
+    The ``.stt``/``.meta.yml`` write happens after the ``.txt`` and every preset
+    artifact are already persisted. Letting a write failure here propagate would
+    re-raise out of ``process_item`` and leave the recording looking fully
+    processed on the next cycle (``has_txt`` true, no missing presets) -- so the
+    webhook and the Planfix comment, which run after this returns, would never
+    fire, and no later cycle would retry them. A document that "takes no part in
+    the bookkeeping" by design must not be able to fail a recording that already
+    transcribed successfully.
+    """
+    try:
+        return _write_call_documents(
+            service, file_id, file_name, folder_id, transcript, artifacts,
+            config, tmp_dir, item=item, booking_decision=booking_decision,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not write the .stt/.meta.yml documents for %s: %s",
+            file_name, type(exc).__name__,
+        )
+        return None
+
+
 def _local_artifact_paths(item: dict) -> dict[str, Path]:
     paths = item.get("local_artifact_paths") or {}
     return {name: Path(path) for name, path in paths.items()}
@@ -551,15 +690,23 @@ def _webhook_payload(
 
     Non-``meta`` presets pass through as raw text keyed by preset name, so adding a
     preset to config.yml extends the payload with no code change. ``meta`` is parsed
-    into ``{topic, tags}`` (tags filtered to the configured allow-list). An unknown
-    employee sends empty strings rather than omitting the key.
+    into ``{subject, tags, referral, referral_note}`` (tags and referral filtered to
+    the configured allow-lists). An unknown employee sends empty strings rather than
+    omitting the key.
     """
     employee = config.folder_by_id(folder_id)
     payload_artifacts: dict[str, object] = dict(artifacts)
     meta_text = artifacts.get("meta")
     if meta_text is not None:
-        parsed = meta_module.parse_meta(meta_text, config.tags_allowed)
-        payload_artifacts["meta"] = {"topic": parsed.topic, "tags": list(parsed.tags)}
+        parsed = meta_module.parse_meta(
+            meta_text, config.tags_allowed, config.referrals_allowed
+        )
+        payload_artifacts["meta"] = {
+            "subject": parsed.subject,
+            "tags": list(parsed.tags),
+            "referral": parsed.referral,
+            "referral_note": parsed.referral_note,
+        }
 
     return {
         "file": {"id": file_id, "name": file_name, "folder_id": folder_id},
@@ -572,24 +719,142 @@ def _webhook_payload(
     }
 
 
-def _planfix_description(
-    artifacts: dict[str, str], preset_names: tuple[str, ...]
-) -> str:
-    """Concatenate the configured preset artifacts into one comment body.
+# Labels for the meta fields the Planfix comment may carry. Fixed in code, not config:
+# a field's label is part of how the comment reads, not a deployment choice.
+_PLANFIX_META_LABELS = {
+    "subject": "",  # rendered as the heading, not as a labelled line
+    "tags": "Теги",
+    "referral": "Откуда узнал",
+    "referral_note": "Подробности",
+    "manager": "Менеджер",
+    "client": "Клиент",
+    "date": "Дата",
+    "duration": "Длительность",
+    "video_url": "Запись",
+}
 
-    Presets are joined in configured order, each under its own heading, and a preset
-    with no artifact is skipped rather than emitting an empty section.
+
+# Markers prepended to the keypoints headings in the Planfix comment, so the three
+# sections are tellable apart while scrolling a CRM feed. They live here and not in the
+# preset prompt on purpose: the `.keypoints.md` artifact and the `.stt` document are
+# read as documents and parsed by other tools, where a symbol in a heading is noise.
+# A heading this map does not name is left exactly as the preset wrote it.
+_PLANFIX_SECTION_MARKERS = {
+    "Задачи": "☑️",
+    "Тезисы": "📝",
+    "Открытые вопросы": "❓",
+}
+
+_MARKDOWN_HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})[ \t]+(?P<title>.+?)[ \t]*$", re.MULTILINE)
+
+
+def _mark_planfix_sections(text: str) -> str:
+    """Mark the known keypoints headings and give each one air, for the CRM comment only.
+
+    A marked heading is surrounded by blank lines: run together, the three sections read
+    as one wall of text in a Planfix feed. Sub-headings the preset emits per assignee
+    (``### Mels``) are names, not section titles, so they miss the map and pass through
+    untouched, tight against the section they belong to.
+    """
+    gap = planfix_html.SECTION_BREAK
+
+    def _mark(match: re.Match[str]) -> str:
+        marker = _PLANFIX_SECTION_MARKERS.get(match.group("title"))
+        if marker is None:
+            return match.group(0)
+        heading = f"{match.group('hashes')} {marker} {match.group('title')}"
+        return f"{gap}\n\n{heading}\n\n{gap}"
+
+    return _MARKDOWN_HEADING_RE.sub(_mark, text)
+
+
+def _planfix_meta_lines(
+    document: dict[str, object] | None, fields: tuple[str, ...]
+) -> list[str]:
+    """Render the selected meta fields as Markdown lines for the comment header.
+
+    A field that is empty or unknown is skipped silently, so shortening the configured
+    list or a call with no referral never leaves a dangling label. ``subject`` has an
+    empty label in ``_PLANFIX_META_LABELS`` but is deliberately not skipped for it --
+    it is rendered as the bold heading instead of a labelled line. Regardless of where
+    ``subject`` falls in ``fields``, it is always hoisted to the top of the returned
+    lines rather than following the configured order.
+    """
+    if not document:
+        return []
+    lines: list[str] = []
+    for field_name in fields:
+        if field_name not in _PLANFIX_META_LABELS:
+            continue
+        value = document.get(field_name)
+        if isinstance(value, list):
+            value = ", ".join(str(entry) for entry in value)
+        # Collapse embedded newlines (free LLM text like referral_note can carry them):
+        # markdown_to_html splits on "\n", so an unnormalised value would fracture the
+        # header into extra, label-less paragraphs -- or a stray bullet/heading if the
+        # continuation happened to start with "- " or "#".
+        text = " ".join(str(value or "").split())
+        if not text:
+            continue
+        if field_name == "subject":
+            lines.insert(0, f"**{text}**")
+        elif field_name == "video_url":
+            # source_name is excluded from the default field list *because* it becomes
+            # this anchor's text instead of a line of its own; fall back to the fixed
+            # label when the document carries no source_name (or an empty one).
+            anchor = str(document.get("source_name") or "").strip()
+            anchor = " ".join(anchor.split()) or _PLANFIX_META_LABELS[field_name]
+            lines.append(f"[{anchor}]({text})")
+        else:
+            lines.append(f"**{_PLANFIX_META_LABELS[field_name]}:** {text}")
+    return lines
+
+
+def _planfix_description(
+    artifacts: dict[str, str],
+    preset_names: tuple[str, ...],
+    meta_document: dict[str, object] | None = None,
+    meta_fields: tuple[str, ...] = (),
+) -> str:
+    """Concatenate the meta header and the configured preset artifacts into one body.
+
+    The header (subject, tags, referral, ...) is rendered first from ``meta_document``
+    and ``meta_fields``, so a manager reading the comment sees what the call was about
+    before scrolling into the preset sections. Presets are joined in configured order
+    and a preset with no artifact is skipped rather than emitting an empty section.
+    The preset's own name is not printed: "keypoints" is how the pipeline spells a
+    stage, not something a manager reading a CRM comment needs to see, and it landed
+    as a stray English word between the Russian header and the Russian content. The
+    header renders only alongside at least one preset section -- a header with no
+    sections returns an empty string, which callers rely on to mean "nothing to
+    comment".
 
     The result is HTML, not the Markdown the presets emit: Planfix stores comments as
     HTML and renders ``##`` and ``-`` as literal characters. Conversion happens once,
-    on the assembled document, so headings and lists nest the same way they read.
+    on the assembled document, so headings and lists nest the same way they read (and
+    the body stays a single line, since Planfix rewrites every newline as ``<br>``).
     """
     sections = [
-        f"## {name}\n{artifacts[name].strip()}"
+        _mark_planfix_sections(artifacts[name].strip())
         for name in preset_names
         if artifacts.get(name, "").strip()
     ]
-    return planfix_html.markdown_to_html("\n\n".join(sections))
+    # The header alone is never enough: a document carrying only a duration and a
+    # link but no preset section is not something worth commenting, and
+    # `_send_planfix_comment`'s `if not description` guard relies on an empty
+    # return here to skip both the POST and the `planfix_comment_task_id` marker.
+    if not sections:
+        return ""
+
+    header = "\n".join(_planfix_meta_lines(meta_document, meta_fields))
+    blocks: list[str] = [header] if header else []
+    for section in sections:
+        if blocks:
+            # Where the preset's name used to sit. Doubling with the gap a marked
+            # heading brings is harmless -- the converter collapses them.
+            blocks.append(planfix_html.SECTION_BREAK)
+        blocks.append(section)
+    return planfix_html.markdown_to_html("\n\n".join(blocks))
 
 
 def _send_planfix_comment(
@@ -599,6 +864,7 @@ def _send_planfix_comment(
     config: Config,
     artifacts: dict[str, str],
     booking_decision: booking_gate.BookingDecision,
+    meta_document: dict[str, object] | None = None,
 ) -> None:
     """Post the meeting summary into the matched Planfix task, exactly once.
 
@@ -606,6 +872,11 @@ def _send_planfix_comment(
     later cycle that backfills a newly configured preset re-feeds the transcript — so
     the `planfix_comment_task_id` marker, written only after a successful POST, is what
     keeps a second pass from posting a duplicate comment into the task.
+
+    ``meta_document`` (the merged document Task 4's ``_write_call_documents`` built
+    this cycle) opens the comment with a header drawn from ``config.planfix_meta_fields``
+    before the preset sections; it defaults to ``None`` so a caller with no document
+    still gets the plain preset-only comment.
     """
     if not booking_decision.is_matched:
         return
@@ -615,7 +886,9 @@ def _send_planfix_comment(
         logger.debug("Planfix comment already sent for %s, skipping", file_id)
         return
 
-    description = _planfix_description(artifacts, config.planfix_presets)
+    description = _planfix_description(
+        artifacts, config.planfix_presets, meta_document, config.planfix_meta_fields
+    )
     if not description:
         logger.warning(
             "No configured Planfix preset produced text for %s; nothing to comment",
@@ -710,6 +983,7 @@ def process_item(
     transcript = ""
     artifacts: dict[str, str] = {}
     unproduced: set[str] = set()
+    meta_document: dict[str, object] | None = None
 
     try:
         with tempfile.TemporaryDirectory(prefix="gd-stt-") as tmp:
@@ -794,6 +1068,10 @@ def process_item(
                     local_artifact_paths=_local_artifact_paths(item),
                     only_presets=reprocess_presets,
                 )
+                meta_document = _try_write_call_documents(
+                    service, file_id, file_name, folder_id, text, artifacts,
+                    config, tmp_dir, item=item, booking_decision=booking_decision,
+                )
             elif needs_presets:
                 # The transcript already exists on Drive; re-feed it to produce the
                 # still-missing presets (a failed earlier preset or a newly added
@@ -823,6 +1101,10 @@ def process_item(
                     unproduced=unproduced,
                     local_artifact_paths=_local_artifact_paths(item),
                     only_presets=reprocess_presets,
+                )
+                meta_document = _try_write_call_documents(
+                    service, file_id, file_name, folder_id, text, artifacts,
+                    config, tmp_dir, item=item, booking_decision=booking_decision,
                 )
     except Exception as exc:
         error = exc
@@ -877,7 +1159,8 @@ def process_item(
 
         try:
             _send_planfix_comment(
-                service, item, file_id, config, artifacts, booking_decision
+                service, item, file_id, config, artifacts, booking_decision,
+                meta_document=meta_document,
             )
         except Exception as exc:
             # A file that transcribed and uploaded must count as processed even if the
@@ -895,6 +1178,7 @@ def process_item(
         usage=usage,
         transcript=transcript,
         artifacts=artifacts,
+        meta_document=meta_document,
     )
 
 

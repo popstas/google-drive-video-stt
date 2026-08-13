@@ -143,7 +143,12 @@ and each non-empty output is written as `<base><artifact_suffix>` tagged
 `artifact_type=<preset-name>`. Built-in presets ship in `BUILTIN_PRESETS`:
 `keypoints` (producing `## Задачи` / `## Тезисы` / `## Открытые вопросы`, plain
 text) and `meta` (a `.meta.md` YAML-frontmatter artifact with a one-sentence
-`topic:` and `tags:` drawn from `tags.allowed`, parsed back by `src/meta.py`).
+`subject:`, `tags:` drawn from `tags.allowed`, and `referral:`/`referral_note:`
+drawn from `referrals.allowed`, parsed back by `src/meta.py`). The generated
+default chain is `transcript-cleanup -> keypoints + meta`; the third packaged
+preset, `action-items`, ships disabled (its output duplicates `keypoints`' `##
+Задачи` section) but its prompt asset stays packaged, so re-enabling it is a
+`presets:` edit, not a code change.
 Built-ins carry `depends_on=()` — a hardcoded dependency on a *config* preset like
 `transcript-cleanup` would make `validate_dag` reject every config that omits it;
 the default chain is wired in `_default_config_dict` instead. `meta` additionally
@@ -171,7 +176,8 @@ every artifact is written — normally once per file, and again if a later cycle
 re-feeds its transcript to produce a newly added preset (`file.id` is the
 receiver's dedupe key). The employee comes from
 `config.folder_by_id(folder_id)`; `artifacts` carries each preset's raw text keyed
-by name, except `meta`, which `meta.parse_meta` turns into `{topic, tags}`.
+by name, except `meta`, which `meta.parse_meta` turns into
+`{subject, tags, referral, referral_note}`.
 `notify_complete` mirrors `notify.notify_error`'s contract and never raises: a
 blank url is a `logger.debug` no-op, and any failure logs only the exception *type*
 so the token cannot leak. The whole block is additionally wrapped in `try/except` —
@@ -253,22 +259,27 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   `Config.folder_ids` compatibility shim (it would revive the exact name the
   migration error bans). `Config.folder_by_id()` resolves an entry back to its
   `EmployeeFolder`.
-- `tags.allowed` is the only vocabulary the `meta` preset may tag with. It reaches
-  prompts through the `{{allowed_tags}}` placeholder rendered at load time by
-  `_resolve_prompt_text` (inline, file, and packaged prompts alike), and is enforced
-  again in `meta.parse_meta`, which drops tags outside the list. `parse_meta`
-  degrades to `Meta(topic="", tags=())` on a missing/malformed block — a bad LLM
-  reply must not fail the file.
+- `tags.allowed` is the only vocabulary the `meta` preset may tag with, and
+  `referrals.allowed` the only channels it may pick `referral` from. Both reach
+  prompts through the `{{allowed_tags}}`/`{{allowed_referrals}}` placeholders
+  rendered at load time by `_resolve_prompt_text` (inline, file, and packaged
+  prompts alike), and are enforced again in `meta.parse_meta`, which drops tags and
+  a referral outside their allow-lists (and drops `referral_note` whenever
+  `referral` was dropped). `parse_meta` degrades to an all-empty `Meta()` on a
+  missing/malformed block — a bad LLM reply must not fail the file.
 - The completion webhook (`webhook.url`, optional `webhook.token`) is
   fire-and-forget: it fires on the success path only (once per transcription, plus
   once per later preset-backfill cycle), and any failure is logged without failing
   the file. Its payload carries PII (employee email, full
   transcript), so failure logs must never include the body or the token.
 - `output.target` selects where artifacts land: `drive` (siblings) or `folder`
-  (`output.dir`, required when `folder`). `output.also_drive` adds a Drive copy
-  on top of `folder` mode; never flip a live `folder` deployment to `target:
-  drive` instead, because the local artifacts are what mark a recording
-  processed and the whole backlog would be re-transcribed.
+  (`output.dir`, required when `folder`). `output.also_drive` publishes only the
+  combined `<stem>.stt` (keypoints + meta + transcript, sections chosen by
+  `output.stt_presets`) as a Drive sibling on top of `folder` mode — never a copy
+  of every artifact. Every artifact still lands in `output.dir` regardless; never
+  flip a live `folder` deployment to `target: drive` instead, because the local
+  artifacts are what mark a recording processed and the whole backlog would be
+  re-transcribed.
 - Idempotency relies on `appProperties.source_video_id`, the per-artifact
   `appProperties.artifact_type` (so each preset's sibling is detected
   independently via `list_folder_state`'s `artifact_ids`), and sibling stem

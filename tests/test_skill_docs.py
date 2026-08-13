@@ -194,7 +194,7 @@ def test_skill_documents_config_yml_and_preset_dag():
     # Preset DAG vocabulary the operator needs to author/inspect presets.
     assert "depends_on" in text
     assert "artifact_type" in text
-    assert "transcript-cleanup -> keypoints + action-items + meta" in text
+    assert "transcript-cleanup -> keypoints + meta" in text
     assert "transcript -> keypoints" not in text
 
 

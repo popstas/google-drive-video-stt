@@ -45,6 +45,9 @@ DEEPGRAM_MAX_KEYTERMS = 100
 # Placeholder a preset prompt may carry to receive the config's ``tags.allowed``
 # list at load time. The built-in ``meta`` prompt uses it; any prompt may.
 ALLOWED_TAGS_PLACEHOLDER = "{{allowed_tags}}"
+# Placeholder a preset prompt may carry to receive the config's ``referrals.allowed``
+# list at load time. The built-in ``meta`` prompt uses it; any prompt may.
+ALLOWED_REFERRALS_PLACEHOLDER = "{{allowed_referrals}}"
 
 
 FOLDER_IDS_MIGRATION_ERROR = (
@@ -92,6 +95,10 @@ class Config:
     # recording look unprocessed (the has_txt flag would stop coming from local files),
     # and the whole backlog would be re-transcribed at real cost.
     output_also_drive: bool = False
+    # Which preset artifacts open the ``.stt`` document, in this order. Presets with no
+    # artifact are skipped at assembly time rather than rejected here: a preset can be
+    # disabled without invalidating the config.
+    stt_presets: tuple[str, ...] = ("keypoints",)
     openai_keypoints: bool = False
     openai_model: str = "gpt-5.4-mini"
     openai_batch: bool = False
@@ -112,6 +119,9 @@ class Config:
     # The tag allow-list the ``meta`` preset may pick from. Empty means the preset
     # has nothing to choose between and returns no tags.
     tags_allowed: tuple[str, ...] = ()
+    # The referral channels the ``meta`` preset may pick from. Empty means the preset
+    # is handed no channels and must return an empty referral.
+    referrals_allowed: tuple[str, ...] = ()
     # Completion-webhook target. A blank URL disables the webhook; the token, when
     # set, is sent as ``Authorization: Bearer <token>``. See ``webhook`` in the
     # generated config.yml.
@@ -132,6 +142,17 @@ class Config:
     planfix_create_comment_url: str = ""
     planfix_token: str = ""
     planfix_presets: tuple[str, ...] = ("keypoints",)
+    # Which meta-document fields open the Planfix comment, in this order. The models and
+    # internal ids are deliberately absent: the comment is read by managers, not
+    # operators.
+    planfix_meta_fields: tuple[str, ...] = (
+        "subject", "tags", "referral", "referral_note", "duration", "video_url",
+    )
+    # Where a task lives in the web UI, e.g.
+    # ``https://tagilcity.planfix.com/task/<task-id>``. The account name is part of the
+    # host, so this cannot be derived from the comment webhook URL. Blank leaves
+    # ``planfix_task_url`` empty in the meta document rather than guessing a host.
+    planfix_task_url: str = ""
     presets: tuple[Preset, ...] = ()
     # Google OAuth is config-owned and inline-first. ``google_credentials``/
     # ``google_token`` hold inline mappings (the OAuth client JSON and the saved
@@ -282,22 +303,47 @@ def _render_allowed_tags(tags_allowed: tuple[str, ...]) -> str:
     return "\n".join(f"- {tag}" for tag in tags_allowed)
 
 
-def _render_prompt_placeholders(text: str, tags_allowed: tuple[str, ...]) -> str:
+def _parse_referrals_allowed(raw: object) -> tuple[str, ...]:
+    """Parse the ``referrals.allowed`` list into a tuple of non-empty channel names."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"referrals.allowed must be a list of channels, got: {raw!r}")
+    return tuple(name for name in (_yaml_str(entry) for entry in raw) if name)
+
+
+def _render_allowed_referrals(referrals_allowed: tuple[str, ...]) -> str:
+    """Render ``referrals.allowed`` as the bullet list that replaces the placeholder."""
+    if not referrals_allowed:
+        return "(none configured — return an empty referral)"
+    return "\n".join(f"- {name}" for name in referrals_allowed)
+
+
+def _render_prompt_placeholders(
+    text: str,
+    tags_allowed: tuple[str, ...],
+    referrals_allowed: tuple[str, ...] = (),
+) -> str:
     """Substitute the supported ``{{...}}`` placeholders in a resolved prompt.
 
-    Today that is only ``{{allowed_tags}}`` (the ``meta`` preset's tag allow-list).
-    A prompt without the placeholder is returned unchanged, so this is safe to run
-    over every preset's text.
+    Today those are ``{{allowed_tags}}`` and ``{{allowed_referrals}}`` (both the
+    ``meta`` preset's). A prompt without them is returned unchanged, so this is safe to
+    run over every preset's text.
     """
-    if ALLOWED_TAGS_PLACEHOLDER not in text:
-        return text
-    return text.replace(ALLOWED_TAGS_PLACEHOLDER, _render_allowed_tags(tags_allowed))
+    if ALLOWED_TAGS_PLACEHOLDER in text:
+        text = text.replace(ALLOWED_TAGS_PLACEHOLDER, _render_allowed_tags(tags_allowed))
+    if ALLOWED_REFERRALS_PLACEHOLDER in text:
+        text = text.replace(
+            ALLOWED_REFERRALS_PLACEHOLDER, _render_allowed_referrals(referrals_allowed)
+        )
+    return text
 
 
 def _resolve_prompt_text(
     preset: Preset,
     config_file: Path | None,
     tags_allowed: tuple[str, ...] = (),
+    referrals_allowed: tuple[str, ...] = (),
 ) -> str:
     """Resolve a preset's final prompt text from instructions or prompt_file.
 
@@ -308,11 +354,14 @@ def _resolve_prompt_text(
     that resolves but is missing/unreadable/empty raises ``ValueError``; a preset
     with neither instructions nor prompt_file also raises.
 
-    The resolved text has its ``{{...}}`` placeholders rendered from ``tags_allowed``
-    before it is returned, so the pipeline never sees an unrendered prompt.
+    The resolved text has its ``{{...}}`` placeholders rendered from ``tags_allowed``/
+    ``referrals_allowed`` before it is returned, so the pipeline never sees an
+    unrendered prompt.
     """
     if preset.instructions.strip():
-        return _render_prompt_placeholders(preset.instructions, tags_allowed)
+        return _render_prompt_placeholders(
+            preset.instructions, tags_allowed, referrals_allowed
+        )
     if not preset.prompt_file:
         raise ValueError(
             f"preset {preset.name!r} must define instructions or prompt_file"
@@ -329,7 +378,7 @@ def _resolve_prompt_text(
                     f"preset {preset.name!r} prompt_file {preset.prompt_file!r} "
                     f"is empty: {candidate}"
                 )
-            return _render_prompt_placeholders(text, tags_allowed)
+            return _render_prompt_placeholders(text, tags_allowed, referrals_allowed)
 
     try:
         text = load_packaged_prompt(os.path.basename(preset.prompt_file))
@@ -338,20 +387,23 @@ def _resolve_prompt_text(
             f"preset {preset.name!r} prompt_file {preset.prompt_file!r} "
             f"could not be resolved: {exc}"
         ) from exc
-    return _render_prompt_placeholders(text, tags_allowed)
+    return _render_prompt_placeholders(text, tags_allowed, referrals_allowed)
 
 
 def _resolve_presets(
     config_presets: dict | None,
     config_file: Path | None = None,
     tags_allowed: tuple[str, ...] = (),
+    referrals_allowed: tuple[str, ...] = (),
 ) -> tuple[Preset, ...]:
     """Merge config presets over built-ins, resolve prompts, validate, and freeze."""
     merged = merge_presets(BUILTIN_PRESETS, config_presets)
     resolved = {
         name: replace(
             preset,
-            instructions=_resolve_prompt_text(preset, config_file, tags_allowed),
+            instructions=_resolve_prompt_text(
+                preset, config_file, tags_allowed, referrals_allowed
+            ),
         )
         for name, preset in merged.items()
     }
@@ -611,6 +663,43 @@ def _parse_planfix_presets(value: object) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _parse_planfix_meta_fields(value: object) -> tuple[str, ...]:
+    """Read ``planfix.meta_fields``, defaulting to the built-in field selection.
+
+    Unlike ``_parse_planfix_presets``, an explicit empty list is honored as "no
+    header" rather than falling back to the default: only an absent key (``None``)
+    means the operator hasn't set an opinion.
+    """
+    if value is None:
+        return (
+            "subject", "tags", "referral", "referral_note", "duration", "video_url",
+        )
+    if not isinstance(value, list):
+        raise ValueError(f"planfix.meta_fields must be a list, got: {value!r}")
+    names = []
+    for entry in value:
+        name = _yaml_str(entry)
+        if not name:
+            raise ValueError(f"planfix.meta_fields entries must be names, got: {entry!r}")
+        names.append(name)
+    return tuple(names)
+
+
+def _parse_stt_presets(value: object) -> tuple[str, ...]:
+    """Read ``output.stt_presets``, defaulting to the single ``keypoints`` preset."""
+    if value is None:
+        return ("keypoints",)
+    if not isinstance(value, list):
+        raise ValueError(f"output.stt_presets must be a list, got: {value!r}")
+    names = []
+    for entry in value:
+        name = _yaml_str(entry)
+        if not name:
+            raise ValueError(f"output.stt_presets entries must be names, got: {entry!r}")
+        names.append(name)
+    return tuple(names)
+
+
 def _validate_webhook_url(url: str) -> None:
     """Reject a webhook URL that could never be delivered.
 
@@ -671,6 +760,7 @@ def _config_from_yaml(
     notifications = _as_mapping(raw.get("notifications"), "notifications")
     telegram = _as_mapping(notifications.get("telegram"), "notifications.telegram")
     tags = _as_mapping(raw.get("tags"), "tags")
+    referrals = _as_mapping(raw.get("referrals"), "referrals")
     webhook = _as_mapping(raw.get("webhook"), "webhook")
     call_booking = _as_mapping(raw.get("call_booking"), "call_booking")
     planfix = _as_mapping(raw.get("planfix"), "planfix")
@@ -682,6 +772,7 @@ def _config_from_yaml(
     telegram_chat_id = _yaml_str(telegram.get("chat_id"))
 
     tags_allowed = _parse_tags_allowed(tags.get("allowed"))
+    referrals_allowed = _parse_referrals_allowed(referrals.get("allowed"))
 
     webhook_url = _yaml_str(webhook.get("url"))
     webhook_token = _yaml_str(webhook.get("token"))
@@ -708,6 +799,8 @@ def _config_from_yaml(
     planfix_create_comment_url = _yaml_str(planfix.get("create_comment_url"))
     planfix_token = _yaml_str(planfix.get("token"))
     planfix_presets = _parse_planfix_presets(planfix.get("presets"))
+    planfix_meta_fields = _parse_planfix_meta_fields(planfix.get("meta_fields"))
+    planfix_task_url = _yaml_str(planfix.get("task_url"))
 
     (
         google_credentials,
@@ -761,7 +854,7 @@ def _config_from_yaml(
     openai_batch = _yaml_bool(openai.get("batch"), default=False)
     openai_batch_wait = _yaml_bool(openai.get("batch_wait"), default=True)
     openai_max_parallel = _parse_max_parallel(openai.get("max_parallel"), default=4)
-    presets = _resolve_presets(config_presets, config_file, tags_allowed)
+    presets = _resolve_presets(config_presets, config_file, tags_allowed, referrals_allowed)
 
     deepgram_api_key = ""
     deepgram_model = _yaml_str(deepgram.get("model"), "nova-3") or "nova-3"
@@ -813,6 +906,7 @@ def _config_from_yaml(
             "output.also_drive only applies when output.target=folder; "
             "target=drive already writes to Drive"
         )
+    stt_presets = _parse_stt_presets(output.get("stt_presets"))
 
     if validate_providers:
         if presets and not openai_api_key:
@@ -867,6 +961,7 @@ def _config_from_yaml(
         output_target=output_target,
         output_dir=output_dir,
         output_also_drive=output_also_drive,
+        stt_presets=stt_presets,
         openai_keypoints=openai_keypoints,
         openai_model=openai_model,
         openai_batch=openai_batch,
@@ -882,6 +977,7 @@ def _config_from_yaml(
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
         tags_allowed=tags_allowed,
+        referrals_allowed=referrals_allowed,
         webhook_url=webhook_url,
         webhook_token=webhook_token,
         call_booking_enabled=call_booking_enabled,
@@ -893,6 +989,8 @@ def _config_from_yaml(
         planfix_create_comment_url=planfix_create_comment_url,
         planfix_token=planfix_token,
         planfix_presets=planfix_presets,
+        planfix_meta_fields=planfix_meta_fields,
+        planfix_task_url=planfix_task_url,
         presets=presets,
         google_credentials=google_credentials,
         google_token=google_token,
@@ -993,12 +1091,16 @@ def _default_config_dict(
     """Build a full default ``config.yml`` mapping for ``config init``/``link``.
 
     The default preset chain is
-    ``transcript-cleanup -> keypoints + action-items + meta`` with all four presets
+    ``transcript-cleanup -> keypoints + meta`` with all three presets
     enabled; every prompt_file uses ``/``-style relative
     paths so the generated YAML is portable. ``prompt_dir`` (when given) is a
     ``/``-joined path the prompts were copied to and that the prompt_file entries
     point at; otherwise the default ``prompts/<name>.md`` layout is used.
-    ``data_dir``/``output_*`` override the matching fields.
+    ``data_dir``/``output_*`` override the matching fields. ``action-items`` is
+    retired: its output duplicates ``keypoints``' ``## Задачи`` section, so it is
+    left out of the generated chain. Its prompt asset stays packaged; re-enabling
+    it is a config edit (add an ``action-items`` entry under ``presets``), not a
+    code change.
     """
     def prompt_path(name: str) -> str:
         if prompt_dir:
@@ -1006,8 +1108,8 @@ def _default_config_dict(
         return _default_prompt_file(name)
 
     # Default chain (all enabled out of the box): transcript-cleanup runs first and
-    # keypoints, action-items, and meta all depend on it. Order matters in the
-    # generated YAML, so transcript-cleanup is written above its dependents.
+    # keypoints and meta both depend on it. Order matters in the generated YAML, so
+    # transcript-cleanup is written above its dependents.
     presets: dict[str, dict] = {
         "transcript-cleanup": {
             "enabled": True,
@@ -1017,11 +1119,6 @@ def _default_config_dict(
             "enabled": True,
             "depends_on": ["transcript-cleanup"],
             "prompt_file": prompt_path("keypoints"),
-        },
-        "action-items": {
-            "enabled": True,
-            "depends_on": ["transcript-cleanup"],
-            "prompt_file": prompt_path("action-items"),
         },
         "meta": {
             "enabled": True,
@@ -1039,6 +1136,7 @@ def _default_config_dict(
         "output": {
             "target": (output_target or "drive"),
             "dir": output_dir,
+            "stt_presets": ["keypoints"],
         },
         "stt": {
             "provider": "deepgram",
@@ -1069,6 +1167,21 @@ def _default_config_dict(
         },
         # Seeded empty: the `meta` preset picks tags only from this list.
         "tags": {"allowed": []},
+        # Seeded from how clients actually answer in existing transcripts (see the
+        # design spec); the `meta` preset picks `referral` only from this list.
+        "referrals": {
+            "allowed": [
+                "рекомендация",
+                "instagram",
+                "telegram",
+                "youtube",
+                "linkedin",
+                "поиск-google",
+                "реклама",
+                "сми-публикация",
+                "вебинар-мероприятие",
+            ]
+        },
         # Seeded empty: a blank url disables the completion webhook.
         "webhook": {"url": "", "token": ""},
         # Seeded disabled: enabling this opens a listening port, so it must be an
@@ -1086,6 +1199,11 @@ def _default_config_dict(
             "create_comment_url": "",
             "token": "",
             "presets": ["keypoints"],
+            "meta_fields": [
+                "subject", "tags", "referral", "referral_note", "duration", "video_url",
+            ],
+            # e.g. https://<account>.planfix.com/task/<task-id>
+            "task_url": "",
         },
         # Google auth is inline-first and config-owned. The generated config ships an
         # empty block (no *_file pointers) so the data_dir fallback applies until the
@@ -1186,6 +1304,7 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
         "output": {
             "target": config.output_target,
             "dir": _relpath_for_config(config.output_dir, config_file),
+            "stt_presets": list(config.stt_presets),
         },
         "stt": {
             "provider": config.stt_provider,
@@ -1228,7 +1347,18 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
         # The tag allow-list is operator-owned data with no other home: omitting it
         # here would drop it from the file on any whole-Config rewrite.
         "tags": {"allowed": list(config.tags_allowed)},
+        "referrals": {"allowed": list(config.referrals_allowed)},
         "webhook": {"url": config.webhook_url, "token": config.webhook_token},
+        # planfix.presets/create_comment_url/token were previously absent from this
+        # serializer too (a whole-Config rewrite silently dropped them); meta_fields is
+        # added alongside them here rather than as an isolated partial block.
+        "planfix": {
+            "create_comment_url": config.planfix_create_comment_url,
+            "token": config.planfix_token,
+            "presets": list(config.planfix_presets),
+            "meta_fields": list(config.planfix_meta_fields),
+            "task_url": config.planfix_task_url,
+        },
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
         # the prompt text stays owned by the .md assets; disabled built-ins (e.g.
@@ -1329,7 +1459,7 @@ def init_config(
     the runtime reads: an explicit ``config_path`` wins; otherwise the active
     config is ``<GDSTT_HOME>/config.yml`` when ``GDSTT_HOME`` is set, falling back
     to ``./data/config.yml`` when it is unset. The default preset chain is
-    ``transcript-cleanup -> keypoints + action-items + meta`` with all four presets
+    ``transcript-cleanup -> keypoints + meta`` with all three presets
     enabled. Prompt assets are always copied beside the config: into
     ``prompt_dir`` when given (and the ``prompt_file`` entries point there), else
     into ``<config_dir>/prompts/``.

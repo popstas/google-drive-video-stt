@@ -456,6 +456,25 @@ def test_default_config_dict_seeds_empty_webhook_block():
     assert _default_config_dict()["webhook"] == {"url": "", "token": ""}
 
 
+def test_default_chain_keeps_meta_and_drops_action_items():
+    presets = _default_config_dict()["presets"]
+    assert presets["meta"]["enabled"] is True
+    assert presets["meta"]["depends_on"] == ["transcript-cleanup"]
+    assert "action-items" not in presets
+
+
+def test_default_config_seeds_the_referral_allow_list():
+    assert "рекомендация" in _default_config_dict()["referrals"]["allowed"]
+
+
+def test_default_config_writes_the_new_output_and_planfix_keys():
+    data = _default_config_dict()
+    assert data["output"]["stt_presets"] == ["keypoints"]
+    assert data["planfix"]["meta_fields"] == [
+        "subject", "tags", "referral", "referral_note", "duration", "video_url",
+    ]
+
+
 # --- {{allowed_tags}} prompt rendering ---------------------------------------
 
 
@@ -1545,20 +1564,19 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     assert data["presets"]["keypoints"]["prompt_file"] == "prompts/keypoints.md"
     # The full default chain is enabled out of the box, with transcript-cleanup
     # written above keypoints and every downstream preset depending on it.
+    # `action-items` is retired from the generated chain (its output duplicates
+    # `keypoints`' `## Задачи` section); its prompt asset still ships (see below).
     assert list(data["presets"]) == [
         "transcript-cleanup",
         "keypoints",
-        "action-items",
         "meta",
     ]
     assert [name for name, p in data["presets"].items() if p["enabled"]] == [
         "transcript-cleanup",
         "keypoints",
-        "action-items",
         "meta",
     ]
     assert data["presets"]["keypoints"]["depends_on"] == ["transcript-cleanup"]
-    assert data["presets"]["action-items"]["depends_on"] == ["transcript-cleanup"]
     assert data["presets"]["meta"]["depends_on"] == ["transcript-cleanup"]
     assert data["presets"]["meta"]["prompt_file"] == "prompts/meta.md"
     # Batch and the run flag are on by default in a generated config.
@@ -1566,7 +1584,9 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     assert data["run"]["enabled"] is True
     # An empty tag allow-list is seeded so the operator has the block to fill in.
     assert data["tags"] == {"allowed": []}
-    # The packaged prompt assets are copied beside the config.
+    # The packaged prompt assets are copied beside the config, including
+    # action-items.md: the preset is retired, not deleted, so re-enabling it is a
+    # config edit, not a code change.
     assert (tmp_path / "prompts" / "keypoints.md").is_file()
     assert (tmp_path / "prompts" / "transcript-cleanup.md").is_file()
     assert (tmp_path / "prompts" / "action-items.md").is_file()
@@ -1578,7 +1598,6 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     assert {p.name for p in cfg.presets} == {
         "transcript-cleanup",
         "keypoints",
-        "action-items",
         "meta",
     }
 
@@ -2357,6 +2376,21 @@ def test_call_booking_and_planfix_are_parsed(tmp_path):
     assert config.planfix_presets == ("keypoints", "action-items")
 
 
+def test_planfix_meta_fields_has_a_default(tmp_path):
+    assert _load_config(tmp_path, {}).planfix_meta_fields == (
+        "subject", "tags", "referral", "referral_note", "duration", "video_url",
+    )
+
+
+def test_planfix_meta_fields_is_read_from_config(tmp_path):
+    config = _load_config(tmp_path, {"planfix": {"meta_fields": ["subject"]}})
+    assert config.planfix_meta_fields == ("subject",)
+
+
+def test_planfix_meta_fields_can_be_emptied(tmp_path):
+    assert _load_config(tmp_path, {"planfix": {"meta_fields": []}}).planfix_meta_fields == ()
+
+
 def test_enabled_receiver_without_token_is_rejected(tmp_path):
     raw = {**CALL_BOOKING_BASE, "call_booking": {"enabled": True}}
 
@@ -2417,6 +2451,10 @@ def test_generated_config_ships_the_new_sections(tmp_path):
         "create_comment_url": "",
         "token": "",
         "presets": ["keypoints"],
+        "meta_fields": [
+            "subject", "tags", "referral", "referral_note", "duration", "video_url",
+        ],
+        "task_url": "",
     }
 
 
@@ -2438,3 +2476,60 @@ def test_output_also_drive_is_rejected_with_target_drive(tmp_path):
     """target=drive already writes to Drive; the combination would only confuse."""
     with pytest.raises(ValueError, match="only applies when output.target=folder"):
         _load_config(tmp_path, {"output": {"target": "drive", "also_drive": True}})
+
+
+def test_stt_presets_defaults_to_keypoints(tmp_path):
+    assert _load_config(tmp_path, {}).stt_presets == ("keypoints",)
+
+
+def test_stt_presets_is_read_from_output(tmp_path):
+    config = _load_config(tmp_path, {"output": {"stt_presets": ["keypoints", "action-items"]}})
+    assert config.stt_presets == ("keypoints", "action-items")
+
+
+def test_stt_presets_must_be_a_list(tmp_path):
+    with pytest.raises(ValueError, match="output.stt_presets"):
+        _load_config(tmp_path, {"output": {"stt_presets": "keypoints"}})
+
+
+# --- referrals.allowed --------------------------------------------------------
+
+
+def test_referrals_allowed_is_parsed(tmp_path):
+    config = _load_config(tmp_path, {"referrals": {"allowed": ["рекомендация", "instagram"]}})
+    assert config.referrals_allowed == ("рекомендация", "instagram")
+
+
+def test_referrals_allowed_renders_into_the_meta_prompt(tmp_path):
+    config = _load_config(
+        tmp_path,
+        {
+            "openai": {"api_key": "k"},
+            "referrals": {"allowed": ["instagram"]},
+            "presets": {"meta": {"enabled": True}},
+        },
+    )
+    meta_preset = next(p for p in config.presets if p.name == "meta")
+    assert "{{allowed_referrals}}" not in meta_preset.instructions
+    assert "- instagram" in meta_preset.instructions
+
+
+def test_referrals_allowed_must_be_a_list(tmp_path):
+    with pytest.raises(ValueError, match="referrals.allowed"):
+        _load_config(tmp_path, {"referrals": {"allowed": "instagram"}})
+
+
+def test_planfix_task_url_is_read_from_config(tmp_path):
+    config = _load_config(
+        tmp_path, {"planfix": {"task_url": "https://tagilcity.planfix.com/task/<task-id>"}}
+    )
+    assert config.planfix_task_url == "https://tagilcity.planfix.com/task/<task-id>"
+
+
+def test_planfix_task_url_defaults_to_empty(tmp_path):
+    assert _load_config(tmp_path, {}).planfix_task_url == ""
+
+
+def test_default_config_writes_the_planfix_task_url_key():
+    """The key must be visible in a generated config, or nobody knows it exists."""
+    assert _default_config_dict()["planfix"]["task_url"] == ""

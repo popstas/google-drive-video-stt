@@ -9,6 +9,11 @@ from src.config import Config
 
 logger = logging.getLogger(__name__)
 
+# The only artifact published to Drive from folder mode: one file per call carrying
+# keypoints, meta, and the transcript. Publishing each artifact separately put four
+# files next to every recording and made the folder unreadable.
+DRIVE_PUBLISHED_SUFFIX = ".stt"
+
 
 def write_artifact(
     service: Any,
@@ -42,14 +47,17 @@ def write_artifact(
       given, the existing Drive file's content is overwritten in place (no
       duplicate is created), which keeps the artifact correct across renames.
 
-    ``output.also_drive`` adds the Drive sibling to folder mode without giving up
-    the local copy. It is a separate flag rather than a target because the local
-    file is what marks a recording as processed; switching the target instead
-    would make the whole backlog look unprocessed and re-transcribe it.
+    ``output.also_drive`` adds a single Drive sibling to folder mode without giving
+    up the local copy: only the ``.stt`` document (keypoints, meta, and transcript
+    combined) is published, keeping the folder to one file per recording instead of
+    four. Every artifact still lands locally regardless of ``also_drive``, and the
+    local artifact remains what marks a recording as processed; switching the
+    target instead would make the whole backlog look unprocessed and re-transcribe
+    it.
     """
     if config.output_target == "folder":
         _write_to_folder(base_name, suffix, text, config)
-        if not config.output_also_drive:
+        if not config.output_also_drive or suffix != DRIVE_PUBLISHED_SUFFIX:
             return
         # The local copy already succeeded, so a Drive outage must not fail the run
         # and cost the recording its transcript.

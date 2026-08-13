@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from src import drive, output
 from src.config import Config
 
@@ -24,6 +26,33 @@ def make_config(output_target="drive", output_dir=None, output_also_drive=False)
     )
 
 
+def _folder_config(tmp_path: Path, also_drive: bool = False) -> Config:
+    return make_config("folder", tmp_path / "results", output_also_drive=also_drive)
+
+
+def _drive_config(tmp_path: Path) -> Config:
+    return make_config("drive")
+
+
+@pytest.fixture
+def drive_service(mocker):
+    """A fake Drive service that records the names of everything uploaded.
+
+    Patches ``drive.upload`` itself (rather than just wrapping a MagicMock) so
+    ``write_artifact`` exercises its real branching logic and the test can assert
+    on what actually reached Drive across multiple calls.
+    """
+    service = MagicMock()
+    service.uploaded = []
+
+    def fake_upload(_service, _local_path, _folder_id, *, name, mime_type=None, app_properties=None):
+        service.uploaded.append(name)
+
+    mocker.patch("src.output.drive.upload", side_effect=fake_upload)
+    mocker.patch("src.output.drive.update_file")
+    return service
+
+
 def test_folder_mode_also_drive_writes_both_copies(mocker, tmp_path):
     """The local file stays authoritative; Drive gets a published copy alongside it."""
     service = MagicMock()
@@ -33,17 +62,17 @@ def test_folder_mode_also_drive_writes_both_copies(mocker, tmp_path):
     output.write_artifact(
         service,
         base_name="Alice and Bob - 2026/08/13",
-        suffix=".txt",
+        suffix=".stt",
         text="привет",
         folder_id="folderA",
         config=make_config("folder", out_dir, output_also_drive=True),
         tmp_dir=tmp_path,
     )
 
-    local = out_dir / (drive.safe_local_name("Alice and Bob - 2026/08/13") + ".txt")
+    local = out_dir / (drive.safe_local_name("Alice and Bob - 2026/08/13") + ".stt")
     assert local.read_text(encoding="utf-8") == "привет"
     assert upload_mock.call_count == 1
-    assert upload_mock.call_args.kwargs["name"] == "Alice and Bob - 2026/08/13.txt"
+    assert upload_mock.call_args.kwargs["name"] == "Alice and Bob - 2026/08/13.stt"
 
 
 def test_folder_mode_without_also_drive_never_touches_drive(mocker, tmp_path):
@@ -72,14 +101,14 @@ def test_a_failed_drive_publish_keeps_the_local_artifact(mocker, tmp_path):
     output.write_artifact(
         service,
         base_name="Alice",
-        suffix=".txt",
+        suffix=".stt",
         text="привет",
         folder_id="folderA",
         config=make_config("folder", out_dir, output_also_drive=True),
         tmp_dir=tmp_path,
     )
 
-    assert (out_dir / "Alice.txt").read_text(encoding="utf-8") == "привет"
+    assert (out_dir / "Alice.stt").read_text(encoding="utf-8") == "привет"
 
 
 def test_write_artifact_drive_uploads_new_sibling(mocker, tmp_path):
@@ -253,3 +282,27 @@ def test_write_artifact_folder_rename_orphans_old_file(mocker, tmp_path):
     names = sorted(p.name for p in out_dir.iterdir())
     # The rename produces a fresh file; the previous stem's file is orphaned.
     assert names == ["new name.txt", "old name.txt"]
+
+
+def test_also_drive_publishes_the_stt(tmp_path, drive_service):
+    config = _folder_config(tmp_path, also_drive=True)
+    output.write_artifact(drive_service, base_name="rec", suffix=".stt", text="x",
+                          folder_id="F", config=config, tmp_dir=tmp_path)
+    assert drive_service.uploaded == ["rec.stt"]
+
+
+def test_also_drive_does_not_publish_other_artifacts(tmp_path, drive_service):
+    config = _folder_config(tmp_path, also_drive=True)
+    for suffix in (".txt", ".keypoints.md", ".meta.yml"):
+        output.write_artifact(drive_service, base_name="rec", suffix=suffix, text="x",
+                              folder_id="F", config=config, tmp_dir=tmp_path)
+    assert drive_service.uploaded == []
+    assert (config.output_dir / "rec.keypoints.md").exists()
+
+
+def test_drive_target_still_uploads_every_artifact(tmp_path, drive_service):
+    """Only folder mode narrows; the drive target keeps its per-artifact behaviour."""
+    config = _drive_config(tmp_path)
+    output.write_artifact(drive_service, base_name="rec", suffix=".keypoints.md", text="x",
+                          folder_id="F", config=config, tmp_dir=tmp_path)
+    assert drive_service.uploaded == ["rec.keypoints.md"]

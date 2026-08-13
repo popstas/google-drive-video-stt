@@ -46,12 +46,18 @@ def make_config(
     stt_postprocess=False,
     output_target="drive",
     output_dir=None,
+    output_also_drive=False,
+    stt_presets=("keypoints",),
     openai_keypoints=False,
     presets=None,
     tags_allowed=(),
+    referrals_allowed=(),
     webhook_url="",
     webhook_token="",
     proxy_url="",
+    planfix_meta_fields=(
+        "subject", "tags", "referral", "referral_note", "duration", "video_url",
+    ),
 ) -> Config:
     if presets is None:
         # Mirror the legacy keypoints gate: the built-in keypoints pass is the only
@@ -72,12 +78,16 @@ def make_config(
         stt_postprocess=stt_postprocess,
         output_target=output_target,
         output_dir=output_dir,
+        output_also_drive=output_also_drive,
+        stt_presets=tuple(stt_presets),
         openai_keypoints=openai_keypoints,
         deepgram_audio_source=deepgram_audio_source,
         drive_mp3_artifact=drive_mp3_artifact,
         tags_allowed=tuple(tags_allowed),
+        referrals_allowed=tuple(referrals_allowed),
         webhook_url=webhook_url,
         webhook_token=webhook_token,
+        planfix_meta_fields=tuple(planfix_meta_fields),
         presets=tuple(presets),
     )
 
@@ -85,7 +95,7 @@ def make_config(
 def _item(
     file_id="fid", name="video.mp4", *, has_mp3=False, has_txt=False,
     mp3_id=None, mp3_name=None, txt_id=None, keypoints_id=None,
-    artifact_ids=None, size=None,
+    artifact_ids=None, size=None, stt_id=None, meta_yml_id=None,
 ):
     file_info = {"id": file_id, "name": name}
     if size is not None:
@@ -100,6 +110,8 @@ def _item(
         "mp3_id": mp3_id,
         "mp3_name": mp3_name,
         "txt_id": txt_id,
+        "stt_id": stt_id,
+        "meta_yml_id": meta_yml_id,
         "artifact_ids": ids,
     }
 
@@ -188,8 +200,9 @@ def test_process_item_runs_stt_when_enabled(mocker, tmp_path):
     main.process_item(service, _item("fid", "video.mp4"), "f", cfg)
 
     transcribe_mock.assert_called_once_with(m4a_path, cfg, cost_usd={})
-    # Two uploads: mp3 and txt
-    assert upload_mock.call_count == 2
+    # Four uploads: mp3, txt, and the meta.yml/.stt written for every processed
+    # recording.
+    assert upload_mock.call_count == 4
     second_call = upload_mock.call_args_list[1]
     assert second_call.kwargs["mime_type"] == "text/plain"
     txt_path = second_call.args[1]
@@ -237,7 +250,8 @@ def test_process_item_only_stt_when_mp3_already_exists(mocker, tmp_path):
     )
 
     # mp3 artifact already exists, but Deepgram never reuses it: it re-derives
-    # audio from the source mp4 and uploads only the new .txt.
+    # audio from the source mp4 and uploads only the new .txt (plus the
+    # meta.yml/.stt written for every processed recording).
     cfg = make_config(stt_provider="deepgram", deepgram_api_key="dg-x")
     item = _item(
         "fid", "video.mp4", has_mp3=True, mp3_id="mp3id", mp3_name="video.mp3",
@@ -251,8 +265,10 @@ def test_process_item_only_stt_when_mp3_already_exists(mocker, tmp_path):
     assert args[1] == "fid"
     assert args[3] == "video.mp4"
     transcribe_mock.assert_called_once_with(m4a_path, cfg, cost_usd={})
-    upload_mock.assert_called_once()
-    assert upload_mock.call_args.kwargs["mime_type"] == "text/plain"
+    assert upload_mock.call_count == 3
+    first_call = upload_mock.call_args_list[0]
+    assert first_call.kwargs["mime_type"] == "text/plain"
+    assert first_call.kwargs["name"] == "video.txt"
 
 
 def test_process_item_passes_expected_source_size_to_download(mocker, tmp_path):
@@ -313,8 +329,11 @@ def test_process_item_extracts_temporary_audio_when_artifact_upload_is_disabled(
     assert download_mock.call_args.args[1] == "fid"
     extract_mock.assert_called_once_with(mp4_path, bitrate="96k")
     transcribe_mock.assert_called_once_with(mp3_path, cfg, cost_usd={})
-    upload_mock.assert_called_once()
-    assert upload_mock.call_args.kwargs["mime_type"] == "text/plain"
+    # txt, plus the meta.yml/.stt written for every processed recording.
+    assert upload_mock.call_count == 3
+    first_call = upload_mock.call_args_list[0]
+    assert first_call.kwargs["mime_type"] == "text/plain"
+    assert first_call.kwargs["name"] == "video.txt"
     assert telemetry.mp3_uploaded is False
     assert telemetry.txt_uploaded is True
 
@@ -357,8 +376,9 @@ def test_process_item_deepgram_m4a_downloads_mp4_even_when_mp3_exists(
     extract_mock.assert_not_called()
     m4a_mock.assert_called_once()
     transcribe_mock.assert_called_once_with(m4a_path, cfg, cost_usd={})
-    upload_mock.assert_called_once()
-    assert upload_mock.call_args.args[1].name == "video.txt"
+    # txt, plus the meta.yml/.stt written for every processed recording.
+    assert upload_mock.call_count == 3
+    assert upload_mock.call_args_list[0].args[1].name == "video.txt"
 
 
 def test_process_item_deepgram_m4a_does_not_upload_mp3_by_default(mocker, tmp_path):
@@ -382,8 +402,9 @@ def test_process_item_deepgram_m4a_does_not_upload_mp3_by_default(mocker, tmp_pa
     main.process_item(service, _item("fid", "video.mp4"), "folderX", cfg)
 
     extract_mp3_mock.assert_not_called()
-    assert upload_mock.call_count == 1
-    assert upload_mock.call_args.kwargs["mime_type"] == "text/plain"
+    # txt, plus the meta.yml/.stt written for every processed recording.
+    assert upload_mock.call_count == 3
+    assert upload_mock.call_args_list[0].kwargs["mime_type"] == "text/plain"
 
 
 def test_process_item_deepgram_m4a_uploads_mp3_when_artifact_enabled(
@@ -411,7 +432,8 @@ def test_process_item_deepgram_m4a_uploads_mp3_when_artifact_enabled(
     main.process_item(service, _item("fid", "video.mp4"), "folderX", cfg)
 
     extract_mp3_mock.assert_called_once_with(mp4_path, bitrate="96k")
-    assert upload_mock.call_count == 2
+    # mp3, txt, plus the meta.yml/.stt written for every processed recording.
+    assert upload_mock.call_count == 4
     assert upload_mock.call_args_list[0].kwargs["mime_type"] == "audio/mpeg"
     assert upload_mock.call_args_list[1].kwargs["mime_type"] == "text/plain"
 
@@ -449,7 +471,8 @@ def test_process_item_deepgram_mp3_96k_extracts_mp4_for_stt(mocker, tmp_path):
     extract_mock.assert_called_once()
     assert extract_mock.call_args.kwargs["bitrate"] == "96k"
     transcribe_mock.assert_called_once_with(mp3_path, cfg, cost_usd={})
-    upload_mock.assert_called_once()
+    # txt, plus the meta.yml/.stt written for every processed recording.
+    assert upload_mock.call_count == 3
 
 
 def test_process_item_deepgram_mp3_192k_extracts_mp4_for_stt(mocker, tmp_path):
@@ -485,7 +508,8 @@ def test_process_item_deepgram_mp3_192k_extracts_mp4_for_stt(mocker, tmp_path):
     extract_mock.assert_called_once()
     assert extract_mock.call_args.kwargs["bitrate"] == "192k"
     transcribe_mock.assert_called_once_with(mp3_path, cfg, cost_usd={})
-    upload_mock.assert_called_once()
+    # txt, plus the meta.yml/.stt written for every processed recording.
+    assert upload_mock.call_count == 3
 
 
 def test_process_item_skips_completely_when_mp3_and_txt_present(mocker):
@@ -1522,7 +1546,9 @@ def test_process_item_postprocesses_transcript_before_upload(mocker, tmp_path):
     captured = {}
 
     def fake_upload(svc, local_path, folder, mime_type, name=None, app_properties=None):
-        if mime_type == "text/plain":
+        # `.meta.yml`/`.stt` share this mime type too, so match on the `.txt`
+        # suffix specifically rather than on mime_type alone.
+        if name and name.endswith(".txt"):
             captured["txt"] = local_path.read_text(encoding="utf-8")
 
     mocker.patch("src.main.drive.upload", side_effect=fake_upload)
@@ -1621,15 +1647,18 @@ def test_process_item_overwrites_existing_keypoints_on_reprocess(mocker, tmp_pat
         drive_mp3_artifact=False,
     )
     item = _item(
-        "fid", "video.mp4", has_txt=True, txt_id="t1", keypoints_id="k1"
+        "fid", "video.mp4", has_txt=True, txt_id="t1", keypoints_id="k1",
+        stt_id="s1", meta_yml_id="y1",
     )
     main.process_item(service, item, "folderX", cfg, reprocess_txt=True)
 
-    # Both the .txt and the .keypoints.md siblings are overwritten in place,
-    # not re-uploaded as duplicates.
+    # The .txt, the .keypoints.md, the .stt, and the .meta.yml siblings are all
+    # overwritten in place, not re-uploaded as duplicates.
     update_ids = [call.args[1] for call in update_mock.call_args_list]
     assert "t1" in update_ids
     assert "k1" in update_ids
+    assert "s1" in update_ids
+    assert "y1" in update_ids
     upload_mock.assert_not_called()
 
 
@@ -1778,8 +1807,9 @@ def test_process_item_does_not_write_empty_keypoints(mocker, tmp_path):
     )
     main.process_item(service, _item("fid", "video.mp4"), "folderX", cfg)
 
-    # Only the .txt is written; a blank keypoints doc is not uploaded.
-    assert captured["names"] == ["video.txt"]
+    # A blank keypoints doc is not uploaded, but the .txt and the meta.yml/.stt
+    # written for every processed recording still are.
+    assert captured["names"] == ["video.txt", "video.meta.yml", "video.stt"]
 
 
 def test_process_item_uses_speaker_names_from_drive_properties(mocker, tmp_path):
@@ -1792,7 +1822,9 @@ def test_process_item_uses_speaker_names_from_drive_properties(mocker, tmp_path)
     captured = {}
 
     def fake_upload(svc, local_path, folder, mime_type, name=None, app_properties=None):
-        if mime_type == "text/plain":
+        # `.meta.yml`/`.stt` share this mime type too, so match on the `.txt`
+        # suffix specifically rather than on mime_type alone.
+        if name and name.endswith(".txt"):
             captured["txt"] = local_path.read_text(encoding="utf-8")
 
     mocker.patch("src.main.drive.upload", side_effect=fake_upload)
@@ -2534,8 +2566,10 @@ def test_process_item_telemetry_carries_artifacts_on_preset_refeed(mocker, tmp_p
 
 _META_ARTIFACT = (
     "---\n"
-    "topic: Консультация по визе O-1\n"
+    "subject: Консультация по визе O-1\n"
     "tags: [O-1, клиентская-консультация, invented-tag]\n"
+    "referral: рекомендация\n"
+    "referral_note: Посоветовала знакомая\n"
     "---\n"
 )
 
@@ -2552,7 +2586,7 @@ def _webhook_config(**overrides):
         ),
         Preset(
             name="meta",
-            instructions="topic and tags",
+            instructions="subject, tags, and referral",
             artifact_suffix=".meta.md",
             depends_on=("transcript-cleanup",),
         ),
@@ -2569,6 +2603,7 @@ def _webhook_config(**overrides):
             EmployeeFolder("folderX", name="Олег Иванов", email="oleg@expertizeme.org")
         ],
         tags_allowed=("O-1", "клиентская-консультация"),
+        referrals_allowed=("рекомендация",),
         webhook_url="https://example.com/hooks/gdstt",
         webhook_token="secret",
     )
@@ -2615,8 +2650,10 @@ def test_webhook_fired_once_with_employee_and_artifacts(mocker, tmp_path):
             # `meta` is parsed into structured fields; `invented-tag` is outside the
             # configured allow-list and must not reach the receiver.
             "meta": {
-                "topic": "Консультация по визе O-1",
+                "subject": "Консультация по визе O-1",
                 "tags": ["O-1", "клиентская-консультация"],
+                "referral": "рекомендация",
+                "referral_note": "Посоветовала знакомая",
             },
         },
     }
@@ -2658,7 +2695,12 @@ def test_webhook_malformed_meta_degrades_to_empty_fields(mocker, tmp_path):
     )
 
     artifacts = notify.call_args.kwargs["payload"]["artifacts"]
-    assert artifacts["meta"] == {"topic": "", "tags": []}
+    assert artifacts["meta"] == {
+        "subject": "",
+        "tags": [],
+        "referral": "",
+        "referral_note": "",
+    }
 
 
 def test_webhook_not_fired_when_file_skipped(mocker, tmp_path):
@@ -3163,37 +3205,190 @@ def test_planfix_description_concatenates_presets_in_order():
     description = main._planfix_description(
         {"keypoints": "Задачи: раз", "action-items": "Сделать два", "meta": "topic: x"},
         ("keypoints", "action-items"),
+        None,
+        (),
     )
 
-    assert description == (
-        "<p><b>keypoints</b></p><p>Задачи: раз</p>"
-        "<p><b>action-items</b></p><p>Сделать два</p>"
-    )
+    assert description == "<p>Задачи: раз</p><p><br></p><p>Сделать два</p>"
 
 
 def test_planfix_description_skips_presets_without_an_artifact():
     description = main._planfix_description(
-        {"keypoints": "Задачи: раз"}, ("keypoints", "action-items")
+        {"keypoints": "Задачи: раз"}, ("keypoints", "action-items"), None, ()
     )
 
-    assert description == "<p><b>keypoints</b></p><p>Задачи: раз</p>"
+    assert description == "<p>Задачи: раз</p>"
+
+
+def test_planfix_description_omits_the_preset_name():
+    """The preset name is pipeline vocabulary, not something a manager should read."""
+    description = main._planfix_description(
+        {"keypoints": "## Тезисы\n\n- раз"}, ("keypoints",), None, ()
+    )
+
+    assert "keypoints" not in description
+
+
+def test_planfix_description_marks_the_keypoints_sections():
+    description = main._planfix_description(
+        {"keypoints": "## Задачи\n\n### Mels\n\n- раз\n\n## Тезисы\n\n- два\n\n"
+         "## Открытые вопросы\n\n- три"},
+        ("keypoints",),
+        None,
+        (),
+    )
+
+    assert "<p><b>☑️ Задачи</b></p>" in description
+    assert "<p><b>📝 Тезисы</b></p>" in description
+    assert "<p><b>❓ Открытые вопросы</b></p>" in description
+    # An assignee sub-heading is a person's name, not a section, and keeps no marker.
+    assert "<p><b>Mels</b></p>" in description
+
+
+def test_planfix_description_puts_a_blank_line_around_a_marked_heading():
+    """The heading needs air on both sides, but only one blank line where two meet."""
+    description = main._planfix_description(
+        {"keypoints": "## Задачи\n\n### Mels\n\n- раз\n\n## Тезисы\n\n- два"},
+        ("keypoints",),
+        {"subject": "Созвон"},
+        ("subject",),
+    )
+
+    assert description == (
+        "<p><b>Созвон</b></p><p><br></p>"
+        "<p><b>☑️ Задачи</b></p><p><br></p>"
+        "<p><b>Mels</b></p><ul><li>раз</li></ul><p><br></p>"
+        "<p><b>📝 Тезисы</b></p><p><br></p><ul><li>два</li></ul>"
+    )
+    assert "<p><br></p><p><br></p>" not in description
+
+
+def test_planfix_description_does_not_open_on_a_blank_line():
+    """The first section's leading gap has nothing to separate it from."""
+    description = main._planfix_description(
+        {"keypoints": "## Задачи\n\n- раз"}, ("keypoints",), None, ()
+    )
+
+    assert description.startswith("<p><b>☑️ Задачи</b></p>")
+
+
+def test_planfix_description_leaves_an_unknown_heading_alone():
+    description = main._planfix_description(
+        {"keypoints": "## Прочее\n\n- раз"}, ("keypoints",), None, ()
+    )
+
+    assert "<p><b>Прочее</b></p>" in description
 
 
 def test_planfix_description_renders_markdown_as_html():
     """Planfix shows Markdown as literal characters, so the body must arrive as HTML."""
     description = main._planfix_description(
-        {"keypoints": "## Задачи\n\n- [ ] позвонить\n- написать"}, ("keypoints",)
+        {"keypoints": "## Задачи\n\n- [ ] позвонить\n- написать"}, ("keypoints",), None, ()
     )
 
     assert description == (
-        "<p><b>keypoints</b></p><p><b>Задачи</b></p>"
-        "<ul><li>позвонить</li><li>написать</li></ul>"
+        "<p><b>☑️ Задачи</b></p><p><br></p><ul><li>позвонить</li><li>написать</li></ul>"
     )
     assert "\n" not in description
 
 
 def test_planfix_description_is_blank_when_nothing_matched():
-    assert main._planfix_description({"meta": "topic: x"}, ("keypoints",)) == ""
+    assert main._planfix_description({"meta": "topic: x"}, ("keypoints",), None, ()) == ""
+
+
+def test_planfix_description_puts_the_subject_and_tags_on_top():
+    html = main._planfix_description(
+        {"keypoints": "## Задачи\n- [ ] x"},
+        ("keypoints",),
+        {"subject": "Обсудили кейс", "tags": ["O-1"], "referral": "рекомендация"},
+        ("subject", "tags", "referral"),
+    )
+    assert html.index("Обсудили кейс") < html.index("Задачи")
+    assert "O-1" in html and "рекомендация" in html
+    assert "\n" not in html
+
+
+def test_planfix_description_skips_empty_and_unknown_fields():
+    html = main._planfix_description(
+        {"keypoints": "## Задачи"},
+        ("keypoints",),
+        {"subject": "s", "referral": "", "tags": []},
+        ("subject", "referral", "tags", "not_a_field"),
+    )
+    # The brief's original assertion checked "Реферал" not in html, but no label in
+    # _PLANFIX_META_LABELS spells "Реферал" (referral's label is "Откуда узнал"), so
+    # that half could never fail and proved nothing. Asserting on the label the code
+    # actually emits for the empty `referral` field makes this cover the skip.
+    assert "Откуда узнал" not in html and "Теги" not in html
+
+
+def test_planfix_description_normalises_a_multiline_meta_value():
+    """referral_note is free LLM text and can carry embedded newlines. Left
+    unnormalised, markdown_to_html would split the header on them -- fracturing it
+    into extra label-less paragraphs, or worse, a stray bullet/heading if the
+    continuation happened to start with "- " or "#". The header must stay one
+    logical Markdown line before conversion.
+
+    A ``keypoints`` section is included alongside the header under test: a
+    header-only call now (correctly) renders empty -- see
+    ``test_planfix_description_is_blank_when_only_the_header_would_render`` -- so
+    this needs a section present to exercise the header-formatting behaviour."""
+    html = main._planfix_description(
+        {"keypoints": "х"}, ("keypoints",),
+        {"referral_note": "Позвонила\nв понедельник,\n- уточнила детали"},
+        ("referral_note",),
+    )
+    assert "<p><b>Подробности:</b> Позвонила в понедельник, - уточнила детали</p>" in html
+    assert "\n" not in html
+
+
+def test_planfix_description_renders_the_video_url_as_a_link():
+    """source_name is excluded from the default field list *because* it becomes this
+    anchor's text instead of a line of its own (per the design spec); a fixed
+    "Запись" label would defeat that purpose, so the anchor text itself must be
+    asserted, not just the href. A ``keypoints`` section rides along so the header
+    (which alone now renders empty) is actually exercised."""
+    html = main._planfix_description(
+        {"keypoints": "х"}, ("keypoints",),
+        {"video_url": "https://drive.google.com/file/d/X/view", "source_name": "Созвон.mp4"},
+        ("video_url",),
+    )
+    assert '<a href="https://drive.google.com/file/d/X/view">Созвон.mp4</a>' in html
+
+
+def test_planfix_description_video_url_falls_back_to_the_fixed_label():
+    html = main._planfix_description(
+        {"keypoints": "х"}, ("keypoints",),
+        {"video_url": "https://drive.google.com/file/d/X/view"},
+        ("video_url",),
+    )
+    assert '<a href="https://drive.google.com/file/d/X/view">Запись</a>' in html
+
+
+def test_planfix_description_without_a_meta_document_is_unchanged():
+    html = main._planfix_description({"keypoints": "## Задачи"}, ("keypoints",), None, ())
+    assert "Задачи" in html
+
+
+def test_planfix_description_is_blank_when_only_the_header_would_render():
+    """A backfill cycle can find every configured preset already artifacted (so
+    ``artifacts`` carries none of them this cycle) while ``meta_document`` still
+    carries a header. Without a check that at least one preset section rendered,
+    ``_planfix_description`` would return a header-only body -- which
+    ``_send_planfix_comment`` would then post and permanently mark as sent, so the
+    real preset comment could never go out. Nothing to comment must mean an empty
+    description."""
+    html = main._planfix_description(
+        {},
+        ("keypoints",),
+        {
+            "duration": "00:31:42",
+            "video_url": "https://drive.google.com/file/d/X/view",
+            "source_name": "rec.mp4",
+        },
+        ("duration", "video_url"),
+    )
+    assert html == ""
 
 
 def test_comment_is_sent_for_a_matched_recording(monkeypatch, planfix_config):
@@ -3209,11 +3404,33 @@ def test_comment_is_sent_for_a_matched_recording(monkeypatch, planfix_config):
 
     send.assert_called_once()
     assert send.call_args.kwargs["task_id"] == "851030"
-    assert send.call_args.kwargs["description"] == (
-        "<p><b>keypoints</b></p><p>Задачи: раз</p>"
-    )
+    assert send.call_args.kwargs["description"] == "<p>Задачи: раз</p>"
     marked.assert_called_once()
     assert marked.call_args[0][2] == {"planfix_comment_task_id": "851030"}
+
+
+def test_comment_includes_the_meta_header_when_a_document_is_passed(
+    monkeypatch, planfix_config
+):
+    """Covers the wiring `process_item` relies on: `_send_planfix_comment` must
+    forward `meta_document` and `config.planfix_meta_fields` into
+    `_planfix_description`, and the header must land before the preset sections.
+    Without this test, deleting the `meta_document=meta_document` argument at the
+    `process_item` call site would leave the whole suite green."""
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.planfix, "send_comment", send)
+    monkeypatch.setattr(main.drive, "set_file_app_properties", MagicMock())
+
+    main._send_planfix_comment(
+        MagicMock(), gate_item("v1"), "v1", planfix_config,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+        meta_document={"subject": "Обсудили визу O-1"},
+    )
+
+    send.assert_called_once()
+    description = send.call_args.kwargs["description"]
+    assert "Обсудили визу O-1" in description
+    assert description.index("Обсудили визу O-1") < description.index("Задачи: раз")
 
 
 def test_comment_is_not_sent_twice(monkeypatch, planfix_config):
@@ -3275,9 +3492,46 @@ def test_failed_comment_notifies_telegram_and_leaves_no_marker(
     notified.assert_called_once()
 
 
+def test_send_planfix_comment_posts_nothing_for_a_header_only_document(
+    monkeypatch, planfix_config
+):
+    """A preset-backfill cycle can find every configured preset already artifacted
+    (none of them appear in this cycle's ``artifacts``) while ``meta_document`` still
+    carries a header (duration, video link). Regression for the bug where
+    `_planfix_description` returned a non-empty, header-only body in that case:
+    `_send_planfix_comment`'s `if not description` guard exists precisely so a
+    contentless comment is neither posted nor marked sent -- a marker written here
+    would permanently block the real preset comment from ever going out."""
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.planfix, "send_comment", send)
+    marked = MagicMock()
+    monkeypatch.setattr(main.drive, "set_file_app_properties", marked)
+
+    main._send_planfix_comment(
+        MagicMock(), gate_item("v1"), "v1", planfix_config,
+        {},  # no preset produced this cycle -- already-artifacted, so not re-run
+        MATCHED_DECISION,
+        meta_document={
+            "duration": "00:31:42",
+            "video_url": "https://drive.google.com/file/d/X/view",
+            "source_name": "rec.mp4",
+        },
+    )
+
+    send.assert_not_called()
+    marked.assert_not_called()
+
+
 def test_process_item_sends_the_comment_on_the_success_path(mocker, tmp_path):
     """Copy of ``test_webhook_fired_once_with_employee_and_artifacts``: same arrange,
-    with `_send_planfix_comment` mocked and `booking_decision` passed through."""
+    with `_send_planfix_comment` mocked and `booking_decision` passed through.
+
+    Also asserts on the `meta_document` kwarg `process_item` hands to
+    `_send_planfix_comment`: `_send_planfix_comment.assert_called_once()` alone would
+    stay green even if `process_item` dropped the `meta_document=meta_document`
+    argument at its call site (the header would then silently vanish from every
+    production comment), so this pins down the actual production wiring, not just
+    that the function got called."""
     _mock_successful_run(mocker, tmp_path)
     sent = MagicMock()
     mocker.patch.object(main, "_send_planfix_comment", sent)
@@ -3291,6 +3545,9 @@ def test_process_item_sends_the_comment_on_the_success_path(mocker, tmp_path):
     )
 
     sent.assert_called_once()
+    meta_document = sent.call_args.kwargs["meta_document"]
+    assert meta_document is not None
+    assert meta_document["subject"] == "Консультация по визе O-1"
 
 
 def test_process_item_withholds_the_comment_when_a_preset_produced_nothing(
@@ -3363,3 +3620,166 @@ def test_main_survives_a_receiver_bind_failure(monkeypatch, gate_config, caplog)
     run_once.assert_called_once()
     notified.assert_called_once()
     assert "booking receiver" in caplog.text.lower()
+
+
+# --- write .meta.yml and .stt for every processed recording -------------------
+
+
+_STT_NAME = "Angelica Munkueva(ExpertizeMe) и Mels - 2026/08/13 14:29 CEST.mp4"
+_STT_STEM = "Angelica Munkueva(ExpertizeMe) и Mels - 2026_08_13 14_29 CEST"
+_STT_TRANSCRIPT = "[00:00:05] Angelica Munkueva: Здравствуйте\n[00:31:42] Mels: Спасибо"
+# Named distinctly from the webhook tests' own `_META_ARTIFACT` (line 2537) so this
+# block does not shadow that constant's binding for readers scanning the file.
+_STT_META_ARTIFACT = "---\nsubject: Обсудили кейс\ntags: []\n---"
+
+
+def _stt_config(tmp_path, **overrides):
+    out = tmp_path / "results"
+    out.mkdir(exist_ok=True)
+    return make_config(
+        # `_as_folders` (used by `make_config`) only accepts bare ids or
+        # `EmployeeFolder` instances, not the {"folder_id": ...} mapping form the
+        # brief predicted -- that form silently binds the whole dict as `folder_id`,
+        # so `config.folder_by_id("folderA")` would never match and the meta
+        # document's manager/manager_email would go empty.
+        folders=[EmployeeFolder(
+            "folderA", name="Анжелика Мункуева", email="angelica@expertizeme.org"
+        )],
+        presets=(_KEYPOINTS_BUILTIN,),
+        output_target="folder",
+        output_dir=out,
+        **overrides,
+    )
+
+
+def _write_documents(cfg, tmp_path, artifacts, transcript=_STT_TRANSCRIPT):
+    return main._write_call_documents(
+        MagicMock(),
+        "fid1",
+        _STT_NAME,
+        "folderA",
+        transcript,
+        artifacts,
+        cfg,
+        tmp_path,
+        item={},
+        booking_decision=MATCHED_DECISION,
+    )
+
+
+def test_write_call_documents_writes_the_stt_and_the_meta_yml(tmp_path):
+    cfg = _stt_config(tmp_path)
+    document = _write_documents(
+        cfg, tmp_path, {"keypoints": "## Задачи\n- [ ] x", "meta": _STT_META_ARTIFACT}
+    )
+    stt = (cfg.output_dir / f"{_STT_STEM}.stt").read_text(encoding="utf-8")
+    assert stt.index("## Задачи") < stt.index("## Мета") < stt.index("## Расшифровка")
+    assert (cfg.output_dir / f"{_STT_STEM}.meta.yml").exists()
+    assert document["subject"] == "Обсудили кейс"
+    assert document["planfix_task_id"] == "851030"
+
+
+def test_write_call_documents_reads_a_preset_from_its_local_artifact(tmp_path):
+    """A cycle that re-ran only `meta` must still get keypoints into the .stt."""
+    cfg = _stt_config(tmp_path)
+    (cfg.output_dir / f"{_STT_STEM}.keypoints.md").write_text(
+        "## Задачи\n- [ ] x", encoding="utf-8"
+    )
+    _write_documents(cfg, tmp_path, {"meta": _STT_META_ARTIFACT})
+    stt = (cfg.output_dir / f"{_STT_STEM}.stt").read_text(encoding="utf-8")
+    assert "## Задачи" in stt
+
+
+def test_write_call_documents_falls_back_to_the_raw_transcript(tmp_path):
+    """No transcript-cleanup artifact means the .stt carries the raw text."""
+    cfg = _stt_config(tmp_path)
+    _write_documents(cfg, tmp_path, {})
+    stt = (cfg.output_dir / f"{_STT_STEM}.stt").read_text(encoding="utf-8")
+    assert "[00:00:05] Angelica Munkueva: Здравствуйте" in stt
+
+
+def test_write_call_documents_writes_the_meta_yml_when_the_preset_produced_nothing(tmp_path):
+    cfg = _stt_config(tmp_path)
+    document = _write_documents(cfg, tmp_path, {"keypoints": "## Задачи"})
+    assert (cfg.output_dir / f"{_STT_STEM}.meta.yml").exists()
+    assert document["subject"] == ""
+    assert document["client"] == "Mels"
+
+
+def test_process_item_survives_a_failed_stt_meta_write(mocker, tmp_path, caplog):
+    """A `.stt`/`.meta.yml` write failure must not cost the recording its webhook or
+    Planfix comment: by the time `_write_call_documents` runs, the `.txt` and every
+    preset artifact are already persisted, so a re-raise here would leave the next
+    cycle seeing a fully-processed recording (has_txt, no missing presets) that
+    never got notified and never will be retried.
+    """
+    notify = _mock_successful_run(mocker, tmp_path)
+    mocker.patch(
+        "src.main._write_call_documents", side_effect=RuntimeError("disk full")
+    )
+
+    with caplog.at_level(logging.WARNING):
+        telemetry = main.process_item(
+            MagicMock(), _item("fid", "video.mp4"), "folderX", _webhook_config()
+        )
+
+    assert telemetry is not None
+    assert telemetry.meta_document is None
+    notify.assert_called_once()
+    assert any(
+        "stt" in record.message.lower() and "video.mp4" in record.message
+        for record in caplog.records
+    )
+
+
+def test_apply_local_output_state_stt_and_meta_yml_do_not_mark_a_recording_processed(
+    tmp_path,
+):
+    """The load-bearing invariant: a `.stt`/`.meta.yml` sitting in `output_dir` with
+    no `.txt` sibling must not make `_apply_local_output_state`/`_pending_items`
+    think the recording is done. Only `.txt` and the preset artifacts may do that
+    (see `_write_call_documents`'s docstring) -- getting this wrong would silently
+    stop re-selecting recordings that were never actually transcribed.
+    """
+    out_dir = tmp_path / "results"
+    out_dir.mkdir()
+    (out_dir / "video.stt").write_text("assembled", encoding="utf-8")
+    (out_dir / "video.meta.yml").write_text("subject: ''\n", encoding="utf-8")
+
+    cfg = make_config(
+        stt_provider="deepgram",
+        drive_mp3_artifact=False,
+        output_target="folder",
+        output_dir=out_dir,
+    )
+    items = [_item("fid", "video.mp4")]
+    main._apply_local_output_state(items, cfg)
+
+    assert items[0]["has_txt"] is False
+    assert main._pending_items(items, cfg) == items
+
+
+def test_apply_local_output_state_stt_and_meta_yml_do_not_block_a_processed_recording(
+    tmp_path,
+):
+    """The converse of the test above: once the real `.txt` is present (and every
+    preset artifact, none configured here), a `.stt`/`.meta.yml` sitting alongside it
+    must not make the recording look pending again.
+    """
+    out_dir = tmp_path / "results"
+    out_dir.mkdir()
+    (out_dir / "video.txt").write_text("Speaker 1: hi", encoding="utf-8")
+    (out_dir / "video.stt").write_text("assembled", encoding="utf-8")
+    (out_dir / "video.meta.yml").write_text("subject: ''\n", encoding="utf-8")
+
+    cfg = make_config(
+        stt_provider="deepgram",
+        drive_mp3_artifact=False,
+        output_target="folder",
+        output_dir=out_dir,
+    )
+    items = [_item("fid", "video.mp4")]
+    main._apply_local_output_state(items, cfg)
+
+    assert items[0]["has_txt"] is True
+    assert main._pending_items(items, cfg) == []
