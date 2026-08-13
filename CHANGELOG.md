@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Bug Fixes
+
+- Retry socket-level Drive failures instead of failing the cycle
+
 ### Documentation
 
 - Plan the Planfix call-booking implementation
