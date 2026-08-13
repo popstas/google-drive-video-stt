@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import logging
 import json
+import re
 import ssl
 import tempfile
 import time
@@ -733,6 +734,36 @@ _PLANFIX_META_LABELS = {
 }
 
 
+# Markers prepended to the keypoints headings in the Planfix comment, so the three
+# sections are tellable apart while scrolling a CRM feed. They live here and not in the
+# preset prompt on purpose: the `.keypoints.md` artifact and the `.stt` document are
+# read as documents and parsed by other tools, where a symbol in a heading is noise.
+# A heading this map does not name is left exactly as the preset wrote it.
+_PLANFIX_SECTION_MARKERS = {
+    "Задачи": "☑️",
+    "Тезисы": "📝",
+    "Открытые вопросы": "❓",
+}
+
+_MARKDOWN_HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})[ \t]+(?P<title>.+?)[ \t]*$", re.MULTILINE)
+
+
+def _mark_planfix_sections(text: str) -> str:
+    """Prefix the known keypoints headings with their marker, for the CRM comment only.
+
+    Sub-headings the preset emits per assignee (``### Mels``) are names, not section
+    titles, so they miss the map and pass through untouched.
+    """
+
+    def _mark(match: re.Match[str]) -> str:
+        marker = _PLANFIX_SECTION_MARKERS.get(match.group("title"))
+        if marker is None:
+            return match.group(0)
+        return f"{match.group('hashes')} {marker} {match.group('title')}"
+
+    return _MARKDOWN_HEADING_RE.sub(_mark, text)
+
+
 def _planfix_meta_lines(
     document: dict[str, object] | None, fields: tuple[str, ...]
 ) -> list[str]:
@@ -785,11 +816,14 @@ def _planfix_description(
 
     The header (subject, tags, referral, ...) is rendered first from ``meta_document``
     and ``meta_fields``, so a manager reading the comment sees what the call was about
-    before scrolling into the preset sections. Presets are joined in configured order,
-    each under its own heading, and a preset with no artifact is skipped rather than
-    emitting an empty section. The header renders only alongside at least one preset
-    section -- a header with no sections returns an empty string, which callers rely
-    on to mean "nothing to comment".
+    before scrolling into the preset sections. Presets are joined in configured order
+    and a preset with no artifact is skipped rather than emitting an empty section.
+    The preset's own name is not printed: "keypoints" is how the pipeline spells a
+    stage, not something a manager reading a CRM comment needs to see, and it landed
+    as a stray English word between the Russian header and the Russian content. The
+    header renders only alongside at least one preset section -- a header with no
+    sections returns an empty string, which callers rely on to mean "nothing to
+    comment".
 
     The result is HTML, not the Markdown the presets emit: Planfix stores comments as
     HTML and renders ``##`` and ``-`` as literal characters. Conversion happens once,
@@ -797,7 +831,7 @@ def _planfix_description(
     the body stays a single line, since Planfix rewrites every newline as ``<br>``).
     """
     sections = [
-        f"## {name}\n{artifacts[name].strip()}"
+        _mark_planfix_sections(artifacts[name].strip())
         for name in preset_names
         if artifacts.get(name, "").strip()
     ]

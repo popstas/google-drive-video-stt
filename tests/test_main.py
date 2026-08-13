@@ -3209,10 +3209,7 @@ def test_planfix_description_concatenates_presets_in_order():
         (),
     )
 
-    assert description == (
-        "<p><b>keypoints</b></p><p>Задачи: раз</p>"
-        "<p><b>action-items</b></p><p>Сделать два</p>"
-    )
+    assert description == "<p>Задачи: раз</p><p>Сделать два</p>"
 
 
 def test_planfix_description_skips_presets_without_an_artifact():
@@ -3220,7 +3217,40 @@ def test_planfix_description_skips_presets_without_an_artifact():
         {"keypoints": "Задачи: раз"}, ("keypoints", "action-items"), None, ()
     )
 
-    assert description == "<p><b>keypoints</b></p><p>Задачи: раз</p>"
+    assert description == "<p>Задачи: раз</p>"
+
+
+def test_planfix_description_omits_the_preset_name():
+    """The preset name is pipeline vocabulary, not something a manager should read."""
+    description = main._planfix_description(
+        {"keypoints": "## Тезисы\n\n- раз"}, ("keypoints",), None, ()
+    )
+
+    assert "keypoints" not in description
+
+
+def test_planfix_description_marks_the_keypoints_sections():
+    description = main._planfix_description(
+        {"keypoints": "## Задачи\n\n### Mels\n\n- раз\n\n## Тезисы\n\n- два\n\n"
+         "## Открытые вопросы\n\n- три"},
+        ("keypoints",),
+        None,
+        (),
+    )
+
+    assert "<p><b>☑️ Задачи</b></p>" in description
+    assert "<p><b>📝 Тезисы</b></p>" in description
+    assert "<p><b>❓ Открытые вопросы</b></p>" in description
+    # An assignee sub-heading is a person's name, not a section, and keeps no marker.
+    assert "<p><b>Mels</b></p>" in description
+
+
+def test_planfix_description_leaves_an_unknown_heading_alone():
+    description = main._planfix_description(
+        {"keypoints": "## Прочее\n\n- раз"}, ("keypoints",), None, ()
+    )
+
+    assert "<p><b>Прочее</b></p>" in description
 
 
 def test_planfix_description_renders_markdown_as_html():
@@ -3230,8 +3260,7 @@ def test_planfix_description_renders_markdown_as_html():
     )
 
     assert description == (
-        "<p><b>keypoints</b></p><p><b>Задачи</b></p>"
-        "<ul><li>позвонить</li><li>написать</li></ul>"
+        "<p><b>☑️ Задачи</b></p><ul><li>позвонить</li><li>написать</li></ul>"
     )
     assert "\n" not in description
 
@@ -3348,9 +3377,7 @@ def test_comment_is_sent_for_a_matched_recording(monkeypatch, planfix_config):
 
     send.assert_called_once()
     assert send.call_args.kwargs["task_id"] == "851030"
-    assert send.call_args.kwargs["description"] == (
-        "<p><b>keypoints</b></p><p>Задачи: раз</p>"
-    )
+    assert send.call_args.kwargs["description"] == "<p>Задачи: раз</p>"
     marked.assert_called_once()
     assert marked.call_args[0][2] == {"planfix_comment_task_id": "851030"}
 
@@ -3376,7 +3403,7 @@ def test_comment_includes_the_meta_header_when_a_document_is_passed(
     send.assert_called_once()
     description = send.call_args.kwargs["description"]
     assert "Обсудили визу O-1" in description
-    assert description.index("Обсудили визу O-1") < description.index("keypoints")
+    assert description.index("Обсудили визу O-1") < description.index("Задачи: раз")
 
 
 def test_comment_is_not_sent_twice(monkeypatch, planfix_config):
