@@ -3266,12 +3266,39 @@ def test_planfix_description_skips_empty_and_unknown_fields():
     assert "Откуда узнал" not in html and "Теги" not in html
 
 
+def test_planfix_description_normalises_a_multiline_meta_value():
+    """referral_note is free LLM text and can carry embedded newlines. Left
+    unnormalised, markdown_to_html would split the header on them -- fracturing it
+    into extra label-less paragraphs, or worse, a stray bullet/heading if the
+    continuation happened to start with "- " or "#". The header must stay one
+    logical Markdown line before conversion."""
+    html = main._planfix_description(
+        {}, (),
+        {"referral_note": "Позвонила\nв понедельник,\n- уточнила детали"},
+        ("referral_note",),
+    )
+    assert "<p><b>Подробности:</b> Позвонила в понедельник, - уточнила детали</p>" == html
+    assert "\n" not in html
+
+
 def test_planfix_description_renders_the_video_url_as_a_link():
+    """source_name is excluded from the default field list *because* it becomes this
+    anchor's text instead of a line of its own (per the design spec); a fixed
+    "Запись" label would defeat that purpose, so the anchor text itself must be
+    asserted, not just the href."""
     html = main._planfix_description(
         {}, (), {"video_url": "https://drive.google.com/file/d/X/view", "source_name": "Созвон.mp4"},
         ("video_url",),
     )
-    assert '<a href="https://drive.google.com/file/d/X/view">' in html
+    assert '<a href="https://drive.google.com/file/d/X/view">Созвон.mp4</a>' in html
+
+
+def test_planfix_description_video_url_falls_back_to_the_fixed_label():
+    html = main._planfix_description(
+        {}, (), {"video_url": "https://drive.google.com/file/d/X/view"},
+        ("video_url",),
+    )
+    assert '<a href="https://drive.google.com/file/d/X/view">Запись</a>' in html
 
 
 def test_planfix_description_without_a_meta_document_is_unchanged():
@@ -3297,6 +3324,30 @@ def test_comment_is_sent_for_a_matched_recording(monkeypatch, planfix_config):
     )
     marked.assert_called_once()
     assert marked.call_args[0][2] == {"planfix_comment_task_id": "851030"}
+
+
+def test_comment_includes_the_meta_header_when_a_document_is_passed(
+    monkeypatch, planfix_config
+):
+    """Covers the wiring `process_item` relies on: `_send_planfix_comment` must
+    forward `meta_document` and `config.planfix_meta_fields` into
+    `_planfix_description`, and the header must land before the preset sections.
+    Without this test, deleting the `meta_document=meta_document` argument at the
+    `process_item` call site would leave the whole suite green."""
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.planfix, "send_comment", send)
+    monkeypatch.setattr(main.drive, "set_file_app_properties", MagicMock())
+
+    main._send_planfix_comment(
+        MagicMock(), gate_item("v1"), "v1", planfix_config,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+        meta_document={"subject": "Обсудили визу O-1"},
+    )
+
+    send.assert_called_once()
+    description = send.call_args.kwargs["description"]
+    assert "Обсудили визу O-1" in description
+    assert description.index("Обсудили визу O-1") < description.index("keypoints")
 
 
 def test_comment_is_not_sent_twice(monkeypatch, planfix_config):
@@ -3360,7 +3411,14 @@ def test_failed_comment_notifies_telegram_and_leaves_no_marker(
 
 def test_process_item_sends_the_comment_on_the_success_path(mocker, tmp_path):
     """Copy of ``test_webhook_fired_once_with_employee_and_artifacts``: same arrange,
-    with `_send_planfix_comment` mocked and `booking_decision` passed through."""
+    with `_send_planfix_comment` mocked and `booking_decision` passed through.
+
+    Also asserts on the `meta_document` kwarg `process_item` hands to
+    `_send_planfix_comment`: `_send_planfix_comment.assert_called_once()` alone would
+    stay green even if `process_item` dropped the `meta_document=meta_document`
+    argument at its call site (the header would then silently vanish from every
+    production comment), so this pins down the actual production wiring, not just
+    that the function got called."""
     _mock_successful_run(mocker, tmp_path)
     sent = MagicMock()
     mocker.patch.object(main, "_send_planfix_comment", sent)
@@ -3374,6 +3432,9 @@ def test_process_item_sends_the_comment_on_the_success_path(mocker, tmp_path):
     )
 
     sent.assert_called_once()
+    meta_document = sent.call_args.kwargs["meta_document"]
+    assert meta_document is not None
+    assert meta_document["subject"] == "Консультация по визе O-1"
 
 
 def test_process_item_withholds_the_comment_when_a_preset_produced_nothing(

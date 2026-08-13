@@ -738,8 +738,10 @@ def _planfix_meta_lines(
 ) -> list[str]:
     """Render the selected meta fields as Markdown lines for the comment header.
 
-    A field that is empty, unknown, or has no label is skipped silently, so shortening
-    the configured list or a call with no referral never leaves a dangling label.
+    A field that is empty or unknown is skipped silently, so shortening the configured
+    list or a call with no referral never leaves a dangling label. ``subject`` has an
+    empty label in ``_PLANFIX_META_LABELS`` but is deliberately not skipped for it --
+    it is rendered as the bold heading instead of a labelled line.
     """
     if not document:
         return []
@@ -750,13 +752,22 @@ def _planfix_meta_lines(
         value = document.get(field_name)
         if isinstance(value, list):
             value = ", ".join(str(entry) for entry in value)
-        text = str(value or "").strip()
+        # Collapse embedded newlines (free LLM text like referral_note can carry them):
+        # markdown_to_html splits on "\n", so an unnormalised value would fracture the
+        # header into extra, label-less paragraphs -- or a stray bullet/heading if the
+        # continuation happened to start with "- " or "#".
+        text = " ".join(str(value or "").split())
         if not text:
             continue
         if field_name == "subject":
             lines.insert(0, f"**{text}**")
         elif field_name == "video_url":
-            lines.append(f"[{_PLANFIX_META_LABELS[field_name]}]({text})")
+            # source_name is excluded from the default field list *because* it becomes
+            # this anchor's text instead of a line of its own; fall back to the fixed
+            # label when the document carries no source_name (or an empty one).
+            anchor = str(document.get("source_name") or "").strip()
+            anchor = " ".join(anchor.split()) or _PLANFIX_META_LABELS[field_name]
+            lines.append(f"[{anchor}]({text})")
         else:
             lines.append(f"**{_PLANFIX_META_LABELS[field_name]}:** {text}")
     return lines
