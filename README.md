@@ -284,6 +284,7 @@ webhook:
 google: {}               # inline-first auth; empty => data_dir fallback
 planfix:
   meta_fields: [subject, tags, referral, referral_note, duration, video_url]   # header fields on the Planfix comment
+  task_url: ""           # e.g. https://<account>.planfix.com/task/<task-id>
 presets:
   transcript-cleanup:
     prompt_file: prompts/transcript-cleanup.md   # packaged asset, copied beside the config
@@ -335,6 +336,7 @@ variable is read at runtime:
 | `webhook.url` | (empty) | Completion webhook endpoint; must be an absolute `http://` or `https://` URL. Empty disables it; a failure never fails the file |
 | `webhook.token` | (empty) | Optional bearer token sent as `Authorization: Bearer <token>` |
 | `planfix.meta_fields` | `[subject, tags, referral, referral_note, duration, video_url]` | Which meta fields open the Planfix comment, and in what order |
+| `planfix.task_url` | (empty) | Where a task lives in the web UI, e.g. `https://<account>.planfix.com/task/<task-id>`. Fills `planfix_task_url` in the meta document and the link column of `gdstt planfix sent`. Empty leaves both blank |
 
 ## Speech-to-text
 

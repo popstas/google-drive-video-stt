@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
-from src import auth, booking_gate, call_booking, drive
+from src import auth, booking_gate, call_booking, drive, meta_doc
 from src import main as main_module
 from src import preset_pipeline, relabel_transcript
 from src.config import (
@@ -538,6 +538,42 @@ def cmd_bookings_rematch(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_planfix_sent(args: argparse.Namespace) -> None:
+    """List every recording whose Planfix comment was actually delivered.
+
+    The ``planfix_comment_task_id`` appProperty is written only after a successful
+    POST, so it -- not the booking journal -- is the record of what was sent: a booking
+    can exist for a comment that never landed, and the journal is pruned besides. The
+    manager comes from the folder the recording sits in.
+    """
+    config = load_config(config_path=args.config, validate_providers=False)
+    service = auth.build_drive_service(config=config)
+    rows: list[tuple[str, str, str, str, str]] = []
+    for folder in config.folders:
+        for item in drive.list_mp4_timestamps(service, folder.folder_id):
+            task_id = (item.get("appProperties") or {}).get(
+                drive.PLANFIX_COMMENT_TASK_ID_PROPERTY, ""
+            )
+            if task_id:
+                rows.append(
+                    (
+                        item.get("createdTime", ""),
+                        task_id,
+                        folder.name,
+                        item.get("name", ""),
+                        item.get("id", ""),
+                    )
+                )
+
+    if not rows:
+        print("No recording carries a sent-comment marker.")
+        return
+
+    for created, task_id, manager, name, file_id in sorted(rows):
+        url = meta_doc.task_url(config.planfix_task_url, task_id)
+        print(f"{created}\t{task_id}\t{manager}\t{name}\t{url}\t{file_id}")
+
+
 def cmd_bookings_restore_dates(args: argparse.Namespace) -> None:
     """Restore modifiedTime on recordings whose date the unmatched mark moved.
 
@@ -934,6 +970,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_speakers_set.add_argument("target", help="Drive MP4 file ID")
     p_speakers_set.add_argument("names", nargs="+", help="Speaker names in order")
     p_speakers_set.set_defaults(func=cmd_speakers_set)
+
+    p_planfix = sub.add_parser(
+        "planfix",
+        help="Inspect what was sent to Planfix",
+    )
+    planfix_sub = p_planfix.add_subparsers(dest="planfix_command", required=True)
+    p_planfix_sent = planfix_sub.add_parser(
+        "sent", help="List recordings whose Planfix comment was delivered"
+    )
+    p_planfix_sent.set_defaults(func=cmd_planfix_sent)
 
     p_bookings = sub.add_parser(
         "bookings",

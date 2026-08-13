@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -94,3 +95,35 @@ def test_to_yaml_round_trips_and_keeps_the_declared_order(config_with_folder):
     text = meta_doc.to_yaml(_document(config_with_folder))
     assert list(yaml.safe_load(text)) == list(meta_doc.FIELD_ORDER)
     assert "Обсудили кейс" in text
+
+
+def test_task_url_substitutes_the_placeholder():
+    assert (
+        meta_doc.task_url("https://tagilcity.planfix.com/task/<task-id>", "918659")
+        == "https://tagilcity.planfix.com/task/918659"
+    )
+
+
+def test_task_url_appends_to_a_template_without_a_placeholder():
+    """An operator who writes just the base gets the obvious result, not a dead link."""
+    assert (
+        meta_doc.task_url("https://tagilcity.planfix.com/task/", "918659")
+        == "https://tagilcity.planfix.com/task/918659"
+    )
+
+
+def test_task_url_is_empty_without_a_template_or_a_task():
+    assert meta_doc.task_url("", "918659") == ""
+    assert meta_doc.task_url("https://x/task/<task-id>", "") == ""
+
+
+def test_build_carries_the_task_url(config_with_folder):
+    config = replace(
+        config_with_folder, planfix_task_url="https://tagilcity.planfix.com/task/<task-id>"
+    )
+    document = _document(config)
+    assert document["planfix_task_url"] == "https://tagilcity.planfix.com/task/918659"
+
+
+def test_build_leaves_the_task_url_empty_when_unconfigured(config_with_folder):
+    assert _document(config_with_folder)["planfix_task_url"] == ""

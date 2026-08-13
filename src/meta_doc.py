@@ -34,6 +34,7 @@ FIELD_ORDER = (
     "duration",
     "language",
     "planfix_task_id",
+    "planfix_task_url",
     "video_id",
     "video_url",
     "source_name",
@@ -69,6 +70,25 @@ def _client(file_name: str) -> str:
     return clients[0] if clients else ""
 
 
+TASK_ID_PLACEHOLDER = "<task-id>"
+
+
+def task_url(template: str, task_id: str) -> str:
+    """Render a Planfix task's web address from the configured template.
+
+    ``<task-id>`` is substituted where it appears; a template without it is treated as
+    a base and the id is appended, so both ``.../task/<task-id>`` and ``.../task``
+    behave the way an operator writing either one would expect. Without a template or
+    without an id there is nothing to link to, and the field stays empty.
+    """
+    base = (template or "").strip()
+    if not base or not task_id:
+        return ""
+    if TASK_ID_PLACEHOLDER in base:
+        return base.replace(TASK_ID_PLACEHOLDER, task_id)
+    return f"{base.rstrip('/')}/{task_id}"
+
+
 def _date(file_name: str) -> str:
     start = meeting_time.parse_meeting_start(file_name)
     return start.isoformat() if start else ""
@@ -99,6 +119,7 @@ def build(
         "duration": _duration(transcript),
         "language": config.stt_language,
         "planfix_task_id": planfix_task_id,
+        "planfix_task_url": task_url(config.planfix_task_url, planfix_task_id),
         "video_id": file_id,
         "video_url": f"https://drive.google.com/file/d/{file_id}/view",
         "source_name": file_name,

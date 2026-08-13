@@ -2454,6 +2454,7 @@ def test_generated_config_ships_the_new_sections(tmp_path):
         "meta_fields": [
             "subject", "tags", "referral", "referral_note", "duration", "video_url",
         ],
+        "task_url": "",
     }
 
 
@@ -2516,3 +2517,19 @@ def test_referrals_allowed_renders_into_the_meta_prompt(tmp_path):
 def test_referrals_allowed_must_be_a_list(tmp_path):
     with pytest.raises(ValueError, match="referrals.allowed"):
         _load_config(tmp_path, {"referrals": {"allowed": "instagram"}})
+
+
+def test_planfix_task_url_is_read_from_config(tmp_path):
+    config = _load_config(
+        tmp_path, {"planfix": {"task_url": "https://tagilcity.planfix.com/task/<task-id>"}}
+    )
+    assert config.planfix_task_url == "https://tagilcity.planfix.com/task/<task-id>"
+
+
+def test_planfix_task_url_defaults_to_empty(tmp_path):
+    assert _load_config(tmp_path, {}).planfix_task_url == ""
+
+
+def test_default_config_writes_the_planfix_task_url_key():
+    """The key must be visible in a generated config, or nobody knows it exists."""
+    assert _default_config_dict()["planfix"]["task_url"] == ""

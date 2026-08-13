@@ -148,6 +148,11 @@ class Config:
     planfix_meta_fields: tuple[str, ...] = (
         "subject", "tags", "referral", "referral_note", "duration", "video_url",
     )
+    # Where a task lives in the web UI, e.g.
+    # ``https://tagilcity.planfix.com/task/<task-id>``. The account name is part of the
+    # host, so this cannot be derived from the comment webhook URL. Blank leaves
+    # ``planfix_task_url`` empty in the meta document rather than guessing a host.
+    planfix_task_url: str = ""
     presets: tuple[Preset, ...] = ()
     # Google OAuth is config-owned and inline-first. ``google_credentials``/
     # ``google_token`` hold inline mappings (the OAuth client JSON and the saved
@@ -795,6 +800,7 @@ def _config_from_yaml(
     planfix_token = _yaml_str(planfix.get("token"))
     planfix_presets = _parse_planfix_presets(planfix.get("presets"))
     planfix_meta_fields = _parse_planfix_meta_fields(planfix.get("meta_fields"))
+    planfix_task_url = _yaml_str(planfix.get("task_url"))
 
     (
         google_credentials,
@@ -984,6 +990,7 @@ def _config_from_yaml(
         planfix_token=planfix_token,
         planfix_presets=planfix_presets,
         planfix_meta_fields=planfix_meta_fields,
+        planfix_task_url=planfix_task_url,
         presets=presets,
         google_credentials=google_credentials,
         google_token=google_token,
@@ -1195,6 +1202,8 @@ def _default_config_dict(
             "meta_fields": [
                 "subject", "tags", "referral", "referral_note", "duration", "video_url",
             ],
+            # e.g. https://<account>.planfix.com/task/<task-id>
+            "task_url": "",
         },
         # Google auth is inline-first and config-owned. The generated config ships an
         # empty block (no *_file pointers) so the data_dir fallback applies until the
@@ -1348,6 +1357,7 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "token": config.planfix_token,
             "presets": list(config.planfix_presets),
             "meta_fields": list(config.planfix_meta_fields),
+            "task_url": config.planfix_task_url,
         },
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
