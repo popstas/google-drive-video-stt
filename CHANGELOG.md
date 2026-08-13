@@ -1,10 +1,11 @@
 # Changelog
 
 
-## Unreleased
+## v0.6.0 - 2026-08-13
 
 ### Features
 
+- Show the newest sent comments first, capped by --limit
 - Print both links from gdstt planfix sent
 - Add gdstt planfix sent and a planfix_task_url meta field
 - Separate the Planfix comment sections with blank lines
