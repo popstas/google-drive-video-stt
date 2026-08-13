@@ -3087,7 +3087,10 @@ def test_planfix_description_concatenates_presets_in_order():
         ("keypoints", "action-items"),
     )
 
-    assert description == "## keypoints\nЗадачи: раз\n\n## action-items\nСделать два"
+    assert description == (
+        "<p><b>keypoints</b></p><p>Задачи: раз</p>"
+        "<p><b>action-items</b></p><p>Сделать два</p>"
+    )
 
 
 def test_planfix_description_skips_presets_without_an_artifact():
@@ -3095,7 +3098,20 @@ def test_planfix_description_skips_presets_without_an_artifact():
         {"keypoints": "Задачи: раз"}, ("keypoints", "action-items")
     )
 
-    assert description == "## keypoints\nЗадачи: раз"
+    assert description == "<p><b>keypoints</b></p><p>Задачи: раз</p>"
+
+
+def test_planfix_description_renders_markdown_as_html():
+    """Planfix shows Markdown as literal characters, so the body must arrive as HTML."""
+    description = main._planfix_description(
+        {"keypoints": "## Задачи\n\n- [ ] позвонить\n- написать"}, ("keypoints",)
+    )
+
+    assert description == (
+        "<p><b>keypoints</b></p><p><b>Задачи</b></p>"
+        "<ul><li>позвонить</li><li>написать</li></ul>"
+    )
+    assert "\n" not in description
 
 
 def test_planfix_description_is_blank_when_nothing_matched():
@@ -3115,7 +3131,9 @@ def test_comment_is_sent_for_a_matched_recording(monkeypatch, planfix_config):
 
     send.assert_called_once()
     assert send.call_args.kwargs["task_id"] == "851030"
-    assert send.call_args.kwargs["description"] == "## keypoints\nЗадачи: раз"
+    assert send.call_args.kwargs["description"] == (
+        "<p><b>keypoints</b></p><p>Задачи: раз</p>"
+    )
     marked.assert_called_once()
     assert marked.call_args[0][2] == {"planfix_comment_task_id": "851030"}
 

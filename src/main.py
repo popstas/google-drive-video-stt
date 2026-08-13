@@ -22,6 +22,7 @@ from src import (
     notify,
     output,
     planfix,
+    planfix_html,
     postprocess,
     preset_pipeline,
     webhook,
@@ -527,13 +528,17 @@ def _planfix_description(
 
     Presets are joined in configured order, each under its own heading, and a preset
     with no artifact is skipped rather than emitting an empty section.
+
+    The result is HTML, not the Markdown the presets emit: Planfix stores comments as
+    HTML and renders ``##`` and ``-`` as literal characters. Conversion happens once,
+    on the assembled document, so headings and lists nest the same way they read.
     """
     sections = [
         f"## {name}\n{artifacts[name].strip()}"
         for name in preset_names
         if artifacts.get(name, "").strip()
     ]
-    return "\n\n".join(sections)
+    return planfix_html.markdown_to_html("\n\n".join(sections))
 
 
 def _send_planfix_comment(
