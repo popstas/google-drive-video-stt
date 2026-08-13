@@ -12,6 +12,10 @@
 
 - Decide which speaker is which person instead of guessing from turn order
 
+### Documentation
+
+- Add spec for the .stt artifact and the meta document
+
 ## v0.5.1 - 2026-08-13
 
 ### Bug Fixes

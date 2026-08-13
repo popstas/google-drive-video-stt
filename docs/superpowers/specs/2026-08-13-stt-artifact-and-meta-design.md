@@ -82,8 +82,8 @@ already knows and must not pay a model to restate.
 |---|---|
 | `subject`, `tags`, `referral`, `referral_note` | the `meta` preset — one LLM call |
 | `manager`, `manager_email` | the folder's entry in `folders:` |
-| `client` | the non-manager participant resolved by `speaker_roles` |
-| `date` | `meeting_time` parsed from the file name; Drive `createdTime` as fallback |
+| `client` | the participant in the recording name that does not carry the ExpertizeMe marker |
+| `date` | `meeting_time` parsed from the file name |
 | `duration` | the last timestamp in the transcript |
 | `language`, `stt_model`, `llm_model` | config |
 | `planfix_task_id` | the `planfix_comment_task_id` appProperty |
@@ -93,6 +93,24 @@ already knows and must not pay a model to restate.
 `duration` reads the transcript's last timestamp rather than probing the media:
 the transcript is already in hand, and a timestamp that trails the true end by a
 few seconds of silence costs nothing here.
+
+`client` is read from the recording name, where Meet marks the organizer —
+`Angelica Munkueva(ExpertizeMe) и Mels`, or `Ольга х ExpertizeMe` with the marker
+as its own token. Whoever carries the marker is the manager; the rest are
+clients. `speaker_roles` cannot answer this: it orders the two names by who
+speaks first, without saying which is which. A name with no marker leaves
+`client` empty rather than guessed.
+
+`date` has no fallback to Drive's `createdTime`, because the polling listing
+deliberately does not request that field — fetching it every cycle for every file
+was rejected when the date-repair command was built. A recording whose name
+carries no timestamp gets an empty `date`; the booking gate already treats such a
+file as unmatched, so nothing new is lost.
+
+The preset's own artifact keeps its `.meta.md` suffix and its raw frontmatter.
+That file is what the preset stage checks to decide whether `meta` still needs to
+run, so it cannot be replaced by the merged document without disturbing the
+bookkeeping. `.meta.yml` is written alongside it, by the assembly step.
 
 The existing preset returns `topic`; it becomes `subject` in the prompt, in
 `parse_meta`, and in the webhook payload. No compatibility shim — the preset has
