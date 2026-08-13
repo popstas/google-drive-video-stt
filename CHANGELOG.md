@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Features
+
+- Add Drive timestamp helpers and the stale-mark selection rule
+
 ### Bug Fixes
 
 - Keep the Drive modifiedTime when writing appProperties

@@ -538,6 +538,32 @@ def cmd_bookings_rematch(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_bookings_restore_dates(args: argparse.Namespace) -> None:
+    """Restore modifiedTime on recordings whose date the unmatched mark moved.
+
+    Writing ``booking_match=none`` counted as an edit in Drive and moved every marked
+    recording's date, which broke sorting in the shared folders. This walks the
+    configured folders and puts each marked file's modifiedTime back to its
+    createdTime -- the closest recoverable value, since the original was overwritten.
+    """
+    config = load_config(config_path=args.config, validate_providers=False)
+    service = auth.build_drive_service(config=config)
+    total = 0
+    for folder in config.folders:
+        files = drive.list_mp4_timestamps(service, folder.folder_id)
+        for file_id, name, created in booking_gate.select_stale_marks(files):
+            total += 1
+            if args.dry_run:
+                print(f"would restore\t{file_id}\t{created}\t{name}")
+                continue
+            drive.set_file_modified_time(service, file_id, created)
+            print(f"restored\t{file_id}\t{created}\t{name}")
+    if args.dry_run:
+        print(f"{total} file(s) would be restored; re-run without --dry-run to apply")
+    else:
+        print(f"Restored modifiedTime on {total} file(s)")
+
+
 def cmd_transcribe(args: argparse.Namespace) -> None:
     config = load_config(config_path=args.config)
     audio_path = Path(args.audio)
@@ -924,6 +950,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_bookings_rematch.add_argument("target", help="Drive MP4 file ID")
     p_bookings_rematch.set_defaults(func=cmd_bookings_rematch)
+    p_bookings_restore = bookings_sub.add_parser(
+        "restore-dates",
+        help="Restore modifiedTime on recordings whose date the unmatched mark moved",
+    )
+    p_bookings_restore.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List the files that would be restored without writing anything",
+    )
+    p_bookings_restore.set_defaults(func=cmd_bookings_restore_dates)
 
     p_transcribe = sub.add_parser(
         "transcribe", help="Transcribe a local audio file with the configured provider"

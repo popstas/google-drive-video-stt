@@ -1255,6 +1255,95 @@ def test_bookings_rematch_clears_the_mark(tmp_path, monkeypatch):
     assert cleared == ["v1"]
 
 
+def test_bookings_restore_dates_restores_selected_files(tmp_path, monkeypatch, capsys):
+    config_path = write_cli_config(
+        tmp_path, folders=[{"folder_id": "f1", "email": "a@example.com"}]
+    )
+    service = MagicMock()
+    monkeypatch.setattr(cli.auth, "build_drive_service", lambda **kwargs: service)
+    monkeypatch.setattr(
+        cli.drive,
+        "list_mp4_timestamps",
+        lambda svc, folder_id: [
+            {
+                "id": "v1",
+                "name": "old.mp4",
+                "createdTime": "2025-03-14T18:24:52.949Z",
+                "modifiedTime": "2026-08-11T22:13:27.539Z",
+                "appProperties": {"booking_match": "none"},
+            }
+        ],
+    )
+    restored = []
+    monkeypatch.setattr(
+        cli.drive,
+        "set_file_modified_time",
+        lambda svc, fid, when: restored.append((fid, when)),
+    )
+
+    cli.main(["--config", str(config_path), "bookings", "restore-dates"])
+
+    assert restored == [("v1", "2025-03-14T18:24:52.949Z")]
+    assert "1" in capsys.readouterr().out
+
+
+def test_bookings_restore_dates_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
+    """The whole point of the flag: see the list before touching production files."""
+    config_path = write_cli_config(
+        tmp_path, folders=[{"folder_id": "f1", "email": "a@example.com"}]
+    )
+    service = MagicMock()
+    monkeypatch.setattr(cli.auth, "build_drive_service", lambda **kwargs: service)
+    monkeypatch.setattr(
+        cli.drive,
+        "list_mp4_timestamps",
+        lambda svc, folder_id: [
+            {
+                "id": "v1",
+                "name": "old.mp4",
+                "createdTime": "2025-03-14T18:24:52.949Z",
+                "modifiedTime": "2026-08-11T22:13:27.539Z",
+                "appProperties": {"booking_match": "none"},
+            }
+        ],
+    )
+
+    def fail(*args, **kwargs):
+        raise AssertionError("--dry-run must not write")
+
+    monkeypatch.setattr(cli.drive, "set_file_modified_time", fail)
+
+    cli.main(["--config", str(config_path), "bookings", "restore-dates", "--dry-run"])
+
+    out = capsys.readouterr().out
+    assert "v1" in out
+    assert "dry-run" in out or "would" in out
+
+
+def test_bookings_restore_dates_walks_every_configured_folder(
+    tmp_path, monkeypatch, capsys
+):
+    config_path = write_cli_config(
+        tmp_path,
+        folders=[
+            {"folder_id": "f1", "email": "a@example.com"},
+            {"folder_id": "f2", "email": "b@example.com"},
+        ],
+    )
+    monkeypatch.setattr(cli.auth, "build_drive_service", lambda **kwargs: MagicMock())
+    seen = []
+    monkeypatch.setattr(
+        cli.drive,
+        "list_mp4_timestamps",
+        lambda svc, folder_id: seen.append(folder_id) or [],
+    )
+    monkeypatch.setattr(cli.drive, "set_file_modified_time", lambda *a, **k: None)
+
+    cli.main(["--config", str(config_path), "bookings", "restore-dates"])
+
+    assert seen == ["f1", "f2"]
+
+
 def test_doctor_reports_call_booking_without_leaking_the_token(tmp_path, capsys):
     config_path = write_cli_config(
         tmp_path,

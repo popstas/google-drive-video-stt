@@ -289,8 +289,8 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
 - `load_config` rejects `call_booking.enabled` without an `authorization_token`, and
   `disable_recognition` while any `folders` entry lacks an `email` — that folder
   could never match a booking, so it would never be transcribed again.
-- `bookings list` / `bookings rematch` use `load_config(validate_providers=False)`;
-  `rematch` touches only Drive metadata and spends nothing.
+- `bookings list` / `bookings rematch` / `bookings restore-dates` use
+  `load_config(validate_providers=False)`
 
 ## Skill layering policy
 
