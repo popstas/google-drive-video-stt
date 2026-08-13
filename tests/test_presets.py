@@ -94,9 +94,12 @@ def test_meta_prompt_asset_is_packaged():
 
 def test_load_packaged_prompt_returns_meta_text():
     text = load_packaged_prompt("meta.md")
-    assert "topic:" in text
+    assert "subject:" in text
     assert "tags:" in text
+    assert "referral:" in text
+    assert "referral_note:" in text
     assert "{{allowed_tags}}" in text
+    assert "{{allowed_referrals}}" in text
 
 
 # --- packaged prompt assets -------------------------------------------------

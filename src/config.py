@@ -45,6 +45,9 @@ DEEPGRAM_MAX_KEYTERMS = 100
 # Placeholder a preset prompt may carry to receive the config's ``tags.allowed``
 # list at load time. The built-in ``meta`` prompt uses it; any prompt may.
 ALLOWED_TAGS_PLACEHOLDER = "{{allowed_tags}}"
+# Placeholder a preset prompt may carry to receive the config's ``referrals.allowed``
+# list at load time. The built-in ``meta`` prompt uses it; any prompt may.
+ALLOWED_REFERRALS_PLACEHOLDER = "{{allowed_referrals}}"
 
 
 FOLDER_IDS_MIGRATION_ERROR = (
@@ -112,6 +115,9 @@ class Config:
     # The tag allow-list the ``meta`` preset may pick from. Empty means the preset
     # has nothing to choose between and returns no tags.
     tags_allowed: tuple[str, ...] = ()
+    # The referral channels the ``meta`` preset may pick from. Empty means the preset
+    # is handed no channels and must return an empty referral.
+    referrals_allowed: tuple[str, ...] = ()
     # Completion-webhook target. A blank URL disables the webhook; the token, when
     # set, is sent as ``Authorization: Bearer <token>``. See ``webhook`` in the
     # generated config.yml.
@@ -282,22 +288,47 @@ def _render_allowed_tags(tags_allowed: tuple[str, ...]) -> str:
     return "\n".join(f"- {tag}" for tag in tags_allowed)
 
 
-def _render_prompt_placeholders(text: str, tags_allowed: tuple[str, ...]) -> str:
+def _parse_referrals_allowed(raw: object) -> tuple[str, ...]:
+    """Parse the ``referrals.allowed`` list into a tuple of non-empty channel names."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"referrals.allowed must be a list of channels, got: {raw!r}")
+    return tuple(name for name in (_yaml_str(entry) for entry in raw) if name)
+
+
+def _render_allowed_referrals(referrals_allowed: tuple[str, ...]) -> str:
+    """Render ``referrals.allowed`` as the bullet list that replaces the placeholder."""
+    if not referrals_allowed:
+        return "(none configured — return an empty referral)"
+    return "\n".join(f"- {name}" for name in referrals_allowed)
+
+
+def _render_prompt_placeholders(
+    text: str,
+    tags_allowed: tuple[str, ...],
+    referrals_allowed: tuple[str, ...] = (),
+) -> str:
     """Substitute the supported ``{{...}}`` placeholders in a resolved prompt.
 
-    Today that is only ``{{allowed_tags}}`` (the ``meta`` preset's tag allow-list).
-    A prompt without the placeholder is returned unchanged, so this is safe to run
-    over every preset's text.
+    Today those are ``{{allowed_tags}}`` and ``{{allowed_referrals}}`` (both the
+    ``meta`` preset's). A prompt without them is returned unchanged, so this is safe to
+    run over every preset's text.
     """
-    if ALLOWED_TAGS_PLACEHOLDER not in text:
-        return text
-    return text.replace(ALLOWED_TAGS_PLACEHOLDER, _render_allowed_tags(tags_allowed))
+    if ALLOWED_TAGS_PLACEHOLDER in text:
+        text = text.replace(ALLOWED_TAGS_PLACEHOLDER, _render_allowed_tags(tags_allowed))
+    if ALLOWED_REFERRALS_PLACEHOLDER in text:
+        text = text.replace(
+            ALLOWED_REFERRALS_PLACEHOLDER, _render_allowed_referrals(referrals_allowed)
+        )
+    return text
 
 
 def _resolve_prompt_text(
     preset: Preset,
     config_file: Path | None,
     tags_allowed: tuple[str, ...] = (),
+    referrals_allowed: tuple[str, ...] = (),
 ) -> str:
     """Resolve a preset's final prompt text from instructions or prompt_file.
 
@@ -308,11 +339,14 @@ def _resolve_prompt_text(
     that resolves but is missing/unreadable/empty raises ``ValueError``; a preset
     with neither instructions nor prompt_file also raises.
 
-    The resolved text has its ``{{...}}`` placeholders rendered from ``tags_allowed``
-    before it is returned, so the pipeline never sees an unrendered prompt.
+    The resolved text has its ``{{...}}`` placeholders rendered from ``tags_allowed``/
+    ``referrals_allowed`` before it is returned, so the pipeline never sees an
+    unrendered prompt.
     """
     if preset.instructions.strip():
-        return _render_prompt_placeholders(preset.instructions, tags_allowed)
+        return _render_prompt_placeholders(
+            preset.instructions, tags_allowed, referrals_allowed
+        )
     if not preset.prompt_file:
         raise ValueError(
             f"preset {preset.name!r} must define instructions or prompt_file"
@@ -329,7 +363,7 @@ def _resolve_prompt_text(
                     f"preset {preset.name!r} prompt_file {preset.prompt_file!r} "
                     f"is empty: {candidate}"
                 )
-            return _render_prompt_placeholders(text, tags_allowed)
+            return _render_prompt_placeholders(text, tags_allowed, referrals_allowed)
 
     try:
         text = load_packaged_prompt(os.path.basename(preset.prompt_file))
@@ -338,20 +372,23 @@ def _resolve_prompt_text(
             f"preset {preset.name!r} prompt_file {preset.prompt_file!r} "
             f"could not be resolved: {exc}"
         ) from exc
-    return _render_prompt_placeholders(text, tags_allowed)
+    return _render_prompt_placeholders(text, tags_allowed, referrals_allowed)
 
 
 def _resolve_presets(
     config_presets: dict | None,
     config_file: Path | None = None,
     tags_allowed: tuple[str, ...] = (),
+    referrals_allowed: tuple[str, ...] = (),
 ) -> tuple[Preset, ...]:
     """Merge config presets over built-ins, resolve prompts, validate, and freeze."""
     merged = merge_presets(BUILTIN_PRESETS, config_presets)
     resolved = {
         name: replace(
             preset,
-            instructions=_resolve_prompt_text(preset, config_file, tags_allowed),
+            instructions=_resolve_prompt_text(
+                preset, config_file, tags_allowed, referrals_allowed
+            ),
         )
         for name, preset in merged.items()
     }
@@ -671,6 +708,7 @@ def _config_from_yaml(
     notifications = _as_mapping(raw.get("notifications"), "notifications")
     telegram = _as_mapping(notifications.get("telegram"), "notifications.telegram")
     tags = _as_mapping(raw.get("tags"), "tags")
+    referrals = _as_mapping(raw.get("referrals"), "referrals")
     webhook = _as_mapping(raw.get("webhook"), "webhook")
     call_booking = _as_mapping(raw.get("call_booking"), "call_booking")
     planfix = _as_mapping(raw.get("planfix"), "planfix")
@@ -682,6 +720,7 @@ def _config_from_yaml(
     telegram_chat_id = _yaml_str(telegram.get("chat_id"))
 
     tags_allowed = _parse_tags_allowed(tags.get("allowed"))
+    referrals_allowed = _parse_referrals_allowed(referrals.get("allowed"))
 
     webhook_url = _yaml_str(webhook.get("url"))
     webhook_token = _yaml_str(webhook.get("token"))
@@ -761,7 +800,7 @@ def _config_from_yaml(
     openai_batch = _yaml_bool(openai.get("batch"), default=False)
     openai_batch_wait = _yaml_bool(openai.get("batch_wait"), default=True)
     openai_max_parallel = _parse_max_parallel(openai.get("max_parallel"), default=4)
-    presets = _resolve_presets(config_presets, config_file, tags_allowed)
+    presets = _resolve_presets(config_presets, config_file, tags_allowed, referrals_allowed)
 
     deepgram_api_key = ""
     deepgram_model = _yaml_str(deepgram.get("model"), "nova-3") or "nova-3"
@@ -882,6 +921,7 @@ def _config_from_yaml(
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
         tags_allowed=tags_allowed,
+        referrals_allowed=referrals_allowed,
         webhook_url=webhook_url,
         webhook_token=webhook_token,
         call_booking_enabled=call_booking_enabled,
@@ -1228,6 +1268,7 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
         # The tag allow-list is operator-owned data with no other home: omitting it
         # here would drop it from the file on any whole-Config rewrite.
         "tags": {"allowed": list(config.tags_allowed)},
+        "referrals": {"allowed": list(config.referrals_allowed)},
         "webhook": {"url": config.webhook_url, "token": config.webhook_token},
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so

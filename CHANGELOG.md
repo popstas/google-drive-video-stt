@@ -14,6 +14,7 @@
 
 ### Documentation
 
+- Add the implementation plan for the .stt artifact and meta document
 - Add spec for the .stt artifact and the meta document
 
 ## v0.5.1 - 2026-08-13

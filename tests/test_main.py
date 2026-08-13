@@ -49,6 +49,7 @@ def make_config(
     openai_keypoints=False,
     presets=None,
     tags_allowed=(),
+    referrals_allowed=(),
     webhook_url="",
     webhook_token="",
     proxy_url="",
@@ -76,6 +77,7 @@ def make_config(
         deepgram_audio_source=deepgram_audio_source,
         drive_mp3_artifact=drive_mp3_artifact,
         tags_allowed=tuple(tags_allowed),
+        referrals_allowed=tuple(referrals_allowed),
         webhook_url=webhook_url,
         webhook_token=webhook_token,
         presets=tuple(presets),
@@ -2534,8 +2536,10 @@ def test_process_item_telemetry_carries_artifacts_on_preset_refeed(mocker, tmp_p
 
 _META_ARTIFACT = (
     "---\n"
-    "topic: Консультация по визе O-1\n"
+    "subject: Консультация по визе O-1\n"
     "tags: [O-1, клиентская-консультация, invented-tag]\n"
+    "referral: рекомендация\n"
+    "referral_note: Посоветовала знакомая\n"
     "---\n"
 )
 
@@ -2552,7 +2556,7 @@ def _webhook_config(**overrides):
         ),
         Preset(
             name="meta",
-            instructions="topic and tags",
+            instructions="subject, tags, and referral",
             artifact_suffix=".meta.md",
             depends_on=("transcript-cleanup",),
         ),
@@ -2569,6 +2573,7 @@ def _webhook_config(**overrides):
             EmployeeFolder("folderX", name="Олег Иванов", email="oleg@expertizeme.org")
         ],
         tags_allowed=("O-1", "клиентская-консультация"),
+        referrals_allowed=("рекомендация",),
         webhook_url="https://example.com/hooks/gdstt",
         webhook_token="secret",
     )
@@ -2615,8 +2620,10 @@ def test_webhook_fired_once_with_employee_and_artifacts(mocker, tmp_path):
             # `meta` is parsed into structured fields; `invented-tag` is outside the
             # configured allow-list and must not reach the receiver.
             "meta": {
-                "topic": "Консультация по визе O-1",
+                "subject": "Консультация по визе O-1",
                 "tags": ["O-1", "клиентская-консультация"],
+                "referral": "рекомендация",
+                "referral_note": "Посоветовала знакомая",
             },
         },
     }
@@ -2658,7 +2665,12 @@ def test_webhook_malformed_meta_degrades_to_empty_fields(mocker, tmp_path):
     )
 
     artifacts = notify.call_args.kwargs["payload"]["artifacts"]
-    assert artifacts["meta"] == {"topic": "", "tags": []}
+    assert artifacts["meta"] == {
+        "subject": "",
+        "tags": [],
+        "referral": "",
+        "referral_note": "",
+    }
 
 
 def test_webhook_not_fired_when_file_skipped(mocker, tmp_path):

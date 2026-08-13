@@ -10,7 +10,9 @@ PAYLOAD = {
     "file": {"id": "1a2b", "name": "call.mp4", "folder_id": "f1"},
     "employee": {"name": "Олег Иванов", "email": "oleg@expertizeme.org"},
     "transcript": "Ольга: привет",
-    "artifacts": {"meta": {"topic": "O-1", "tags": ["O-1"]}},
+    "artifacts": {
+        "meta": {"subject": "O-1", "tags": ["O-1"], "referral": "", "referral_note": ""}
+    },
 }
 
 

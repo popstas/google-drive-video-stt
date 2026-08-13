@@ -2438,3 +2438,30 @@ def test_output_also_drive_is_rejected_with_target_drive(tmp_path):
     """target=drive already writes to Drive; the combination would only confuse."""
     with pytest.raises(ValueError, match="only applies when output.target=folder"):
         _load_config(tmp_path, {"output": {"target": "drive", "also_drive": True}})
+
+
+# --- referrals.allowed --------------------------------------------------------
+
+
+def test_referrals_allowed_is_parsed(tmp_path):
+    config = _load_config(tmp_path, {"referrals": {"allowed": ["рекомендация", "instagram"]}})
+    assert config.referrals_allowed == ("рекомендация", "instagram")
+
+
+def test_referrals_allowed_renders_into_the_meta_prompt(tmp_path):
+    config = _load_config(
+        tmp_path,
+        {
+            "openai": {"api_key": "k"},
+            "referrals": {"allowed": ["instagram"]},
+            "presets": {"meta": {"enabled": True}},
+        },
+    )
+    meta_preset = next(p for p in config.presets if p.name == "meta")
+    assert "{{allowed_referrals}}" not in meta_preset.instructions
+    assert "- instagram" in meta_preset.instructions
+
+
+def test_referrals_allowed_must_be_a_list(tmp_path):
+    with pytest.raises(ValueError, match="referrals.allowed"):
+        _load_config(tmp_path, {"referrals": {"allowed": "instagram"}})

@@ -1,9 +1,9 @@
-"""Parse the ``meta`` preset's artifact into a topic plus allow-listed tags.
+"""Parse the ``meta`` preset's artifact into a subject plus allow-listed fields.
 
-The ``meta`` preset answers with a YAML frontmatter block (``topic:`` and
-``tags:``) so the completion webhook can forward structured fields instead of raw
-prose. The reply comes from an LLM, so every failure mode here degrades to
-``Meta(topic="", tags=())`` rather than raising: a garbled block must never fail a
+The ``meta`` preset answers with a YAML frontmatter block (``subject:``, ``tags:``,
+``referral:``, ``referral_note:``) so the completion webhook can forward structured
+fields instead of raw prose. The reply comes from an LLM, so every failure mode here
+degrades to an empty ``Meta()`` rather than raising: a garbled block must never fail a
 file that already transcribed and wrote its artifacts.
 """
 
@@ -35,13 +35,6 @@ _FENCE_RE = re.compile(
     re.DOTALL,
 )
 
-
-# The `topic:` line, when the model gave it a plain unquoted value.
-_TOPIC_LINE_RE = re.compile(
-    r"^(?P<indent>[ \t]*)topic:[ \t]*(?P<value>\S.*?)[ \t]*$",
-    re.MULTILINE,
-)
-
 # Value openers we must not second-guess: a quoted scalar is already well-formed,
 # and `|`/`>`/`&`/`*`/`!` are YAML indicators whose meaning quoting would destroy.
 _YAML_VALUE_INDICATORS = "\"'|>&*!"
@@ -51,37 +44,56 @@ _YAML_VALUE_INDICATORS = "\"'|>&*!"
 class Meta:
     """The ``meta`` preset's structured output."""
 
-    topic: str = ""
+    subject: str = ""
     tags: tuple[str, ...] = ()
+    referral: str = ""
+    referral_note: str = ""
 
 
-def _requote_topic(body: str) -> str | None:
-    """Re-quote an unquoted ``topic:`` value so a colon inside it can't break the doc.
+# The prose fields a model routinely writes unquoted, and routinely writes a colon
+# into. YAML then reads the line as a nested mapping and rejects the whole document,
+# taking the fields that parsed fine down with it.
+_REQUOTABLE_FIELDS = ("subject", "referral_note")
 
-    ``topic`` is one sentence of prose in the transcript's own language, so it carries
-    a colon routinely — and the prompt's "quote it if it contains a colon" rule is a
-    request a model is free to ignore. YAML then reads the line as a nested mapping and
-    rejects the whole document, taking ``tags`` down with it even though ``tags`` parsed
-    fine on its own line. Returns ``None`` when there is nothing safe to repair.
-    """
-    match = _TOPIC_LINE_RE.search(body)
+
+def _field_line_re(field: str) -> re.Pattern[str]:
+    return re.compile(
+        rf"^(?P<indent>[ \t]*){field}:[ \t]*(?P<value>\S.*?)[ \t]*$",
+        re.MULTILINE,
+    )
+
+
+def _requote_field(body: str, field: str) -> str | None:
+    """Re-quote one unquoted scalar so a colon inside it can't break the document."""
+    match = _field_line_re(field).search(body)
     if match is None:
         return None
     value = match.group("value")
     if value[0] in _YAML_VALUE_INDICATORS or ":" not in value:
         return None
-    # A JSON string is also a valid YAML double-quoted scalar, escaping included.
     quoted = json.dumps(value, ensure_ascii=False)
-    repaired = f"{match.group('indent')}topic: {quoted}"
+    repaired = f"{match.group('indent')}{field}: {quoted}"
     return body[: match.start()] + repaired + body[match.end() :]
+
+
+def _requote_prose(body: str) -> str | None:
+    """Apply ``_requote_field`` to every repairable field; None when nothing changed."""
+    repaired = body
+    changed = False
+    for field in _REQUOTABLE_FIELDS:
+        candidate = _requote_field(repaired, field)
+        if candidate is not None:
+            repaired = candidate
+            changed = True
+    return repaired if changed else None
 
 
 def _parse_frontmatter(text: str) -> dict | None:
     fence = _FENCE_RE.match(text or "")
     unfenced = fence.group("inner") if fence else (text or "")
     match = _FRONTMATTER_RE.search(unfenced)
-    # A model that answered with the bare `topic:`/`tags:` mapping and no `---`
-    # delimiters still carries both fields, so load the whole document rather than
+    # A model that answered with the bare `subject:`/`tags:` mapping and no `---`
+    # delimiters still carries the fields, so load the whole document rather than
     # discard them. Prose parses to a non-mapping and is rejected just below.
     body = match.group("body") if match else unfenced
     try:
@@ -89,7 +101,7 @@ def _parse_frontmatter(text: str) -> dict | None:
     except yaml.YAMLError as exc:
         # Only a document that already failed gets repaired, so a well-formed reply
         # keeps parsing exactly as written.
-        repaired = _requote_topic(body)
+        repaired = _requote_prose(body)
         if repaired is None:
             logger.warning("meta artifact is not valid YAML: %s", type(exc).__name__)
             return None
@@ -133,17 +145,46 @@ def _parse_tags(raw: object, allowed: Iterable[str]) -> tuple[str, ...]:
     return tuple(tags)
 
 
-def parse_meta(text: str, allowed: Iterable[str]) -> Meta:
-    """Read ``topic``/``tags`` from a ``meta`` artifact's YAML frontmatter.
+def _parse_referral(raw: object, allowed: Iterable[str]) -> str:
+    """Return the referral channel when it is on the allow-list, else an empty string.
 
-    ``allowed`` is the configured tag allow-list; tags outside it are dropped, and an
-    empty allow-list drops all of them. A missing or malformed block yields
-    ``Meta(topic="", tags=())``.
+    An empty ``allowed`` rejects everything: a config with no ``referrals.allowed``
+    gave the model nothing to pick from, so any channel it returned is invented.
+    """
+    if raw is None:
+        return ""
+    channel = str(raw).strip()
+    if not channel:
+        return ""
+    if channel not in {str(entry).strip() for entry in allowed}:
+        logger.debug("dropping meta referral outside the allow-list: %r", channel)
+        return ""
+    return channel
+
+
+def parse_meta(
+    text: str, allowed: Iterable[str], referrals_allowed: Iterable[str] = ()
+) -> Meta:
+    """Read the ``meta`` artifact's YAML frontmatter into structured fields.
+
+    ``allowed``/``referrals_allowed`` are the configured allow-lists; values outside
+    them are dropped, and an empty allow-list drops all of them. A missing or malformed
+    block yields an empty ``Meta``.
     """
     parsed = _parse_frontmatter(text)
     if parsed is None:
         return Meta()
 
-    topic_raw = parsed.get("topic")
-    topic = "" if topic_raw is None else str(topic_raw).strip()
-    return Meta(topic=topic, tags=_parse_tags(parsed.get("tags"), allowed))
+    subject_raw = parsed.get("subject")
+    subject = "" if subject_raw is None else str(subject_raw).strip()
+    referral = _parse_referral(parsed.get("referral"), referrals_allowed)
+    note_raw = parsed.get("referral_note")
+    note = "" if note_raw is None else str(note_raw).strip()
+    return Meta(
+        subject=subject,
+        tags=_parse_tags(parsed.get("tags"), allowed),
+        referral=referral,
+        # A note without a surviving channel describes a source we rejected; keeping
+        # it would smuggle an off-list channel back in as prose.
+        referral_note=note if referral else "",
+    )

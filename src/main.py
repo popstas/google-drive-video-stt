@@ -551,15 +551,23 @@ def _webhook_payload(
 
     Non-``meta`` presets pass through as raw text keyed by preset name, so adding a
     preset to config.yml extends the payload with no code change. ``meta`` is parsed
-    into ``{topic, tags}`` (tags filtered to the configured allow-list). An unknown
-    employee sends empty strings rather than omitting the key.
+    into ``{subject, tags, referral, referral_note}`` (tags and referral filtered to
+    the configured allow-lists). An unknown employee sends empty strings rather than
+    omitting the key.
     """
     employee = config.folder_by_id(folder_id)
     payload_artifacts: dict[str, object] = dict(artifacts)
     meta_text = artifacts.get("meta")
     if meta_text is not None:
-        parsed = meta_module.parse_meta(meta_text, config.tags_allowed)
-        payload_artifacts["meta"] = {"topic": parsed.topic, "tags": list(parsed.tags)}
+        parsed = meta_module.parse_meta(
+            meta_text, config.tags_allowed, config.referrals_allowed
+        )
+        payload_artifacts["meta"] = {
+            "subject": parsed.subject,
+            "tags": list(parsed.tags),
+            "referral": parsed.referral,
+            "referral_note": parsed.referral_note,
+        }
 
     return {
         "file": {"id": file_id, "name": file_name, "folder_id": folder_id},

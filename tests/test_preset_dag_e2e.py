@@ -120,8 +120,8 @@ def test_preset_dag_end_to_end_writes_each_artifact(tmp_path, monkeypatch):
     assert len(managers) == 1, f"expected expertizeme-managers artifact, got {managers}"
     assert len(meta_files) == 1, f"expected meta artifact, got {meta_files}"
 
-    # The meta artifact must parse back into a topic, and any tags it carries must
+    # The meta artifact must parse back into a subject, and any tags it carries must
     # come from the configured allow-list.
     parsed = parse_meta(meta_files[0].read_text(encoding="utf-8"), allowed=_E2E_ALLOWED_TAGS)
-    assert parsed.topic, "meta artifact carried no topic"
+    assert parsed.subject, "meta artifact carried no subject"
     assert set(parsed.tags) <= set(_E2E_ALLOWED_TAGS)
