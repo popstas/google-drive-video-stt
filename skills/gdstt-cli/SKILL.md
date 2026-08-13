@@ -2,8 +2,8 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.8.0
-last_updated: 2026-08-12
+version: 2.9.0
+last_updated: 2026-08-13
 ---
 
 # gdstt CLI
@@ -159,10 +159,9 @@ STT-провайдера и DAG пресетов с номерами стади�
 Подкоманды `config`:
 
 - `config init [--data-dir DIR] [--output-dir DIR] [--prompt-dir DIR] [--force]` -
-  свежий полный конфиг: цепочка
-  `transcript-cleanup -> keypoints + action-items + meta`, `openai.batch: true`,
-  промпты и `deepgram-keyterms-example.txt` рядом под `<GDSTT_HOME>`.
-  `--output-dir` -> folder; `--prompt-dir` -> промпты туда.
+  свежий полный конфиг: цепочка `transcript-cleanup -> keypoints + meta`,
+  `openai.batch: true`, промпты и `deepgram-keyterms-example.txt` рядом под
+  `<GDSTT_HOME>`. `--output-dir` -> folder; `--prompt-dir` -> промпты туда.
 - `config path` - путь к активному конфигу без валидации секретов.
 - `config get [KEY] [--show-secrets]` / `config set KEY VALUE` / `config unset KEY` -
   прочитать (секреты замаскированы, `--show-secrets` их раскрывает), записать+провалидировать или удалить точечный ключ.
@@ -266,17 +265,11 @@ STT-провайдера и DAG пресетов с номерами стади�
 образуют DAG (`depends_on`) - каждый пресет это один проход OpenAI со своими
 инструкциями, пишет свой соседний артефакт `<base><artifact_suffix>` (по
 умолчанию `.<имя>.md`, метка `artifact_type=<имя>`); независимые пресеты идут
-параллельно. Конфиг-пресеты переопределяют встроенные по полям, добавляют новые и
-отключают встроенный через `enabled: false`. Дефолтная цепочка
-`transcript-cleanup -> keypoints + action-items + meta` работает из коробки.
-Идемпотентность - по
-пресетам: повторный прогон делает только недостающие артефакты.
+параллельно. Конфиг-пресеты переопределяют встроенные по полям, добавляют новые и отключают встроенный через `enabled: false`. Дефолтная цепочка `transcript-cleanup -> keypoints + meta` работает из коробки; третий пакетный пресет, `action-items`, по умолчанию отключён (дублирует `## Задачи` из keypoints) - промпт остаётся в пакете, включить снова = правка `presets:`, без кода. Идемпотентность - по пресетам: повторный прогон делает только недостающие артефакты.
 
-Второй встроенный пресет - `meta`: пишет `<base>.meta.md` из одного YAML-frontmatter
-блока - `topic:` (одно предложение, о чём разговор) и `tags:` **только** из
-`tags.allowed` в `config.yml` (идёт в промпт через `{{allowed_tags}}`; пустой список -
-пустые теги). Выдуманные теги отсекаются на разборе, битый frontmatter даёт пустой
-`topic` и не роняет файл. Словарь тегов меняется правкой `tags.allowed`, без кода.
+Второй встроенный пресет - `meta`: пишет `<base>.meta.md` из YAML-frontmatter - `subject:` (одно предложение), `tags:` **только** из `tags.allowed` (`{{allowed_tags}}`), `referral:`/`referral_note:` **только** из `referrals.allowed` (`{{allowed_referrals}}`; заполняется, только если клиент сам назвал источник, иначе пусто). Выдумки отсекаются на разборе; битый frontmatter даёт все четыре поля пустыми и не роняет файл. Словари меняются правкой `tags.allowed`/`referrals.allowed`, без кода.
+
+Каждая запись также получает локальный `<base>.meta.yml` (никогда не в Drive) - эти четыре поля плюс уже известные факты (менеджер, клиент, дата, Planfix task id, модели) - и `<base>.stt` (keypoints + мета-блок + транскрипт), единственный артефакт, публикуемый в Drive при `output.also_drive: true` (секции - из `output.stt_presets`).
 
 **Откуда берётся промпт пресета (приоритет).** `instructions` (inline в YAML) >
 `prompt_file` (`.md`: как есть -> относительно папки конфига -> упакованный ассет
@@ -293,7 +286,7 @@ STT-провайдера и DAG пресетов с номерами стади�
 presets:
   transcript-cleanup: { prompt_file: prompts/transcript-cleanup.md }
   keypoints: { depends_on: [transcript-cleanup] }   # переопределяет встроенный
-  action-items: { depends_on: [transcript-cleanup], prompt_file: prompts/action-items.md }
+  meta: { depends_on: [transcript-cleanup] }        # переопределяет встроенный
 ```
 
 **Конфликты (валидация на загрузке).** Дубль-ключи в YAML (в т.ч. два пресета под
@@ -387,7 +380,7 @@ The polling loop skips a recording when `call_booking.disable_recognition` is on
   ключом падает на загрузке с подсказкой про `folders`; чинится только в `config.yml`.
 - `webhook.url` (+ опциональный `webhook.token` -> `Authorization: Bearer`) шлёт POST
   раз на файл и только при успехе: `{file, employee, transcript, artifacts}`, где
-  `artifacts` - тексты пресетов по именам, а `meta` разобран в `{topic, tags}`.
+  `artifacts` - тексты пресетов по именам, а `meta` разобран в `{subject, tags, referral, referral_note}`.
   Доставка fire-and-forget: сбой логируется (только тип исключения), файл всё равно
   обработан, ретраев нет. В payload есть PII (email и полный транскрипт) - эндпоинт
   должен быть HTTPS и с токеном.

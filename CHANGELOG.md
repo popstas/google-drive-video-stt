@@ -16,6 +16,7 @@
 
 ### Bug Fixes
 
+- Use source_name as the Planfix video_url anchor, normalise multi-line meta values, and cover the meta_document wiring
 - Keep the .stt out of the transcript lookup and stop it duplicating on reprocess
 - Leave meta client empty when the recording name has no manager marker
 - Decide which speaker is which person instead of guessing from turn order

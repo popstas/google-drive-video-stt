@@ -456,6 +456,25 @@ def test_default_config_dict_seeds_empty_webhook_block():
     assert _default_config_dict()["webhook"] == {"url": "", "token": ""}
 
 
+def test_default_chain_keeps_meta_and_drops_action_items():
+    presets = _default_config_dict()["presets"]
+    assert presets["meta"]["enabled"] is True
+    assert presets["meta"]["depends_on"] == ["transcript-cleanup"]
+    assert "action-items" not in presets
+
+
+def test_default_config_seeds_the_referral_allow_list():
+    assert "рекомендация" in _default_config_dict()["referrals"]["allowed"]
+
+
+def test_default_config_writes_the_new_output_and_planfix_keys():
+    data = _default_config_dict()
+    assert data["output"]["stt_presets"] == ["keypoints"]
+    assert data["planfix"]["meta_fields"] == [
+        "subject", "tags", "referral", "referral_note", "duration", "video_url",
+    ]
+
+
 # --- {{allowed_tags}} prompt rendering ---------------------------------------
 
 
@@ -1545,20 +1564,19 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     assert data["presets"]["keypoints"]["prompt_file"] == "prompts/keypoints.md"
     # The full default chain is enabled out of the box, with transcript-cleanup
     # written above keypoints and every downstream preset depending on it.
+    # `action-items` is retired from the generated chain (its output duplicates
+    # `keypoints`' `## Задачи` section); its prompt asset still ships (see below).
     assert list(data["presets"]) == [
         "transcript-cleanup",
         "keypoints",
-        "action-items",
         "meta",
     ]
     assert [name for name, p in data["presets"].items() if p["enabled"]] == [
         "transcript-cleanup",
         "keypoints",
-        "action-items",
         "meta",
     ]
     assert data["presets"]["keypoints"]["depends_on"] == ["transcript-cleanup"]
-    assert data["presets"]["action-items"]["depends_on"] == ["transcript-cleanup"]
     assert data["presets"]["meta"]["depends_on"] == ["transcript-cleanup"]
     assert data["presets"]["meta"]["prompt_file"] == "prompts/meta.md"
     # Batch and the run flag are on by default in a generated config.
@@ -1566,7 +1584,9 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     assert data["run"]["enabled"] is True
     # An empty tag allow-list is seeded so the operator has the block to fill in.
     assert data["tags"] == {"allowed": []}
-    # The packaged prompt assets are copied beside the config.
+    # The packaged prompt assets are copied beside the config, including
+    # action-items.md: the preset is retired, not deleted, so re-enabling it is a
+    # config edit, not a code change.
     assert (tmp_path / "prompts" / "keypoints.md").is_file()
     assert (tmp_path / "prompts" / "transcript-cleanup.md").is_file()
     assert (tmp_path / "prompts" / "action-items.md").is_file()
@@ -1578,7 +1598,6 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     assert {p.name for p in cfg.presets} == {
         "transcript-cleanup",
         "keypoints",
-        "action-items",
         "meta",
     }
 
@@ -2432,6 +2451,9 @@ def test_generated_config_ships_the_new_sections(tmp_path):
         "create_comment_url": "",
         "token": "",
         "presets": ["keypoints"],
+        "meta_fields": [
+            "subject", "tags", "referral", "referral_note", "duration", "video_url",
+        ],
     }
 
 

@@ -1084,12 +1084,16 @@ def _default_config_dict(
     """Build a full default ``config.yml`` mapping for ``config init``/``link``.
 
     The default preset chain is
-    ``transcript-cleanup -> keypoints + action-items + meta`` with all four presets
+    ``transcript-cleanup -> keypoints + meta`` with all three presets
     enabled; every prompt_file uses ``/``-style relative
     paths so the generated YAML is portable. ``prompt_dir`` (when given) is a
     ``/``-joined path the prompts were copied to and that the prompt_file entries
     point at; otherwise the default ``prompts/<name>.md`` layout is used.
-    ``data_dir``/``output_*`` override the matching fields.
+    ``data_dir``/``output_*`` override the matching fields. ``action-items`` is
+    retired: its output duplicates ``keypoints``' ``## Задачи`` section, so it is
+    left out of the generated chain. Its prompt asset stays packaged; re-enabling
+    it is a config edit (add an ``action-items`` entry under ``presets``), not a
+    code change.
     """
     def prompt_path(name: str) -> str:
         if prompt_dir:
@@ -1097,8 +1101,8 @@ def _default_config_dict(
         return _default_prompt_file(name)
 
     # Default chain (all enabled out of the box): transcript-cleanup runs first and
-    # keypoints, action-items, and meta all depend on it. Order matters in the
-    # generated YAML, so transcript-cleanup is written above its dependents.
+    # keypoints and meta both depend on it. Order matters in the generated YAML, so
+    # transcript-cleanup is written above its dependents.
     presets: dict[str, dict] = {
         "transcript-cleanup": {
             "enabled": True,
@@ -1108,11 +1112,6 @@ def _default_config_dict(
             "enabled": True,
             "depends_on": ["transcript-cleanup"],
             "prompt_file": prompt_path("keypoints"),
-        },
-        "action-items": {
-            "enabled": True,
-            "depends_on": ["transcript-cleanup"],
-            "prompt_file": prompt_path("action-items"),
         },
         "meta": {
             "enabled": True,
@@ -1130,6 +1129,7 @@ def _default_config_dict(
         "output": {
             "target": (output_target or "drive"),
             "dir": output_dir,
+            "stt_presets": ["keypoints"],
         },
         "stt": {
             "provider": "deepgram",
@@ -1160,6 +1160,21 @@ def _default_config_dict(
         },
         # Seeded empty: the `meta` preset picks tags only from this list.
         "tags": {"allowed": []},
+        # Seeded from how clients actually answer in existing transcripts (see the
+        # design spec); the `meta` preset picks `referral` only from this list.
+        "referrals": {
+            "allowed": [
+                "рекомендация",
+                "instagram",
+                "telegram",
+                "youtube",
+                "linkedin",
+                "поиск-google",
+                "реклама",
+                "сми-публикация",
+                "вебинар-мероприятие",
+            ]
+        },
         # Seeded empty: a blank url disables the completion webhook.
         "webhook": {"url": "", "token": ""},
         # Seeded disabled: enabling this opens a listening port, so it must be an
@@ -1177,6 +1192,9 @@ def _default_config_dict(
             "create_comment_url": "",
             "token": "",
             "presets": ["keypoints"],
+            "meta_fields": [
+                "subject", "tags", "referral", "referral_note", "duration", "video_url",
+            ],
         },
         # Google auth is inline-first and config-owned. The generated config ships an
         # empty block (no *_file pointers) so the data_dir fallback applies until the
@@ -1431,7 +1449,7 @@ def init_config(
     the runtime reads: an explicit ``config_path`` wins; otherwise the active
     config is ``<GDSTT_HOME>/config.yml`` when ``GDSTT_HOME`` is set, falling back
     to ``./data/config.yml`` when it is unset. The default preset chain is
-    ``transcript-cleanup -> keypoints + action-items + meta`` with all four presets
+    ``transcript-cleanup -> keypoints + meta`` with all three presets
     enabled. Prompt assets are always copied beside the config: into
     ``prompt_dir`` when given (and the ``prompt_file`` entries point there), else
     into ``<config_dir>/prompts/``.
