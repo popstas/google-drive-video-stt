@@ -1,6 +1,12 @@
 # Changelog
 
 
+## v0.5.1 - 2026-08-13
+
+### Bug Fixes
+
+- Make scripts/release.sh survive its own changelog hook (#17)
+
 ## v0.5.0 - 2026-08-13
 
 ### Bug Fixes
