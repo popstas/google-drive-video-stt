@@ -41,9 +41,36 @@ def write_artifact(
       and uploads it as a sibling in ``folder_id``. When ``existing_id`` is
       given, the existing Drive file's content is overwritten in place (no
       duplicate is created), which keeps the artifact correct across renames.
+
+    ``output.also_drive`` adds the Drive sibling to folder mode without giving up
+    the local copy. It is a separate flag rather than a target because the local
+    file is what marks a recording as processed; switching the target instead
+    would make the whole backlog look unprocessed and re-transcribe it.
     """
     if config.output_target == "folder":
         _write_to_folder(base_name, suffix, text, config)
+        if not config.output_also_drive:
+            return
+        # The local copy already succeeded, so a Drive outage must not fail the run
+        # and cost the recording its transcript.
+        try:
+            _write_to_drive(
+                service,
+                base_name=base_name,
+                suffix=suffix,
+                text=text,
+                folder_id=folder_id,
+                tmp_dir=tmp_dir,
+                existing_id=existing_id,
+                app_properties=app_properties,
+                mime_type=mime_type,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Kept the local %s but could not publish it to Drive: %s",
+                base_name + suffix,
+                type(exc).__name__,
+            )
         return
     _write_to_drive(
         service,

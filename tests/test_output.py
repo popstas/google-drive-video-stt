@@ -7,7 +7,7 @@ from src import drive, output
 from src.config import Config
 
 
-def make_config(output_target="drive", output_dir=None) -> Config:
+def make_config(output_target="drive", output_dir=None, output_also_drive=False) -> Config:
     return Config(
         folders=["folderA"],
         poll_interval=600,
@@ -20,7 +20,66 @@ def make_config(output_target="drive", output_dir=None) -> Config:
         stt_language="ru",
         output_target=output_target,
         output_dir=output_dir,
+        output_also_drive=output_also_drive,
     )
+
+
+def test_folder_mode_also_drive_writes_both_copies(mocker, tmp_path):
+    """The local file stays authoritative; Drive gets a published copy alongside it."""
+    service = MagicMock()
+    upload_mock = mocker.patch("src.output.drive.upload")
+    out_dir = tmp_path / "results"
+
+    output.write_artifact(
+        service,
+        base_name="Alice and Bob - 2026/08/13",
+        suffix=".txt",
+        text="привет",
+        folder_id="folderA",
+        config=make_config("folder", out_dir, output_also_drive=True),
+        tmp_dir=tmp_path,
+    )
+
+    local = out_dir / (drive.safe_local_name("Alice and Bob - 2026/08/13") + ".txt")
+    assert local.read_text(encoding="utf-8") == "привет"
+    assert upload_mock.call_count == 1
+    assert upload_mock.call_args.kwargs["name"] == "Alice and Bob - 2026/08/13.txt"
+
+
+def test_folder_mode_without_also_drive_never_touches_drive(mocker, tmp_path):
+    service = MagicMock()
+    upload_mock = mocker.patch("src.output.drive.upload")
+
+    output.write_artifact(
+        service,
+        base_name="Alice",
+        suffix=".txt",
+        text="привет",
+        folder_id="folderA",
+        config=make_config("folder", tmp_path / "results"),
+        tmp_dir=tmp_path,
+    )
+
+    assert upload_mock.call_count == 0
+
+
+def test_a_failed_drive_publish_keeps_the_local_artifact(mocker, tmp_path):
+    """The transcript already cost money; a Drive outage must not throw it away."""
+    service = MagicMock()
+    mocker.patch("src.output.drive.upload", side_effect=RuntimeError("drive down"))
+    out_dir = tmp_path / "results"
+
+    output.write_artifact(
+        service,
+        base_name="Alice",
+        suffix=".txt",
+        text="привет",
+        folder_id="folderA",
+        config=make_config("folder", out_dir, output_also_drive=True),
+        tmp_dir=tmp_path,
+    )
+
+    assert (out_dir / "Alice.txt").read_text(encoding="utf-8") == "привет"
 
 
 def test_write_artifact_drive_uploads_new_sibling(mocker, tmp_path):

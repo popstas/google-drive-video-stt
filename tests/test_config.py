@@ -2418,3 +2418,23 @@ def test_generated_config_ships_the_new_sections(tmp_path):
         "token": "",
         "presets": ["keypoints"],
     }
+
+
+def test_output_also_drive_defaults_to_off(tmp_path):
+    config = _load_config(tmp_path, {"output": {"target": "folder", "dir": "results"}})
+
+    assert config.output_also_drive is False
+
+
+def test_output_also_drive_is_read(tmp_path):
+    config = _load_config(
+        tmp_path, {"output": {"target": "folder", "dir": "results", "also_drive": True}}
+    )
+
+    assert config.output_also_drive is True
+
+
+def test_output_also_drive_is_rejected_with_target_drive(tmp_path):
+    """target=drive already writes to Drive; the combination would only confuse."""
+    with pytest.raises(ValueError, match="only applies when output.target=folder"):
+        _load_config(tmp_path, {"output": {"target": "drive", "also_drive": True}})
