@@ -5,6 +5,7 @@
 
 ### Features
 
+- Drop the preset name from the Planfix comment and mark the keypoints sections
 - Enable the meta preset by default and retire action-items
 - Open the Planfix comment with the call's subject, tags, and referral
 - Publish only the .stt document to Drive

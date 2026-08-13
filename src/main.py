@@ -749,17 +749,21 @@ _MARKDOWN_HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})[ \t]+(?P<title>.+?)[ \t]
 
 
 def _mark_planfix_sections(text: str) -> str:
-    """Prefix the known keypoints headings with their marker, for the CRM comment only.
+    """Mark the known keypoints headings and give each one air, for the CRM comment only.
 
-    Sub-headings the preset emits per assignee (``### Mels``) are names, not section
-    titles, so they miss the map and pass through untouched.
+    A marked heading is surrounded by blank lines: run together, the three sections read
+    as one wall of text in a Planfix feed. Sub-headings the preset emits per assignee
+    (``### Mels``) are names, not section titles, so they miss the map and pass through
+    untouched, tight against the section they belong to.
     """
+    gap = planfix_html.SECTION_BREAK
 
     def _mark(match: re.Match[str]) -> str:
         marker = _PLANFIX_SECTION_MARKERS.get(match.group("title"))
         if marker is None:
             return match.group(0)
-        return f"{match.group('hashes')} {marker} {match.group('title')}"
+        heading = f"{match.group('hashes')} {marker} {match.group('title')}"
+        return f"{gap}\n\n{heading}\n\n{gap}"
 
     return _MARKDOWN_HEADING_RE.sub(_mark, text)
 
@@ -835,12 +839,21 @@ def _planfix_description(
         for name in preset_names
         if artifacts.get(name, "").strip()
     ]
-    header = "\n".join(_planfix_meta_lines(meta_document, meta_fields))
     # The header alone is never enough: a document carrying only a duration and a
     # link but no preset section is not something worth commenting, and
     # `_send_planfix_comment`'s `if not description` guard relies on an empty
     # return here to skip both the POST and the `planfix_comment_task_id` marker.
-    blocks = ([header] if header and sections else []) + sections
+    if not sections:
+        return ""
+
+    header = "\n".join(_planfix_meta_lines(meta_document, meta_fields))
+    blocks: list[str] = [header] if header else []
+    for section in sections:
+        if blocks:
+            # Where the preset's name used to sit. Doubling with the gap a marked
+            # heading brings is harmless -- the converter collapses them.
+            blocks.append(planfix_html.SECTION_BREAK)
+        blocks.append(section)
     return planfix_html.markdown_to_html("\n\n".join(blocks))
 
 

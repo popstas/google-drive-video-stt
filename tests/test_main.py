@@ -3209,7 +3209,7 @@ def test_planfix_description_concatenates_presets_in_order():
         (),
     )
 
-    assert description == "<p>Задачи: раз</p><p>Сделать два</p>"
+    assert description == "<p>Задачи: раз</p><p><br></p><p>Сделать два</p>"
 
 
 def test_planfix_description_skips_presets_without_an_artifact():
@@ -3245,6 +3245,33 @@ def test_planfix_description_marks_the_keypoints_sections():
     assert "<p><b>Mels</b></p>" in description
 
 
+def test_planfix_description_puts_a_blank_line_around_a_marked_heading():
+    """The heading needs air on both sides, but only one blank line where two meet."""
+    description = main._planfix_description(
+        {"keypoints": "## Задачи\n\n### Mels\n\n- раз\n\n## Тезисы\n\n- два"},
+        ("keypoints",),
+        {"subject": "Созвон"},
+        ("subject",),
+    )
+
+    assert description == (
+        "<p><b>Созвон</b></p><p><br></p>"
+        "<p><b>☑️ Задачи</b></p><p><br></p>"
+        "<p><b>Mels</b></p><ul><li>раз</li></ul><p><br></p>"
+        "<p><b>📝 Тезисы</b></p><p><br></p><ul><li>два</li></ul>"
+    )
+    assert "<p><br></p><p><br></p>" not in description
+
+
+def test_planfix_description_does_not_open_on_a_blank_line():
+    """The first section's leading gap has nothing to separate it from."""
+    description = main._planfix_description(
+        {"keypoints": "## Задачи\n\n- раз"}, ("keypoints",), None, ()
+    )
+
+    assert description.startswith("<p><b>☑️ Задачи</b></p>")
+
+
 def test_planfix_description_leaves_an_unknown_heading_alone():
     description = main._planfix_description(
         {"keypoints": "## Прочее\n\n- раз"}, ("keypoints",), None, ()
@@ -3260,7 +3287,7 @@ def test_planfix_description_renders_markdown_as_html():
     )
 
     assert description == (
-        "<p><b>☑️ Задачи</b></p><ul><li>позвонить</li><li>написать</li></ul>"
+        "<p><b>☑️ Задачи</b></p><p><br></p><ul><li>позвонить</li><li>написать</li></ul>"
     )
     assert "\n" not in description
 
