@@ -718,24 +718,77 @@ def _webhook_payload(
     }
 
 
-def _planfix_description(
-    artifacts: dict[str, str], preset_names: tuple[str, ...]
-) -> str:
-    """Concatenate the configured preset artifacts into one comment body.
+# Labels for the meta fields the Planfix comment may carry. Fixed in code, not config:
+# a field's label is part of how the comment reads, not a deployment choice.
+_PLANFIX_META_LABELS = {
+    "subject": "",  # rendered as the heading, not as a labelled line
+    "tags": "Теги",
+    "referral": "Откуда узнал",
+    "referral_note": "Подробности",
+    "manager": "Менеджер",
+    "client": "Клиент",
+    "date": "Дата",
+    "duration": "Длительность",
+    "video_url": "Запись",
+}
 
-    Presets are joined in configured order, each under its own heading, and a preset
-    with no artifact is skipped rather than emitting an empty section.
+
+def _planfix_meta_lines(
+    document: dict[str, object] | None, fields: tuple[str, ...]
+) -> list[str]:
+    """Render the selected meta fields as Markdown lines for the comment header.
+
+    A field that is empty, unknown, or has no label is skipped silently, so shortening
+    the configured list or a call with no referral never leaves a dangling label.
+    """
+    if not document:
+        return []
+    lines: list[str] = []
+    for field_name in fields:
+        if field_name not in _PLANFIX_META_LABELS:
+            continue
+        value = document.get(field_name)
+        if isinstance(value, list):
+            value = ", ".join(str(entry) for entry in value)
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if field_name == "subject":
+            lines.insert(0, f"**{text}**")
+        elif field_name == "video_url":
+            lines.append(f"[{_PLANFIX_META_LABELS[field_name]}]({text})")
+        else:
+            lines.append(f"**{_PLANFIX_META_LABELS[field_name]}:** {text}")
+    return lines
+
+
+def _planfix_description(
+    artifacts: dict[str, str],
+    preset_names: tuple[str, ...],
+    meta_document: dict[str, object] | None = None,
+    meta_fields: tuple[str, ...] = (),
+) -> str:
+    """Concatenate the meta header and the configured preset artifacts into one body.
+
+    The header (subject, tags, referral, ...) is rendered first from ``meta_document``
+    and ``meta_fields``, so a manager reading the comment sees what the call was about
+    before scrolling into the preset sections. Presets are joined in configured order,
+    each under its own heading, and a preset with no artifact is skipped rather than
+    emitting an empty section.
 
     The result is HTML, not the Markdown the presets emit: Planfix stores comments as
     HTML and renders ``##`` and ``-`` as literal characters. Conversion happens once,
-    on the assembled document, so headings and lists nest the same way they read.
+    on the assembled document, so headings and lists nest the same way they read (and
+    the body stays a single line, since Planfix rewrites every newline as ``<br>``).
     """
     sections = [
         f"## {name}\n{artifacts[name].strip()}"
         for name in preset_names
         if artifacts.get(name, "").strip()
     ]
-    return planfix_html.markdown_to_html("\n\n".join(sections))
+    header = "\n".join(_planfix_meta_lines(meta_document, meta_fields))
+    blocks = ([header] if header else []) + sections
+    return planfix_html.markdown_to_html("\n\n".join(blocks))
 
 
 def _send_planfix_comment(
@@ -745,6 +798,7 @@ def _send_planfix_comment(
     config: Config,
     artifacts: dict[str, str],
     booking_decision: booking_gate.BookingDecision,
+    meta_document: dict[str, object] | None = None,
 ) -> None:
     """Post the meeting summary into the matched Planfix task, exactly once.
 
@@ -752,6 +806,11 @@ def _send_planfix_comment(
     later cycle that backfills a newly configured preset re-feeds the transcript — so
     the `planfix_comment_task_id` marker, written only after a successful POST, is what
     keeps a second pass from posting a duplicate comment into the task.
+
+    ``meta_document`` (the merged document Task 4's ``_write_call_documents`` built
+    this cycle) opens the comment with a header drawn from ``config.planfix_meta_fields``
+    before the preset sections; it defaults to ``None`` so a caller with no document
+    still gets the plain preset-only comment.
     """
     if not booking_decision.is_matched:
         return
@@ -761,7 +820,9 @@ def _send_planfix_comment(
         logger.debug("Planfix comment already sent for %s, skipping", file_id)
         return
 
-    description = _planfix_description(artifacts, config.planfix_presets)
+    description = _planfix_description(
+        artifacts, config.planfix_presets, meta_document, config.planfix_meta_fields
+    )
     if not description:
         logger.warning(
             "No configured Planfix preset produced text for %s; nothing to comment",
@@ -1032,7 +1093,8 @@ def process_item(
 
         try:
             _send_planfix_comment(
-                service, item, file_id, config, artifacts, booking_decision
+                service, item, file_id, config, artifacts, booking_decision,
+                meta_document=meta_document,
             )
         except Exception as exc:
             # A file that transcribed and uploaded must count as processed even if the

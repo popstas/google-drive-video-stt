@@ -2357,6 +2357,21 @@ def test_call_booking_and_planfix_are_parsed(tmp_path):
     assert config.planfix_presets == ("keypoints", "action-items")
 
 
+def test_planfix_meta_fields_has_a_default(tmp_path):
+    assert _load_config(tmp_path, {}).planfix_meta_fields == (
+        "subject", "tags", "referral", "referral_note", "duration", "video_url",
+    )
+
+
+def test_planfix_meta_fields_is_read_from_config(tmp_path):
+    config = _load_config(tmp_path, {"planfix": {"meta_fields": ["subject"]}})
+    assert config.planfix_meta_fields == ("subject",)
+
+
+def test_planfix_meta_fields_can_be_emptied(tmp_path):
+    assert _load_config(tmp_path, {"planfix": {"meta_fields": []}}).planfix_meta_fields == ()
+
+
 def test_enabled_receiver_without_token_is_rejected(tmp_path):
     raw = {**CALL_BOOKING_BASE, "call_booking": {"enabled": True}}
 

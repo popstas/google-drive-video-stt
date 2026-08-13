@@ -55,6 +55,9 @@ def make_config(
     webhook_url="",
     webhook_token="",
     proxy_url="",
+    planfix_meta_fields=(
+        "subject", "tags", "referral", "referral_note", "duration", "video_url",
+    ),
 ) -> Config:
     if presets is None:
         # Mirror the legacy keypoints gate: the built-in keypoints pass is the only
@@ -84,6 +87,7 @@ def make_config(
         referrals_allowed=tuple(referrals_allowed),
         webhook_url=webhook_url,
         webhook_token=webhook_token,
+        planfix_meta_fields=tuple(planfix_meta_fields),
         presets=tuple(presets),
     )
 
@@ -3201,6 +3205,8 @@ def test_planfix_description_concatenates_presets_in_order():
     description = main._planfix_description(
         {"keypoints": "Задачи: раз", "action-items": "Сделать два", "meta": "topic: x"},
         ("keypoints", "action-items"),
+        None,
+        (),
     )
 
     assert description == (
@@ -3211,7 +3217,7 @@ def test_planfix_description_concatenates_presets_in_order():
 
 def test_planfix_description_skips_presets_without_an_artifact():
     description = main._planfix_description(
-        {"keypoints": "Задачи: раз"}, ("keypoints", "action-items")
+        {"keypoints": "Задачи: раз"}, ("keypoints", "action-items"), None, ()
     )
 
     assert description == "<p><b>keypoints</b></p><p>Задачи: раз</p>"
@@ -3220,7 +3226,7 @@ def test_planfix_description_skips_presets_without_an_artifact():
 def test_planfix_description_renders_markdown_as_html():
     """Planfix shows Markdown as literal characters, so the body must arrive as HTML."""
     description = main._planfix_description(
-        {"keypoints": "## Задачи\n\n- [ ] позвонить\n- написать"}, ("keypoints",)
+        {"keypoints": "## Задачи\n\n- [ ] позвонить\n- написать"}, ("keypoints",), None, ()
     )
 
     assert description == (
@@ -3231,7 +3237,46 @@ def test_planfix_description_renders_markdown_as_html():
 
 
 def test_planfix_description_is_blank_when_nothing_matched():
-    assert main._planfix_description({"meta": "topic: x"}, ("keypoints",)) == ""
+    assert main._planfix_description({"meta": "topic: x"}, ("keypoints",), None, ()) == ""
+
+
+def test_planfix_description_puts_the_subject_and_tags_on_top():
+    html = main._planfix_description(
+        {"keypoints": "## Задачи\n- [ ] x"},
+        ("keypoints",),
+        {"subject": "Обсудили кейс", "tags": ["O-1"], "referral": "рекомендация"},
+        ("subject", "tags", "referral"),
+    )
+    assert html.index("Обсудили кейс") < html.index("Задачи")
+    assert "O-1" in html and "рекомендация" in html
+    assert "\n" not in html
+
+
+def test_planfix_description_skips_empty_and_unknown_fields():
+    html = main._planfix_description(
+        {"keypoints": "## Задачи"},
+        ("keypoints",),
+        {"subject": "s", "referral": "", "tags": []},
+        ("subject", "referral", "tags", "not_a_field"),
+    )
+    # The brief's original assertion checked "Реферал" not in html, but no label in
+    # _PLANFIX_META_LABELS spells "Реферал" (referral's label is "Откуда узнал"), so
+    # that half could never fail and proved nothing. Asserting on the label the code
+    # actually emits for the empty `referral` field makes this cover the skip.
+    assert "Откуда узнал" not in html and "Теги" not in html
+
+
+def test_planfix_description_renders_the_video_url_as_a_link():
+    html = main._planfix_description(
+        {}, (), {"video_url": "https://drive.google.com/file/d/X/view", "source_name": "Созвон.mp4"},
+        ("video_url",),
+    )
+    assert '<a href="https://drive.google.com/file/d/X/view">' in html
+
+
+def test_planfix_description_without_a_meta_document_is_unchanged():
+    html = main._planfix_description({"keypoints": "## Задачи"}, ("keypoints",), None, ())
+    assert "Задачи" in html
 
 
 def test_comment_is_sent_for_a_matched_recording(monkeypatch, planfix_config):

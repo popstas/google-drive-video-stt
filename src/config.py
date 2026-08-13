@@ -142,6 +142,12 @@ class Config:
     planfix_create_comment_url: str = ""
     planfix_token: str = ""
     planfix_presets: tuple[str, ...] = ("keypoints",)
+    # Which meta-document fields open the Planfix comment, in this order. The models and
+    # internal ids are deliberately absent: the comment is read by managers, not
+    # operators.
+    planfix_meta_fields: tuple[str, ...] = (
+        "subject", "tags", "referral", "referral_note", "duration", "video_url",
+    )
     presets: tuple[Preset, ...] = ()
     # Google OAuth is config-owned and inline-first. ``google_credentials``/
     # ``google_token`` hold inline mappings (the OAuth client JSON and the saved
@@ -652,6 +658,28 @@ def _parse_planfix_presets(value: object) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _parse_planfix_meta_fields(value: object) -> tuple[str, ...]:
+    """Read ``planfix.meta_fields``, defaulting to the built-in field selection.
+
+    Unlike ``_parse_planfix_presets``, an explicit empty list is honored as "no
+    header" rather than falling back to the default: only an absent key (``None``)
+    means the operator hasn't set an opinion.
+    """
+    if value is None:
+        return (
+            "subject", "tags", "referral", "referral_note", "duration", "video_url",
+        )
+    if not isinstance(value, list):
+        raise ValueError(f"planfix.meta_fields must be a list, got: {value!r}")
+    names = []
+    for entry in value:
+        name = _yaml_str(entry)
+        if not name:
+            raise ValueError(f"planfix.meta_fields entries must be names, got: {entry!r}")
+        names.append(name)
+    return tuple(names)
+
+
 def _parse_stt_presets(value: object) -> tuple[str, ...]:
     """Read ``output.stt_presets``, defaulting to the single ``keypoints`` preset."""
     if value is None:
@@ -766,6 +794,7 @@ def _config_from_yaml(
     planfix_create_comment_url = _yaml_str(planfix.get("create_comment_url"))
     planfix_token = _yaml_str(planfix.get("token"))
     planfix_presets = _parse_planfix_presets(planfix.get("presets"))
+    planfix_meta_fields = _parse_planfix_meta_fields(planfix.get("meta_fields"))
 
     (
         google_credentials,
@@ -954,6 +983,7 @@ def _config_from_yaml(
         planfix_create_comment_url=planfix_create_comment_url,
         planfix_token=planfix_token,
         planfix_presets=planfix_presets,
+        planfix_meta_fields=planfix_meta_fields,
         presets=presets,
         google_credentials=google_credentials,
         google_token=google_token,
@@ -1292,6 +1322,15 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
         "tags": {"allowed": list(config.tags_allowed)},
         "referrals": {"allowed": list(config.referrals_allowed)},
         "webhook": {"url": config.webhook_url, "token": config.webhook_token},
+        # planfix.presets/create_comment_url/token were previously absent from this
+        # serializer too (a whole-Config rewrite silently dropped them); meta_fields is
+        # added alongside them here rather than as an isolated partial block.
+        "planfix": {
+            "create_comment_url": config.planfix_create_comment_url,
+            "token": config.planfix_token,
+            "presets": list(config.planfix_presets),
+            "meta_fields": list(config.planfix_meta_fields),
+        },
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
         # the prompt text stays owned by the .md assets; disabled built-ins (e.g.
