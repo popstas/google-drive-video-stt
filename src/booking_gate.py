@@ -7,7 +7,9 @@ ask about a file without downloading it.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from src import call_booking, drive
@@ -84,3 +86,41 @@ def clear_mark(service: Any, file_id: str) -> None:
     drive.set_file_app_properties(
         service, file_id, {drive.BOOKING_MATCH_PROPERTY: None}
     )
+
+
+def _parse_drive_time(value: object) -> datetime | None:
+    """Parse an RFC 3339 Drive timestamp, or None when it is missing or malformed."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def select_stale_marks(files: Iterable[dict]) -> list[tuple[str, str, str]]:
+    """Pick the recordings whose modifiedTime our own unmatched mark moved.
+
+    Returns ``(file_id, name, created_time)`` for each file that carries the
+    ``booking_match`` property and whose modifiedTime sits past its createdTime.
+
+    The property is the entire predicate. A timestamp window would have caught only
+    the files written in one particular run, and would sweep up recordings Drive
+    itself nudged at upload -- files nobody here ever wrote to. Selecting on our own
+    mark keeps the repair to files we are certain we touched.
+
+    Files already at ``modifiedTime == createdTime`` are skipped, so re-running the
+    repair writes nothing.
+    """
+    selected: list[tuple[str, str, str]] = []
+    for item in files:
+        properties = item.get("appProperties") or {}
+        if drive.BOOKING_MATCH_PROPERTY not in properties:
+            continue
+        created_raw = item.get("createdTime")
+        created = _parse_drive_time(created_raw)
+        modified = _parse_drive_time(item.get("modifiedTime"))
+        if created is None or modified is None or modified <= created:
+            continue
+        selected.append((item["id"], item.get("name", ""), str(created_raw)))
+    return selected

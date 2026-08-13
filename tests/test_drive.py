@@ -600,3 +600,39 @@ def test_list_folder_state_defaults_booking_properties_to_blank():
 
     assert items[0]["booking_match"] == ""
     assert items[0]["planfix_comment_task_id"] == ""
+
+
+def test_list_mp4_timestamps_requests_the_timestamp_fields_and_pages():
+    """The polling loop's listing deliberately omits timestamps; this one needs them."""
+    service = MagicMock()
+    pages = [
+        {"files": [{"id": "v1", "name": "a.mp4"}], "nextPageToken": "page2"},
+        {"files": [{"id": "v2", "name": "b.mp4"}]},
+    ]
+    service.files.return_value.list.return_value.execute.side_effect = pages
+
+    result = drive.list_mp4_timestamps(service, "f1")
+
+    assert [f["id"] for f in result] == ["v1", "v2"]
+    first_call = service.files.return_value.list.call_args_list[0].kwargs
+    assert "createdTime" in first_call["fields"]
+    assert "modifiedTime" in first_call["fields"]
+    assert "appProperties" in first_call["fields"]
+    assert "'f1' in parents" in first_call["q"]
+    assert "video/mp4" in first_call["q"]
+    assert service.files.return_value.list.call_args_list[1].kwargs["pageToken"] == "page2"
+
+
+def test_set_file_modified_time_sends_only_the_date():
+    """The marks must survive the repair, or the backlog would be re-transcribed."""
+    service = MagicMock()
+    service.files.return_value.update.return_value.execute.return_value = {"id": "v1"}
+
+    drive.set_file_modified_time(service, "v1", "2025-03-14T18:24:52.949Z")
+
+    service.files.return_value.update.assert_called_once_with(
+        fileId="v1",
+        body={"modifiedTime": "2025-03-14T18:24:52.949Z"},
+        fields="id, name, modifiedTime",
+        supportsAllDrives=True,
+    )

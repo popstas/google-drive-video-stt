@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Bug Fixes
+
+- Keep the Drive modifiedTime when writing appProperties
+
 ### Documentation
 
 - Plan the Drive modifiedTime preservation and repair

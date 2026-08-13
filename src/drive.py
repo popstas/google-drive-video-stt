@@ -90,6 +90,59 @@ def _list_files_by_mime(service: Any, folder_id: str, mime_type: str) -> list[di
     return files
 
 
+def list_mp4_timestamps(service: Any, folder_id: str) -> list[dict]:
+    """Return every mp4 in a folder with its timestamps and appProperties.
+
+    ``_list_files_by_mime`` keeps its field list small because the polling loop calls
+    it every cycle. Only the date repair needs ``createdTime``/``modifiedTime``, so it
+    asks for them here rather than widening the hot path.
+    """
+    files: list[dict] = []
+    page_token: str | None = None
+    query = (
+        f"'{folder_id}' in parents and mimeType = '{MP4_MIME}' and trashed = false"
+    )
+    while True:
+        response = (
+            service.files()
+            .list(
+                q=query,
+                fields=(
+                    "nextPageToken, "
+                    "files(id, name, createdTime, modifiedTime, appProperties)"
+                ),
+                pageSize=PAGE_SIZE,
+                pageToken=page_token,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            )
+            .execute()
+        )
+        files.extend(response.get("files", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    return files
+
+
+def set_file_modified_time(service: Any, file_id: str, modified_time: str) -> dict:
+    """Set a file's modifiedTime, leaving appProperties and content untouched.
+
+    The body carries only the date: the ``booking_match`` marks must survive, or the
+    polling loop would reconsider the whole backlog and re-transcribe it.
+    """
+    return (
+        service.files()
+        .update(
+            fileId=file_id,
+            body={"modifiedTime": modified_time},
+            fields="id, name, modifiedTime",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
+
+
 def find_newest_mp4(service: Any, folder_id: str) -> dict | None:
     """Return the most recently created mp4 in a folder, or None when empty."""
     query = (
