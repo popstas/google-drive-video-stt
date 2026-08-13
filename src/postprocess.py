@@ -187,6 +187,44 @@ def _rebuild(entries: list[dict], label_of: dict[int, str]) -> str:
     return "\n".join(out)
 
 
+def real_speaker_order(text: str, *, expected: int = 2) -> list[int]:
+    """The genuine interlocutors' ``Speaker N`` numbers, in order of first appearance.
+
+    Pick the real interlocutors by actual prominence rather than by trusting the
+    numeric labels diarization happens to emit. Diarization may skip or reorder
+    numbers (e.g. emit Speaker 3 for the dominant talker in a two-party call);
+    keying off labels 1..expected would then treat the main speaker as a stray
+    and merge their turns into the wrong name.
+
+    Turn count is the primary signal because a genuine interlocutor takes turns
+    throughout the conversation, whereas a diarization stray is usually an isolated
+    turn (high word count but only one turn). First appearance is the final
+    tie-breaker so the result is deterministic and stable, and so the
+    earliest-speaking participants win ties (preserving canonical ordering when
+    labels are well-behaved).
+
+    The returned order is the contract between :func:`map_speakers`, which assigns
+    names positionally, and whoever decided what those names are -- both must agree
+    on which speaker comes first, or the labels swap.
+    """
+    sequence = [e["num"] for e in _parse_entries(text) if e["num"] is not None]
+    distinct: list[int] = []
+    for num in sequence:
+        if num not in distinct:
+            distinct.append(num)
+    if not distinct:
+        return []
+
+    first_seen = {num: idx for idx, num in enumerate(distinct)}
+    turn_counts: dict[int, int] = {}
+    for num in sequence:
+        turn_counts[num] = turn_counts.get(num, 0) + 1
+
+    real_count = min(max(1, expected), len(distinct))
+    real = sorted(distinct, key=lambda n: (-turn_counts.get(n, 0), first_seen[n]))
+    return sorted(real[:real_count], key=lambda n: first_seen[n])
+
+
 def map_speakers(text: str, names: list[str], *, expected: int | None = None) -> str:
     """Map ``Speaker N`` labels to interlocutor names and merge extra speakers.
 
@@ -219,32 +257,12 @@ def map_speakers(text: str, names: list[str], *, expected: int | None = None) ->
                 word_counts.get(entry["num"], 0) + len(entry["text"].split())
             )
 
-    first_seen = {num: idx for idx, num in enumerate(distinct)}
-    real_count = min(expected, len(distinct))
-    # Pick the real interlocutors by actual prominence rather than by trusting
-    # the numeric labels diarization happens to emit. Diarization may skip or
-    # reorder numbers (e.g. emit Speaker 3 for the dominant talker in a
-    # two-party call); keying off labels 1..expected would then treat the main
-    # speaker as a stray and merge their turns into the wrong name.
-    #
-    # Turn count is the primary signal because a genuine interlocutor takes
-    # turns throughout the conversation, whereas a diarization stray is usually
-    # an isolated turn (high word count but only one turn). First appearance is
-    # the final tie-breaker so the result is deterministic and stable, and so
-    # the earliest-speaking participants win ties (preserving canonical
-    # ordering when labels are well-behaved).
-    turn_counts: dict[int, int] = {}
-    for num in sequence:
-        turn_counts[num] = turn_counts.get(num, 0) + 1
-    real = sorted(
-        distinct,
-        key=lambda n: (-turn_counts.get(n, 0), first_seen[n]),
-    )[:real_count]
+    real_in_order = real_speaker_order(text, expected=expected)
+    real = set(real_in_order)
     extras = [num for num in distinct if num not in real]
 
-    merge_targets = _merge_targets(entries, real, extras, word_counts)
+    merge_targets = _merge_targets(entries, real_in_order, extras, word_counts)
 
-    real_in_order = sorted(real, key=lambda n: first_seen[n])
     real_label: dict[int, str] = {}
     for idx, num in enumerate(real_in_order):
         real_label[num] = names[idx] if idx < len(names) else f"Speaker {idx + 1}"

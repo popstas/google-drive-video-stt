@@ -1,6 +1,16 @@
 # Changelog
 
 
+## Unreleased
+
+### Features
+
+- Send the Planfix comment as HTML instead of Markdown
+
+### Bug Fixes
+
+- Decide which speaker is which person instead of guessing from turn order
+
 ## v0.5.1 - 2026-08-13
 
 ### Bug Fixes

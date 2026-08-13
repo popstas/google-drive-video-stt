@@ -201,6 +201,7 @@ def test_resolved_batch_wait_false_raises_not_implemented():
             file_name="f.mp4",
             config=_config(),
             speaker_names=None,
+            manager_name="",
             dep_results={},
         )
 
@@ -214,6 +215,7 @@ def test_global_batch_wait_false_raises_not_implemented():
             file_name="f.mp4",
             config=_config(openai_batch_wait=False),
             speaker_names=None,
+            manager_name="",
             dep_results={},
         )
 
@@ -228,6 +230,7 @@ def test_non_batch_preset_ignores_batch_wait_false():
         file_name="f.mp4",
         config=_config(openai_batch_wait=False),
         speaker_names=None,
+            manager_name="",
         dep_results={},
     )
     assert res.ok
@@ -242,6 +245,7 @@ def test_preset_batch_wait_true_overrides_global_false():
         file_name="f.mp4",
         config=_config(openai_batch_wait=False),
         speaker_names=None,
+            manager_name="",
         dep_results={},
     )
     assert res.ok

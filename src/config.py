@@ -87,6 +87,11 @@ class Config:
     run_enabled: bool = True
     output_target: str = "drive"
     output_dir: Path | None = None
+    # Publish artifacts to Drive as well while keeping the local folder authoritative.
+    # Flipping ``output.target`` to "drive" instead would make every already-processed
+    # recording look unprocessed (the has_txt flag would stop coming from local files),
+    # and the whole backlog would be re-transcribed at real cost.
+    output_also_drive: bool = False
     openai_keypoints: bool = False
     openai_model: str = "gpt-5.4-mini"
     openai_batch: bool = False
@@ -802,6 +807,12 @@ def _config_from_yaml(
     output_dir = _resolve_relative_to(output_dir_raw, base) if output_dir_raw else None
     if output_target == "folder" and output_dir is None:
         raise ValueError("output.dir is required when output.target=folder")
+    output_also_drive = _yaml_bool(output.get("also_drive"), default=False)
+    if output_also_drive and output_target != "folder":
+        raise ValueError(
+            "output.also_drive only applies when output.target=folder; "
+            "target=drive already writes to Drive"
+        )
 
     if validate_providers:
         if presets and not openai_api_key:
@@ -855,6 +866,7 @@ def _config_from_yaml(
         run_enabled=run_enabled,
         output_target=output_target,
         output_dir=output_dir,
+        output_also_drive=output_also_drive,
         openai_keypoints=openai_keypoints,
         openai_model=openai_model,
         openai_batch=openai_batch,

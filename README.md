@@ -248,6 +248,7 @@ notifications:
 output:
   target: drive          # drive | folder
   dir: null              # required when target=folder
+  also_drive: false      # folder mode only: publish a Drive copy as well
 stt:
   provider: deepgram     # "" / disabled => MP3-only
   language: ru

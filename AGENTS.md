@@ -265,7 +265,10 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   the file. Its payload carries PII (employee email, full
   transcript), so failure logs must never include the body or the token.
 - `output.target` selects where artifacts land: `drive` (siblings) or `folder`
-  (`output.dir`, required when `folder`).
+  (`output.dir`, required when `folder`). `output.also_drive` adds a Drive copy
+  on top of `folder` mode; never flip a live `folder` deployment to `target:
+  drive` instead, because the local artifacts are what mark a recording
+  processed and the whole backlog would be re-transcribed.
 - Idempotency relies on `appProperties.source_video_id`, the per-artifact
   `appProperties.artifact_type` (so each preset's sibling is detected
   independently via `list_folder_state`'s `artifact_ids`), and sibling stem

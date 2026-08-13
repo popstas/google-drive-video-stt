@@ -39,8 +39,14 @@ def build_prompt(
     file_name: str,
     *,
     speaker_names: list[str] | None = None,
+    manager_name: str = "",
 ) -> str:
-    """Compose the user prompt: participant hints + the speaker-named transcript."""
+    """Compose the user prompt: participant hints + the speaker-named transcript.
+
+    ``manager_name`` is the folder owner. Naming them explicitly keeps the model from
+    inferring roles from tone alone -- it once decided the employee was the client --
+    and it costs nothing, because the config already says whose folder this is.
+    """
     names = speaker_names if speaker_names is not None else extract_interlocutor_names(file_name)
     if names:
         hint = (
@@ -50,6 +56,11 @@ def build_prompt(
         )
     else:
         hint = "Use the participant names exactly as they appear in the transcript."
+    if manager_name:
+        hint += (
+            f" {manager_name} is the manager running this call, an employee of"
+            " ExpertizeMe; every other participant is a client."
+        )
     return f"{hint}\n\nTranscript:\n{transcript}"
 
 

@@ -22,13 +22,16 @@ from src import (
     notify,
     output,
     planfix,
+    planfix_html,
     postprocess,
     preset_pipeline,
+    speaker_roles,
     webhook,
 )
 from src.auth import AuthError, build_drive_service
 from src.config import Config, is_run_enabled, load_config
 from src.extractor import extract_m4a_copy, extract_mp3
+from src.openai_pipeline import OpenAIPipeline
 from src.presets import Preset
 from src.stt.transcribe import transcribe_file
 
@@ -283,12 +286,14 @@ def _run_preset_stage(
             if text is not None:
                 precomputed[dep] = text
 
+    employee = config.folder_by_id(folder_id)
     results = preset_pipeline.run_presets(
         transcript,
         mp4_name,
         config,
         config.presets,
         speaker_names=speaker_names,
+        manager_name=employee.name if employee else "",
         only=missing,
         precomputed=precomputed,
     )
@@ -440,6 +445,53 @@ def _speaker_names_from_file_info(file_info: dict) -> list[str] | None:
     return names or None
 
 
+def _resolve_speaker_names(
+    transcript: str,
+    file_name: str,
+    folder_id: str,
+    config: Config,
+    *,
+    usage: dict[str, dict[str, int]] | None = None,
+) -> list[str] | None:
+    """Ask the model which diarized speaker is which participant.
+
+    Without this the names extracted from the file name are bound to speakers by who
+    talks first, which silently swaps the pair on every call the client opens. The
+    folder's owner is the one identity we know for certain, so it is handed over as the
+    manager and the model places the rest from the opening turns.
+
+    Returns None whenever the answer cannot be trusted; the caller then keeps the
+    positional order, which is what this code did before.
+    """
+    if not config.openai_api_key:
+        return None
+    candidates = postprocess.extract_interlocutor_names(file_name)
+    if len(candidates) < 2:
+        return None
+
+    employee = config.folder_by_id(folder_id)
+    pipeline = OpenAIPipeline(
+        api_key=config.openai_api_key,
+        model=config.openai_model,
+        proxy_url=config.proxy_url,
+    )
+    try:
+        names = speaker_roles.resolve(
+            postprocess.clean_transcript(transcript),
+            candidates=candidates,
+            manager_name=employee.name if employee else "",
+            run=pipeline.run,
+        )
+    finally:
+        if usage is not None and pipeline.last_usage:
+            usage["openai_speaker_roles"] = dict(pipeline.last_usage)
+        pipeline.close()
+
+    if names is not None:
+        logger.info("Speaker roles resolved for %s", file_name)
+    return names
+
+
 def _coerce_size_bytes(raw: Any) -> int | None:
     if raw in (None, ""):
         return None
@@ -527,13 +579,17 @@ def _planfix_description(
 
     Presets are joined in configured order, each under its own heading, and a preset
     with no artifact is skipped rather than emitting an empty section.
+
+    The result is HTML, not the Markdown the presets emit: Planfix stores comments as
+    HTML and renders ``##`` and ``-`` as literal characters. Conversion happens once,
+    on the assembled document, so headings and lists nest the same way they read.
     """
     sections = [
         f"## {name}\n{artifacts[name].strip()}"
         for name in preset_names
         if artifacts.get(name, "").strip()
     ]
-    return "\n\n".join(sections)
+    return planfix_html.markdown_to_html("\n\n".join(sections))
 
 
 def _send_planfix_comment(
@@ -706,6 +762,10 @@ def process_item(
                 text = transcribe_file(stt_audio_path, config, cost_usd=cost_usd)
                 speaker_names = _speaker_names_from_file_info(file_info)
                 if config.stt_postprocess:
+                    if speaker_names is None:
+                        speaker_names = _resolve_speaker_names(
+                            text, file_name, folder_id, config, usage=usage
+                        )
                     text = postprocess.postprocess_transcript(
                         text,
                         file_name,

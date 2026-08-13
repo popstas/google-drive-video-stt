@@ -54,6 +54,24 @@ def test_build_prompt_prefers_explicit_speaker_names():
     assert "Wrong Two" not in prompt
 
 
+def test_build_prompt_names_the_manager_when_the_folder_owner_is_known():
+    """Left to infer roles, the model once called the employee the client."""
+    prompt = build_prompt(
+        "Speaker 1: hi",
+        "Alice and Bob - 2026/05/28.mp4",
+        manager_name="Alice",
+    )
+
+    assert "Alice is the manager running this call" in prompt
+    assert "every other participant is a client" in prompt
+
+
+def test_build_prompt_omits_the_manager_sentence_when_unknown():
+    prompt = build_prompt("Speaker 1: hi", "Alice and Bob - 2026/05/28.mp4")
+
+    assert "manager running this call" not in prompt
+
+
 def test_build_prompt_without_names():
     # A date-only name yields no extractable interlocutor names, so the prompt
     # falls back to the transcript's own labels.
