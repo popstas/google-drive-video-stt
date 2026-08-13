@@ -14,6 +14,7 @@
 
 ### Bug Fixes
 
+- Keep the .stt out of the transcript lookup and stop it duplicating on reprocess
 - Leave meta client empty when the recording name has no manager marker
 - Decide which speaker is which person instead of guessing from turn order
 
