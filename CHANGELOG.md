@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add output.also_drive to publish artifacts to Drive from folder mode
 - Send the Planfix comment as HTML instead of Markdown
 
 ### Bug Fixes
