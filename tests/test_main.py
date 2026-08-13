@@ -3271,13 +3271,18 @@ def test_planfix_description_normalises_a_multiline_meta_value():
     unnormalised, markdown_to_html would split the header on them -- fracturing it
     into extra label-less paragraphs, or worse, a stray bullet/heading if the
     continuation happened to start with "- " or "#". The header must stay one
-    logical Markdown line before conversion."""
+    logical Markdown line before conversion.
+
+    A ``keypoints`` section is included alongside the header under test: a
+    header-only call now (correctly) renders empty -- see
+    ``test_planfix_description_is_blank_when_only_the_header_would_render`` -- so
+    this needs a section present to exercise the header-formatting behaviour."""
     html = main._planfix_description(
-        {}, (),
+        {"keypoints": "х"}, ("keypoints",),
         {"referral_note": "Позвонила\nв понедельник,\n- уточнила детали"},
         ("referral_note",),
     )
-    assert "<p><b>Подробности:</b> Позвонила в понедельник, - уточнила детали</p>" == html
+    assert "<p><b>Подробности:</b> Позвонила в понедельник, - уточнила детали</p>" in html
     assert "\n" not in html
 
 
@@ -3285,9 +3290,11 @@ def test_planfix_description_renders_the_video_url_as_a_link():
     """source_name is excluded from the default field list *because* it becomes this
     anchor's text instead of a line of its own (per the design spec); a fixed
     "Запись" label would defeat that purpose, so the anchor text itself must be
-    asserted, not just the href."""
+    asserted, not just the href. A ``keypoints`` section rides along so the header
+    (which alone now renders empty) is actually exercised."""
     html = main._planfix_description(
-        {}, (), {"video_url": "https://drive.google.com/file/d/X/view", "source_name": "Созвон.mp4"},
+        {"keypoints": "х"}, ("keypoints",),
+        {"video_url": "https://drive.google.com/file/d/X/view", "source_name": "Созвон.mp4"},
         ("video_url",),
     )
     assert '<a href="https://drive.google.com/file/d/X/view">Созвон.mp4</a>' in html
@@ -3295,7 +3302,8 @@ def test_planfix_description_renders_the_video_url_as_a_link():
 
 def test_planfix_description_video_url_falls_back_to_the_fixed_label():
     html = main._planfix_description(
-        {}, (), {"video_url": "https://drive.google.com/file/d/X/view"},
+        {"keypoints": "х"}, ("keypoints",),
+        {"video_url": "https://drive.google.com/file/d/X/view"},
         ("video_url",),
     )
     assert '<a href="https://drive.google.com/file/d/X/view">Запись</a>' in html
@@ -3304,6 +3312,27 @@ def test_planfix_description_video_url_falls_back_to_the_fixed_label():
 def test_planfix_description_without_a_meta_document_is_unchanged():
     html = main._planfix_description({"keypoints": "## Задачи"}, ("keypoints",), None, ())
     assert "Задачи" in html
+
+
+def test_planfix_description_is_blank_when_only_the_header_would_render():
+    """A backfill cycle can find every configured preset already artifacted (so
+    ``artifacts`` carries none of them this cycle) while ``meta_document`` still
+    carries a header. Without a check that at least one preset section rendered,
+    ``_planfix_description`` would return a header-only body -- which
+    ``_send_planfix_comment`` would then post and permanently mark as sent, so the
+    real preset comment could never go out. Nothing to comment must mean an empty
+    description."""
+    html = main._planfix_description(
+        {},
+        ("keypoints",),
+        {
+            "duration": "00:31:42",
+            "video_url": "https://drive.google.com/file/d/X/view",
+            "source_name": "rec.mp4",
+        },
+        ("duration", "video_url"),
+    )
+    assert html == ""
 
 
 def test_comment_is_sent_for_a_matched_recording(monkeypatch, planfix_config):
@@ -3407,6 +3436,36 @@ def test_failed_comment_notifies_telegram_and_leaves_no_marker(
     # No marker means `gdstt reprocess` can resend it.
     marked.assert_not_called()
     notified.assert_called_once()
+
+
+def test_send_planfix_comment_posts_nothing_for_a_header_only_document(
+    monkeypatch, planfix_config
+):
+    """A preset-backfill cycle can find every configured preset already artifacted
+    (none of them appear in this cycle's ``artifacts``) while ``meta_document`` still
+    carries a header (duration, video link). Regression for the bug where
+    `_planfix_description` returned a non-empty, header-only body in that case:
+    `_send_planfix_comment`'s `if not description` guard exists precisely so a
+    contentless comment is neither posted nor marked sent -- a marker written here
+    would permanently block the real preset comment from ever going out."""
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.planfix, "send_comment", send)
+    marked = MagicMock()
+    monkeypatch.setattr(main.drive, "set_file_app_properties", marked)
+
+    main._send_planfix_comment(
+        MagicMock(), gate_item("v1"), "v1", planfix_config,
+        {},  # no preset produced this cycle -- already-artifacted, so not re-run
+        MATCHED_DECISION,
+        meta_document={
+            "duration": "00:31:42",
+            "video_url": "https://drive.google.com/file/d/X/view",
+            "source_name": "rec.mp4",
+        },
+    )
+
+    send.assert_not_called()
+    marked.assert_not_called()
 
 
 def test_process_item_sends_the_comment_on_the_success_path(mocker, tmp_path):

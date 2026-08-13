@@ -75,8 +75,9 @@ recording back in the transcription queue.
 
 ### The meta document
 
-`<stem>.meta.yml`, local only. Four fields come from the model; the rest the code
-already knows and must not pay a model to restate.
+`<stem>.meta.yml`, local only in folder mode; under `output.target: drive` it
+uploads as an ordinary Drive sibling. Four fields come from the model; the rest
+the code already knows and must not pay a model to restate.
 
 | Field | Source |
 |---|---|

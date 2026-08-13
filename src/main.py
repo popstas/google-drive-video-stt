@@ -741,7 +741,9 @@ def _planfix_meta_lines(
     A field that is empty or unknown is skipped silently, so shortening the configured
     list or a call with no referral never leaves a dangling label. ``subject`` has an
     empty label in ``_PLANFIX_META_LABELS`` but is deliberately not skipped for it --
-    it is rendered as the bold heading instead of a labelled line.
+    it is rendered as the bold heading instead of a labelled line. Regardless of where
+    ``subject`` falls in ``fields``, it is always hoisted to the top of the returned
+    lines rather than following the configured order.
     """
     if not document:
         return []
@@ -785,7 +787,9 @@ def _planfix_description(
     and ``meta_fields``, so a manager reading the comment sees what the call was about
     before scrolling into the preset sections. Presets are joined in configured order,
     each under its own heading, and a preset with no artifact is skipped rather than
-    emitting an empty section.
+    emitting an empty section. The header renders only alongside at least one preset
+    section -- a header with no sections returns an empty string, which callers rely
+    on to mean "nothing to comment".
 
     The result is HTML, not the Markdown the presets emit: Planfix stores comments as
     HTML and renders ``##`` and ``-`` as literal characters. Conversion happens once,
@@ -798,7 +802,11 @@ def _planfix_description(
         if artifacts.get(name, "").strip()
     ]
     header = "\n".join(_planfix_meta_lines(meta_document, meta_fields))
-    blocks = ([header] if header else []) + sections
+    # The header alone is never enough: a document carrying only a duration and a
+    # link but no preset section is not something worth commenting, and
+    # `_send_planfix_comment`'s `if not description` guard relies on an empty
+    # return here to skip both the POST and the `planfix_comment_task_id` marker.
+    blocks = ([header] if header and sections else []) + sections
     return planfix_html.markdown_to_html("\n\n".join(blocks))
 
 

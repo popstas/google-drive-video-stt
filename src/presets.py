@@ -27,7 +27,7 @@ _SRC_PROMPTS_DIR = Path(__file__).resolve().parent / "assets" / "prompts"
 
 # Prompt assets shipped with the package. ``config init`` copies these beside a
 # generated config so the default chain
-# (transcript-cleanup -> keypoints + action-items) works out of the box and extra
+# (transcript-cleanup -> keypoints + meta) works out of the box and extra
 # presets are one edit away.
 PACKAGED_PROMPT_ASSETS: tuple[str, ...] = (
     "keypoints.md",

@@ -79,7 +79,7 @@ def extract_interlocutor_names(file_name: str, limit: int = 2) -> list[str]:
     return names
 
 
-_ORG_MARKER_RE = re.compile("|".join(_ORG_TOKENS), re.IGNORECASE)
+_ORG_MARKER_RE = re.compile("|".join(map(re.escape, _ORG_TOKENS)), re.IGNORECASE)
 
 
 def split_participants(file_name: str) -> tuple[str, list[str]]:
