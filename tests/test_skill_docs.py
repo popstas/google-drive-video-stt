@@ -371,6 +371,7 @@ def test_skill_documents_the_bookings_commands():
 
     assert "gdstt bookings list" in text
     assert "gdstt bookings rematch" in text
+    assert "gdstt bookings restore-dates" in text
 
 
 def test_agents_documents_the_call_booking_invariants():

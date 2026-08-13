@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add gdstt bookings restore-dates
 - Add Drive timestamp helpers and the stale-mark selection rule
 
 ### Bug Fixes

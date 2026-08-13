@@ -1284,7 +1284,7 @@ def test_bookings_restore_dates_restores_selected_files(tmp_path, monkeypatch, c
     cli.main(["--config", str(config_path), "bookings", "restore-dates"])
 
     assert restored == [("v1", "2025-03-14T18:24:52.949Z")]
-    assert "1" in capsys.readouterr().out
+    assert "Restored modifiedTime on 1 file(s)" in capsys.readouterr().out
 
 
 def test_bookings_restore_dates_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):

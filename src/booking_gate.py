@@ -122,5 +122,5 @@ def select_stale_marks(files: Iterable[dict]) -> list[tuple[str, str, str]]:
         modified = _parse_drive_time(item.get("modifiedTime"))
         if created is None or modified is None or modified <= created:
             continue
-        selected.append((item["id"], item.get("name", ""), str(created_raw)))
+        selected.append((item["id"], item.get("name", ""), created_raw))
     return selected

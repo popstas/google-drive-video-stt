@@ -290,7 +290,8 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   `disable_recognition` while any `folders` entry lacks an `email` — that folder
   could never match a booking, so it would never be transcribed again.
 - `bookings list` / `bookings rematch` / `bookings restore-dates` use
-  `load_config(validate_providers=False)`
+  `load_config(validate_providers=False)`; `rematch` and `restore-dates` touch only
+  Drive metadata and spend nothing.
 
 ## Skill layering policy
 

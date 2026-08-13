@@ -5,7 +5,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from src import drive
-from src.booking_gate import BookingDecision, clear_mark, mark_unmatched, resolve
+from src.booking_gate import (
+    BookingDecision,
+    clear_mark,
+    mark_unmatched,
+    resolve,
+    select_stale_marks,
+)
 from src.call_booking import CallBooking, append
 from src.config import Config, EmployeeFolder
 
@@ -124,8 +130,6 @@ def test_clear_mark_nulls_the_property():
 
 
 def test_select_stale_marks_picks_marked_files_whose_date_drifted():
-    from src.booking_gate import select_stale_marks
-
     files = [
         {
             "id": "v1",
@@ -147,8 +151,6 @@ def test_select_stale_marks_skips_files_without_the_mark():
     Those files were never touched by us, and resetting them would rewrite real
     history. The mark -- not a time window -- is what identifies our writes.
     """
-    from src.booking_gate import select_stale_marks
-
     files = [
         {
             "id": "v2",
@@ -164,8 +166,6 @@ def test_select_stale_marks_skips_files_without_the_mark():
 
 def test_select_stale_marks_skips_already_restored_files():
     """A second run must be a no-op, so the repair can be re-run safely."""
-    from src.booking_gate import select_stale_marks
-
     files = [
         {
             "id": "v3",
@@ -187,8 +187,6 @@ def test_select_stale_marks_compares_times_not_strings():
     instants a drift and would rewrite a file that nobody touched. Note the widths:
     createdTime is the longer one, which is the only ordering that catches the bug.
     """
-    from src.booking_gate import select_stale_marks
-
     files = [
         {
             "id": "v4",
@@ -203,8 +201,6 @@ def test_select_stale_marks_compares_times_not_strings():
 
 
 def test_select_stale_marks_skips_files_with_unparseable_times():
-    from src.booking_gate import select_stale_marks
-
     files = [
         {
             "id": "v5",
