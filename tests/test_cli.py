@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
 from src import cli
+from src.call_booking import CallBooking, append
 from src.config import EmployeeFolder
 from src.presets import Preset
 from tests.test_main import make_config
@@ -20,6 +23,21 @@ class _Telemetry:
 
 def _normalized_help(text: str) -> str:
     return " ".join(text.split())
+
+
+def write_cli_config(tmp_path, **sections):
+    """Write ``sections`` as ``<tmp_path>/config.yml`` and return its path.
+
+    Bare ``{}`` already loads (``validate_providers=False``), so a caller only
+    supplies the top-level keys (e.g. ``call_booking={...}``) it needs for the
+    scenario under test.
+    """
+    path = tmp_path / "config.yml"
+    path.write_text(
+        yaml.safe_dump(dict(sections), sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    return path
 
 
 def test_build_parser_requires_subcommand():
@@ -1194,3 +1212,71 @@ def test_start_command_sets_run_enabled(mocker, capsys, tmp_path):
 
     setter.assert_called_once_with(True, config_path=None)
     assert "run.enabled=true" in capsys.readouterr().out
+
+
+def test_bookings_list_prints_the_journal(tmp_path, capsys, monkeypatch):
+    config_path = write_cli_config(tmp_path)
+    append(
+        tmp_path / "call_bookings.jsonl",
+        CallBooking(
+            task_id="851030",
+            manager_email="kate@example.com",
+            start_time=datetime(2026, 8, 11, 7, tzinfo=timezone.utc),
+        ),
+    )
+
+    cli.main(["--config", str(config_path), "bookings", "list"])
+
+    out = capsys.readouterr().out
+    assert "851030" in out
+    assert "kate@example.com" in out
+    assert "2026-08-11T07:00:00+00:00" in out
+
+
+def test_bookings_list_reports_an_empty_journal(tmp_path, capsys):
+    config_path = write_cli_config(tmp_path)
+
+    cli.main(["--config", str(config_path), "bookings", "list"])
+
+    assert "no bookings" in capsys.readouterr().out.lower()
+
+
+def test_bookings_rematch_clears_the_mark(tmp_path, monkeypatch):
+    config_path = write_cli_config(tmp_path)
+    service = MagicMock()
+    monkeypatch.setattr(cli.auth, "build_drive_service", lambda **kwargs: service)
+    cleared = []
+    monkeypatch.setattr(
+        cli.booking_gate, "clear_mark", lambda svc, fid: cleared.append(fid)
+    )
+
+    cli.main(["--config", str(config_path), "bookings", "rematch", "v1"])
+
+    assert cleared == ["v1"]
+
+
+def test_doctor_reports_call_booking_without_leaking_the_token(tmp_path, capsys):
+    config_path = write_cli_config(
+        tmp_path,
+        call_booking={
+            "enabled": True,
+            "authorization_token": "super-secret",
+            "listen_port": 9100,
+        },
+        planfix={
+            "create_comment_url": "https://crm.example.com/planfix_create_comment",
+            "token": "another-super-secret",
+        },
+    )
+
+    cli.main(["--config", str(config_path), "doctor"])
+
+    out = capsys.readouterr().out
+    assert "call_booking" in out
+    assert "9100" in out
+    assert "super-secret" not in out
+    # planfix.token uses the identical set/unset expression as call_booking's token
+    # and must be covered the same way -- a distinct secret so this assertion can't
+    # pass by accident from the call_booking one above matching a substring of it.
+    assert "planfix" in out
+    assert "another-super-secret" not in out

@@ -2,8 +2,8 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.6.0
-last_updated: 2026-07-17
+version: 2.8.0
+last_updated: 2026-08-12
 ---
 
 # gdstt CLI
@@ -18,20 +18,15 @@ Drive или локальную папку. Предпочитай безопа�
 не фиксируясь на одном. Заголовки разделов Keypoints остаются как в шаблоне
 (Задачи / Тезисы / Открытые вопросы).
 
-Настройка Google Drive (OAuth, scopes, поиск folder-id) описана в
-[README.md](../../README.md) репозитория, не здесь.
+Настройка Google Drive (OAuth, scopes, поиск folder-id) описана в [README.md](../../README.md) репозитория, не здесь.
 
 ## Быстрый старт
 
 Бери самый короткий путь под задачу:
 
-1. «сделай расшифровку последнего созвона» -> `gdstt latest --dry-run` ->
-   `gdstt latest` -> разобрать спикеров -> подтвердить маппинг -> `gdstt relabel`
-   -> записать `<base>.keypoints.md` -> положить в назначение.
-2. Обновление OAuth или headless-восстановление: `gdstt auth` или
-   `gdstt auth --manual`.
-3. Один файл с Drive: `gdstt process <file-id> --dry-run` ->
-   `gdstt process <file-id>`.
+1. «сделай расшифровку последнего созвона» -> `gdstt latest --dry-run` -> `gdstt latest` -> разобрать спикеров -> подтвердить маппинг -> `gdstt relabel` -> записать `<base>.keypoints.md` -> положить в назначение.
+2. Обновление OAuth или headless-восстановление: `gdstt auth` или `gdstt auth --manual`.
+3. Один файл с Drive: `gdstt process <file-id> --dry-run` -> `gdstt process <file-id>`.
 4. Только локальное аудио (без Drive): `gdstt transcribe <audio> -o out.txt`.
 5. Работа по всей папке: сначала превью через `gdstt run-once --dry-run`.
 6. Посмотреть состояние без трат: `gdstt list` и `gdstt doctor`.
@@ -44,25 +39,19 @@ uv run python -m src.cli <command> [args]
 .\.venv\Scripts\gdstt.exe <command> [args]   # Windows, локальный чекаут
 ```
 
-Используй `PYTHONIOENCODING=utf-8` или установленный `gdstt.exe`, когда печатаешь
-кириллические имена из ad-hoc Python/PowerShell-скриптов.
+Используй `PYTHONIOENCODING=utf-8` или установленный `gdstt.exe`, когда печатаешь кириллические имена из ad-hoc Python/PowerShell-скриптов.
 
 ## Границы команд
 
-- **Не тратят кредиты** (Drive-only и bootstrap, `load_config(validate_providers=False)`):
-  `auth`, `doctor`, `list` / `status`, `speakers set`.
-- **Могут тратить** Deepgram (и OpenAI при включённых пресетах), валидируют конфиг
-  провайдера: `run`, `run-once`, `process`, `reprocess`, `latest`, `transcribe`.
+- **Не тратят кредиты** (Drive-only и bootstrap, `load_config(validate_providers=False)`): `auth`, `doctor`, `list` / `status`, `speakers set`.
+- **Могут тратить** Deepgram (и OpenAI при включённых пресетах), валидируют конфиг провайдера: `run`, `run-once`, `process`, `reprocess`, `latest`, `transcribe`.
 - `relabel` - локальное преобразование файла: Drive не трогает и ничего не тратит.
 
 ## Команды
 
 ### `auth [--manual] [response_url]`
 
-Создать или обновить OAuth-токен. Обычный режим открывает браузерный flow на
-localhost. `--manual` печатает URL авторизации; `response_url` завершает ручной
-обмен. По умолчанию токен пишется inline в `google.token`; в файловом режиме - в
-`google.token_file`.
+Создать или обновить OAuth-токен. Обычный режим открывает браузерный flow на localhost. `--manual` печатает URL авторизации; `response_url` завершает ручной обмен. По умолчанию токен пишется inline в `google.token`; в файловом режиме - в `google.token_file`.
 
 Источник Google-аутентификации **по умолчанию inline-first**: OAuth client JSON в
 `google.credentials`, токен в `google.token`, оба внутри `config.yml`. Файловый
@@ -74,24 +63,15 @@ inline, ни файл не заданы, загрузчик откатывает
 
 ### `auth-import-credentials <path>`
 
-Также доступно как `gdstt auth import-credentials <path>`. Прочитать скачанный
-OAuth client (Desktop app) JSON и записать inline под `google.credentials`
-(дефолтный inline-first путь, секреты не печатаются). Сбрасывает указатель
-`google.credentials_file`, чтобы источник был один.
+Также доступно как `gdstt auth import-credentials <path>`. Прочитать скачанный OAuth client (Desktop app) JSON и записать inline под `google.credentials` (дефолтный inline-first путь, секреты не печатаются). Сбрасывает указатель `google.credentials_file`, чтобы источник был один.
 
 ### `auth-use-files --credentials-file PATH [--token-file PATH]`
 
-Также доступно как `gdstt auth use-files ...`. Переключить в файловый режим
-(opt-in): записать `google.credentials_file`/`google.token_file` и удалить inline
-`google.credentials`/`google.token`. `--token-file` по умолчанию -
-`<папка credentials>/token.json`. Используй, когда не хочешь держать секреты inline
-в общем конфиге.
+Также доступно как `gdstt auth use-files ...`. Переключить в файловый режим (opt-in): записать `google.credentials_file`/`google.token_file` и удалить inline `google.credentials`/`google.token`. `--token-file` по умолчанию - `<папка credentials>/token.json`. Используй, когда не хочешь держать секреты inline в общем конфиге.
 
 ### `latest [--folder ID] [--dry-run] [--max-size SIZE] [--confirm-large]`
 
-Обработать самый свежий mp4 в папке (первой из `folders`, если не задан
-`--folder`). Сначала `--dry-run`, чтобы подтвердить, какой файл будет обработан.
-Понятно логирует, если mp4 в папке нет.
+Обработать самый свежий mp4 в папке (первой из `folders`, если не задан `--folder`). Сначала `--dry-run`, чтобы подтвердить, какой файл будет обработан. Понятно логирует, если mp4 в папке нет.
 
 ### `process <target> [--folder] [--reprocess-txt] [--dry-run] [--max-size SIZE] [--confirm-large]`
 
@@ -146,6 +126,15 @@ STT), `1..N`=пресеты в порядке цепочки (тратит OpenA
 
 Сохранить явные имена спикеров на исходном MP4 для будущей пост-обработки. Повторная
 обработка - отдельно и может тратить кредиты.
+
+### `bookings <list|rematch FILE_ID>`
+
+- `gdstt bookings list` - печатает полученные звонки (task id, email менеджера,
+  время начала) после дедупа и отсева старше 30д. С этого начинай, если запись
+  пропущена.
+- `gdstt bookings rematch <file-id>` - снимает метку `booking_match=none` на
+  Drive-MP4, чтобы следующий цикл опроса пересмотрел запись. Трогает только
+  метаданные, кредиты не тратит.
 
 ### `doctor [--drive]`
 
@@ -357,6 +346,17 @@ presets:
 `<!-- redacted: по просьбе участника -->`. Маркеров нет - отметь это одной строкой
 в финальном статусе.
 
+## Диагностика
+
+### A recording was skipped and never transcribed
+
+The polling loop skips a recording when `call_booking.disable_recognition` is on and it matched no booked call, and marks it so it is not reconsidered. The mark is written only while the receiver is confirmed listening — if it failed to bind its port, unmatched recordings are skipped and retried on the next cycle rather than marked. Diagnose in order:
+
+1. `gdstt bookings list` — is there a booking for that manager at that time at all?
+2. Does the recording's Drive name carry a meeting time (`… - 2026/08/08 09:00 GMT+04:00 – Recording`)? A renamed or hand-uploaded file has none and can never match.
+3. Does the `folders` entry for that folder have the manager's `email`?
+4. Once fixed: `gdstt bookings rematch <file-id>`, or just process it directly with `gdstt process <file-id>` — manual commands ignore both the mark and the gate.
+
 ## Правила безопасности
 
 - Спрашивай перед командами, которые меняют Drive, локальные auth-файлы или
@@ -390,8 +390,7 @@ presets:
 - Идемпотентность - через `appProperties.source_video_id`, пер-артефактный
   `appProperties.artifact_type` (каждый пресет детектится отдельно через `artifact_ids`
   в `list_folder_state`) и совпадение по стему (legacy); соседние файлы обновляются на месте.
-- Транзиентные чтения метаданных Drive, состояния папки и загрузки повторяются до
-  отказа цикла. Загрузки автоматически не повторяются.
+- Транзиентные чтения метаданных Drive и состояния папки повторяются до отказа цикла; загрузки автоматически не повторяются.
 - `process_item` логирует провайдера, исход, повторы и длительность; `run-once` -
   сводку по папке и сводку цикла (pending/processed/failed).
 - `output.target=drive` пишет артефакты как соседние файлы Drive; `output.target=folder` - в `output.dir`.

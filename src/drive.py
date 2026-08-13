@@ -20,6 +20,11 @@ PAGE_SIZE = 1000
 SOURCE_VIDEO_ID_PROPERTY = "source_video_id"
 ARTIFACT_TYPE_PROPERTY = "artifact_type"
 SPEAKER_NAMES_PROPERTY = "speaker_names"
+BOOKING_MATCH_PROPERTY = "booking_match"
+PLANFIX_COMMENT_TASK_ID_PROPERTY = "planfix_comment_task_id"
+# The single value ``booking_match`` ever takes: this recording matched no booked
+# call, so the polling loop must leave it alone.
+BOOKING_MATCH_NONE = "none"
 _LOCAL_FILENAME_UNSAFE_RE = re.compile(r'[<>:"/\\|?*\0]')
 
 
@@ -162,6 +167,7 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
         for artifact_type, f in artifacts_by_source_id.get(mp4["id"], {}).items():
             artifact_ids[artifact_type] = f["id"]
 
+        mp4_props = mp4.get("appProperties", {}) or {}
         items.append({
             "file": mp4,
             "has_mp3": mp3 is not None,
@@ -170,6 +176,10 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
             "mp3_name": mp3["name"] if mp3 else None,
             "txt_id": txt["id"] if txt else None,
             "artifact_ids": artifact_ids,
+            "booking_match": mp4_props.get(BOOKING_MATCH_PROPERTY, ""),
+            "planfix_comment_task_id": mp4_props.get(
+                PLANFIX_COMMENT_TASK_ID_PROPERTY, ""
+            ),
         })
     return items
 

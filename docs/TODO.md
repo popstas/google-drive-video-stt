@@ -1,6 +1,6 @@
 # TODO
 
-- [ ] настроить связь видео с задачами в crm planfix.
+- [x] настроить связь видео с задачами в crm planfix.
   В файле data/config.yml должна быть секция `call_booking`:
   - `webhook_url`
   - `authorization_token`

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
-from src import auth, drive
+from src import auth, booking_gate, call_booking, drive
 from src import main as main_module
 from src import preset_pipeline, relabel_transcript
 from src.config import (
@@ -422,6 +422,19 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         print(f"  {folder.folder_id}: {_describe_employee(folder)}")
     print(f"stt.provider: {config.stt_provider or 'not configured'}")
     _print_preset_dag(config)
+    print(
+        f"call_booking: enabled={config.call_booking_enabled}, "
+        f"listen={config.call_booking_listen_host}:{config.call_booking_listen_port}, "
+        f"token={'set' if config.call_booking_token else 'unset'}, "
+        f"threshold_minutes={config.call_booking_threshold_minutes}, "
+        f"disable_recognition={config.call_booking_disable_recognition}"
+    )
+    print(
+        f"planfix: url={'set' if config.planfix_create_comment_url else 'unset'}, "
+        f"token={'set' if config.planfix_token else 'unset'}, "
+        f"presets={', '.join(config.planfix_presets) or '(none)'}"
+    )
+    print(f"call bookings journal: {config.call_bookings_file}")
 
     if not args.drive:
         print("Drive auth: not checked (use --drive)")
@@ -494,6 +507,35 @@ def cmd_speakers_set(args: argparse.Namespace) -> None:
         {drive.SPEAKER_NAMES_PROPERTY: names},
     )
     logger.info("Speaker names saved on %s", args.target)
+
+
+def cmd_bookings_list(args: argparse.Namespace) -> None:
+    """Print the booking journal after dedupe and pruning.
+
+    This is the first thing to look at when a recording did not match: it shows what
+    the matcher actually had to work with.
+    """
+    config = load_config(config_path=args.config, validate_providers=False)
+    bookings = call_booking.load(config.call_bookings_file)
+    if not bookings:
+        print(f"No bookings in {config.call_bookings_file}")
+        return
+    for booking in sorted(bookings, key=lambda b: b.start_time):
+        print(
+            f"{booking.task_id}\t{booking.manager_email}\t"
+            f"{booking.start_time.isoformat()}"
+        )
+
+
+def cmd_bookings_rematch(args: argparse.Namespace) -> None:
+    """Clear the unmatched mark so the polling loop reconsiders a recording."""
+    config = load_config(config_path=args.config, validate_providers=False)
+    service = auth.build_drive_service(config=config)
+    booking_gate.clear_mark(service, args.target)
+    print(
+        f"Cleared the unmatched mark on {args.target}; "
+        f"the next polling cycle will reconsider it"
+    )
 
 
 def cmd_transcribe(args: argparse.Namespace) -> None:
@@ -866,6 +908,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_speakers_set.add_argument("target", help="Drive MP4 file ID")
     p_speakers_set.add_argument("names", nargs="+", help="Speaker names in order")
     p_speakers_set.set_defaults(func=cmd_speakers_set)
+
+    p_bookings = sub.add_parser(
+        "bookings",
+        help="Inspect received call bookings and revive skipped recordings",
+    )
+    bookings_sub = p_bookings.add_subparsers(dest="bookings_command", required=True)
+    p_bookings_list = bookings_sub.add_parser(
+        "list", help="Print the call bookings currently in the journal"
+    )
+    p_bookings_list.set_defaults(func=cmd_bookings_list)
+    p_bookings_rematch = bookings_sub.add_parser(
+        "rematch",
+        help="Clear the unmatched mark on a Drive MP4 so it is reconsidered",
+    )
+    p_bookings_rematch.add_argument("target", help="Drive MP4 file ID")
+    p_bookings_rematch.set_defaults(func=cmd_bookings_rematch)
 
     p_transcribe = sub.add_parser(
         "transcribe", help="Transcribe a local audio file with the configured provider"

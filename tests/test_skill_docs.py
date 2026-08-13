@@ -364,3 +364,17 @@ def test_claude_doc_points_back_to_agents():
 
     assert "Primary shared repo instructions live in [AGENTS.md](AGENTS.md)." in text
     assert "[AGENTS.md](AGENTS.md) is the source of truth." in text
+
+
+def test_skill_documents_the_bookings_commands():
+    text = Path("skills/gdstt-cli/SKILL.md").read_text(encoding="utf-8")
+
+    assert "gdstt bookings list" in text
+    assert "gdstt bookings rematch" in text
+
+
+def test_agents_documents_the_call_booking_invariants():
+    text = Path("AGENTS.md").read_text(encoding="utf-8")
+
+    assert "call_booking" in text
+    assert "planfix" in text

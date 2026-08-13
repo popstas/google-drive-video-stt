@@ -46,6 +46,13 @@ def _load_config(tmp_path, data, *, validate_providers=False):
     return load_config(config_path=config_file, validate_providers=validate_providers)
 
 
+def write_config(tmp_path, mapping):
+    """Write ``mapping`` to ``<tmp_path>/config.yml`` and return its path."""
+    path = tmp_path / "config.yml"
+    _write_yaml(path, mapping)
+    return path
+
+
 # Only the enabled built-ins: `merge_presets` drops disabled ones, so opt-in
 # built-ins like `meta` are absent from a loaded config until it turns them on.
 _BUILTIN_NAMES = {preset.name for preset in BUILTIN_PRESETS if preset.enabled}
@@ -1842,6 +1849,33 @@ def test_config_get_masks_webhook_token(tmp_path):
     assert config_get("webhook.url", config_path=config_file) == "https://example.com/***"
 
 
+def test_config_get_masks_call_booking_authorization_token(tmp_path):
+    config_file = _base_config_file(tmp_path)
+    config_set(
+        "call_booking.authorization_token", "call-SECRET", config_path=config_file
+    )
+
+    # The receiver authenticates bookings with this bearer token; it must be masked
+    # in both the whole-config dump and a single-key lookup, like webhook.token.
+    whole = config_get(config_path=config_file)
+    assert "call-SECRET" not in whole
+    assert "***" in whole
+    assert (
+        config_get("call_booking.authorization_token", config_path=config_file)
+        == "***"
+    )
+
+    # --show-secrets reveals it, same as any other masked leaf.
+    assert (
+        config_get(
+            "call_booking.authorization_token",
+            config_path=config_file,
+            show_secrets=True,
+        )
+        == "call-SECRET"
+    )
+
+
 def test_config_get_redacts_webhook_url_query_and_credentials(tmp_path):
     config_file = _base_config_file(tmp_path)
     config_set(
@@ -2259,3 +2293,128 @@ def test_fresh_config_is_owner_only(tmp_path):
     init_config(config_path=config_file)  # brand-new file
     mode = stat.S_IMODE(config_file.stat().st_mode)
     assert mode == 0o600
+
+
+# --- call_booking / planfix --------------------------------------------------
+
+
+CALL_BOOKING_BASE = {
+    "folders": [{"folder_id": "f1", "name": "Ekaterina", "email": "kate@example.com"}],
+    "stt": {"provider": "deepgram", "deepgram": {"api_key": "dg"}},
+    "openai": {"api_key": "sk-test"},
+}
+
+
+def test_call_booking_defaults_to_disabled(tmp_path):
+    config = load_config(config_path=write_config(tmp_path, CALL_BOOKING_BASE))
+
+    assert config.call_booking_enabled is False
+    assert config.call_booking_listen_host == "0.0.0.0"
+    assert config.call_booking_listen_port == 8080
+    assert config.call_booking_token == ""
+    assert config.call_booking_threshold_minutes == 15
+    assert config.call_booking_disable_recognition is False
+
+
+def test_planfix_defaults(tmp_path):
+    config = load_config(config_path=write_config(tmp_path, CALL_BOOKING_BASE))
+
+    assert config.planfix_create_comment_url == ""
+    assert config.planfix_token == ""
+    assert config.planfix_presets == ("keypoints",)
+
+
+def test_call_booking_and_planfix_are_parsed(tmp_path):
+    raw = {
+        **CALL_BOOKING_BASE,
+        "call_booking": {
+            "enabled": True,
+            "listen_host": "127.0.0.1",
+            "listen_port": 9100,
+            "authorization_token": "secret-token",
+            "threshold_minutes": 20,
+            "disable_recognition": True,
+        },
+        "planfix": {
+            "create_comment_url": "https://crm.example.com/planfix_create_comment",
+            "token": "planfix-token",
+            "presets": ["keypoints", "action-items"],
+        },
+    }
+
+    config = load_config(config_path=write_config(tmp_path, raw))
+
+    assert config.call_booking_enabled is True
+    assert config.call_booking_listen_host == "127.0.0.1"
+    assert config.call_booking_listen_port == 9100
+    assert config.call_booking_token == "secret-token"
+    assert config.call_booking_threshold_minutes == 20
+    assert config.call_booking_disable_recognition is True
+    assert config.planfix_create_comment_url == (
+        "https://crm.example.com/planfix_create_comment"
+    )
+    assert config.planfix_token == "planfix-token"
+    assert config.planfix_presets == ("keypoints", "action-items")
+
+
+def test_enabled_receiver_without_token_is_rejected(tmp_path):
+    raw = {**CALL_BOOKING_BASE, "call_booking": {"enabled": True}}
+
+    with pytest.raises(ValueError, match="authorization_token"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_disable_recognition_with_an_emailless_folder_is_rejected(tmp_path):
+    raw = {
+        **CALL_BOOKING_BASE,
+        "folders": [
+            {"folder_id": "f1", "name": "Ekaterina", "email": "kate@example.com"},
+            {"folder_id": "f2", "name": "Nameless"},
+        ],
+        "call_booking": {
+            "enabled": True,
+            "authorization_token": "t",
+            "disable_recognition": True,
+        },
+    }
+
+    with pytest.raises(ValueError, match="f2"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_threshold_minutes_must_be_positive(tmp_path):
+    raw = {
+        **CALL_BOOKING_BASE,
+        "call_booking": {"threshold_minutes": 0},
+    }
+
+    with pytest.raises(ValueError, match="threshold_minutes"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_call_bookings_file_sits_next_to_the_config(tmp_path):
+    config_path = write_config(tmp_path, CALL_BOOKING_BASE)
+
+    config = load_config(config_path=config_path)
+
+    assert config.call_bookings_file == config_path.parent / "call_bookings.jsonl"
+
+
+def test_generated_config_ships_the_new_sections(tmp_path):
+    init_config(config_path=tmp_path / "config.yml")
+
+    raw = yaml.safe_load((tmp_path / "config.yml").read_text(encoding="utf-8"))
+
+    assert raw["call_booking"] == {
+        "enabled": False,
+        "listen_host": "0.0.0.0",
+        "listen_port": 8080,
+        "authorization_token": "",
+        "threshold_minutes": 15,
+        "disable_recognition": False,
+    }
+    assert raw["planfix"] == {
+        "create_comment_url": "",
+        "token": "",
+        "presets": ["keypoints"],
+    }

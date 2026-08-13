@@ -14,7 +14,18 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 import requests
 
-from src import drive, meta as meta_module, notify, output, postprocess, preset_pipeline, webhook
+from src import (
+    booking_gate,
+    booking_server,
+    drive,
+    meta as meta_module,
+    notify,
+    output,
+    planfix,
+    postprocess,
+    preset_pipeline,
+    webhook,
+)
 from src.auth import AuthError, build_drive_service
 from src.config import Config, is_run_enabled, load_config
 from src.extractor import extract_m4a_copy, extract_mp3
@@ -509,6 +520,79 @@ def _webhook_payload(
     }
 
 
+def _planfix_description(
+    artifacts: dict[str, str], preset_names: tuple[str, ...]
+) -> str:
+    """Concatenate the configured preset artifacts into one comment body.
+
+    Presets are joined in configured order, each under its own heading, and a preset
+    with no artifact is skipped rather than emitting an empty section.
+    """
+    sections = [
+        f"## {name}\n{artifacts[name].strip()}"
+        for name in preset_names
+        if artifacts.get(name, "").strip()
+    ]
+    return "\n\n".join(sections)
+
+
+def _send_planfix_comment(
+    service: Any,
+    item: dict,
+    file_id: str,
+    config: Config,
+    artifacts: dict[str, str],
+    booking_decision: booking_gate.BookingDecision,
+) -> None:
+    """Post the meeting summary into the matched Planfix task, exactly once.
+
+    `process_item` can legitimately reach its success path more than once per file — a
+    later cycle that backfills a newly configured preset re-feeds the transcript — so
+    the `planfix_comment_task_id` marker, written only after a successful POST, is what
+    keeps a second pass from posting a duplicate comment into the task.
+    """
+    if not booking_decision.is_matched:
+        return
+    if not config.planfix_create_comment_url:
+        return
+    if item.get("planfix_comment_task_id"):
+        logger.debug("Planfix comment already sent for %s, skipping", file_id)
+        return
+
+    description = _planfix_description(artifacts, config.planfix_presets)
+    if not description:
+        logger.warning(
+            "No configured Planfix preset produced text for %s; nothing to comment",
+            file_id,
+        )
+        return
+
+    sent = planfix.send_comment(
+        url=config.planfix_create_comment_url,
+        token=config.planfix_token,
+        proxy_url=config.proxy_url,
+        task_id=booking_decision.task_id,
+        description=description,
+    )
+    if sent:
+        drive.set_file_app_properties(
+            service,
+            file_id,
+            {drive.PLANFIX_COMMENT_TASK_ID_PROPERTY: booking_decision.task_id},
+        )
+        return
+
+    # Unlike the completion webhook, a lost CRM comment is invisible to a human, so it
+    # escalates. No marker is written, so `gdstt reprocess` can resend it.
+    notify.notify_error(
+        f"Failed to create the Planfix comment on task {booking_decision.task_id} "
+        f"for {item.get('file', {}).get('name')}; rerun `gdstt reprocess {file_id}`",
+        telegram_bot_token=config.telegram_bot_token,
+        telegram_chat_id=config.telegram_chat_id,
+        proxy_url=config.proxy_url,
+    )
+
+
 def process_item(
     service: Any,
     item: dict,
@@ -517,6 +601,7 @@ def process_item(
     *,
     reprocess_txt: bool = False,
     reprocess_presets: list[str] | None = None,
+    booking_decision: booking_gate.BookingDecision | None = None,
 ) -> _ProcessTelemetry | None:
     file_info = item["file"]
     file_id = file_info["id"]
@@ -543,6 +628,11 @@ def process_item(
 
     if not needs_mp3 and not needs_txt and not needs_presets:
         return
+
+    # `run_once` resolves this itself so it can gate and count; the manual commands do
+    # not, and get a decision here purely so a matched call still reaches Planfix.
+    if booking_decision is None:
+        booking_decision = booking_gate.resolve(file_info, folder_id, config)
 
     provider = _processing_provider(config, needs_txt=needs_txt)
     processing_mode = _processing_mode(needs_mp3=needs_mp3, needs_txt=needs_txt)
@@ -724,6 +814,15 @@ def process_item(
             )
         except Exception as exc:
             logger.warning("Completion webhook failed: %s", type(exc).__name__)
+
+        try:
+            _send_planfix_comment(
+                service, item, file_id, config, artifacts, booking_decision
+            )
+        except Exception as exc:
+            # A file that transcribed and uploaded must count as processed even if the
+            # CRM hand-off misbehaves.
+            logger.warning("Planfix comment failed: %s", type(exc).__name__)
 
     return _ProcessTelemetry(
         provider=provider,
@@ -978,6 +1077,7 @@ def run_once(
     cycle_failed = 0
     cycle_retry_total = 0
     cycle_skipped_size = 0
+    cycle_skipped_unmatched = 0
     cycle_folder_errors = 0
 
     for folder in config.folders:
@@ -1006,6 +1106,12 @@ def run_once(
 
         _apply_local_output_state(items, config)
         pending = _pending_items(items, config)
+        # A marked recording is settled: reconsidering it every cycle would re-log and
+        # re-decide forever. `gdstt bookings rematch` or any manual command revives it.
+        pending = [
+            item for item in pending
+            if item.get("booking_match") != drive.BOOKING_MATCH_NONE
+        ]
         pending_before_size = len(pending)
         pending = _items_allowed_by_size(
             pending,
@@ -1028,8 +1134,46 @@ def run_once(
                 _log_dry_run(folder_id, item, config, reprocess_txt=False)
             continue
         for item in pending:
+            decision = booking_gate.resolve(item["file"], folder_id, config)
+            if (
+                decision.state == booking_gate.UNMATCHED
+                and config.call_booking_disable_recognition
+            ):
+                file_name = item.get("file", {}).get("name")
+                if booking_server.is_running():
+                    # Permanent by design: the booking arrives before the call, so a
+                    # recording with no booking is not a client call.
+                    try:
+                        booking_gate.mark_unmatched(service, item["file"]["id"])
+                    except (RefreshError, AuthError):
+                        raise
+                    except Exception:
+                        # A transient Drive failure here must not kill the polling
+                        # loop; the file stays unmarked and is retried next cycle.
+                        logger.exception(
+                            "Failed to mark %s in folder %s as unmatched; will "
+                            "retry next cycle",
+                            file_name, folder_id,
+                        )
+                    else:
+                        logger.info(
+                            "Skipping %s in folder %s: no booked call (%s); marked "
+                            "so it is not reconsidered (undo with `gdstt bookings "
+                            "rematch`)",
+                            file_name, folder_id, decision.reason,
+                        )
+                else:
+                    logger.warning(
+                        "Skipping %s in folder %s: no booked call (%s), but the "
+                        "booking receiver is not listening, so it is not marked",
+                        file_name, folder_id, decision.reason,
+                    )
+                cycle_skipped_unmatched += 1
+                continue
             try:
-                telemetry = process_item(service, item, folder_id, config)
+                telemetry = process_item(
+                    service, item, folder_id, config, booking_decision=decision
+                )
                 cycle_processed += 1
                 cycle_retry_total += _retry_count_from_process_result(telemetry)
             except (RefreshError, AuthError):
@@ -1051,7 +1195,8 @@ def run_once(
 
     logger.info(
         "Cycle summary [provider=%s, outcome=%s, folders=%d, pending=%d, processed=%d, failed=%d, "
-        "retry_total=%d, skipped_size=%d, folder_errors=%d, dry_run=%s, duration_s=%.3f]",
+        "retry_total=%d, skipped_size=%d, skipped_unmatched=%d, folder_errors=%d, dry_run=%s, "
+        "duration_s=%.3f]",
         config.stt_provider or "artifact-only",
         _cycle_outcome(
             dry_run=dry_run,
@@ -1064,6 +1209,7 @@ def run_once(
         cycle_failed,
         cycle_retry_total,
         cycle_skipped_size,
+        cycle_skipped_unmatched,
         cycle_folder_errors,
         dry_run,
         time.monotonic() - cycle_started_at,
@@ -1092,6 +1238,23 @@ def main(*, config_path: str | Path | None = None) -> None:
             proxy_url=config.proxy_url,
         )
         raise SystemExit(1) from exc
+
+    try:
+        booking_server.start(config)
+    except OSError as exc:
+        # Degrade, do not exit: transcription is the primary job. With the receiver
+        # down the gate refuses to mark anything (see `run_once`), so nothing is lost --
+        # unmatched files simply wait.
+        logger.exception("Booking receiver failed to start; continuing without it")
+        notify.notify_error(
+            f"Booking receiver failed to start on "
+            f"{config.call_booking_listen_host}:{config.call_booking_listen_port}: "
+            f"{exc}. Call bookings are not being received; recordings will not be "
+            f"marked as unmatched until it is back.",
+            telegram_bot_token=config.telegram_bot_token,
+            telegram_chat_id=config.telegram_chat_id,
+            proxy_url=config.proxy_url,
+        )
 
     paused_logged = False
     while True:

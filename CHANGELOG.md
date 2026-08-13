@@ -9,6 +9,7 @@
 
 ### Documentation
 
+- Design restoring Drive modifiedTime after appProperty writes
 - Plan the Planfix call-booking implementation
 - Design the Planfix call-booking integration
 

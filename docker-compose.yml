@@ -11,6 +11,16 @@ services:
       GDSTT_HOME: /app/data
     volumes:
       - ./data:/app/data
+    # The call-booking receiver's port. call_booking.enabled defaults to false, so
+    # nothing inside the container listens on 8080 until it is turned on in
+    # config.yml -- publishing the port unconditionally would break `docker compose
+    # up` for any existing deployment where host port 8080 happens to be taken by
+    # something else. Uncomment below when call_booking.enabled is turned on, and
+    # keep a TLS-terminating reverse proxy in front of it: the bearer token and the
+    # booking payload must not cross the network in plain text. Change both sides
+    # together with call_booking.listen_port in config.yml.
+    # ports:
+    #   - "8080:8080"
     logging:
       driver: json-file
       options:

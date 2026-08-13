@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import logging
 import ssl
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from google.auth.exceptions import RefreshError
+from googleapiclient.errors import HttpError
 
 from src import main
 from src.auth import AuthError
+from src.booking_gate import BookingDecision
+from src.call_booking import CallBooking
+from src.call_booking import append as append_booking
 from src.config import Config, EmployeeFolder
 from src.presets import BUILTIN_PRESETS, Preset
 from src.preset_pipeline import PresetResult
@@ -975,7 +981,7 @@ def test_run_once_continues_on_per_file_error(mocker):
 
     processed_ids = []
 
-    def fake_process(svc, item, folder, c):
+    def fake_process(svc, item, folder, c, *, booking_decision=None):
         if item["file"]["id"] == "bad":
             raise RuntimeError("ffmpeg failed")
         processed_ids.append(item["file"]["id"])
@@ -1234,7 +1240,7 @@ def test_run_once_logs_folder_and_cycle_summary(mocker, caplog):
     assert "Folder f1 summary [total=2, pending=1, skipped_size=0, dry_run=False]" in caplog.text
     assert (
         "Cycle summary [provider=deepgram, outcome=success, folders=1, pending=1, "
-        "processed=1, failed=0, retry_total=0, skipped_size=0, "
+        "processed=1, failed=0, retry_total=0, skipped_size=0, skipped_unmatched=0, "
         "folder_errors=0, dry_run=False, duration_s=1.250]"
     ) in caplog.text
 
@@ -2781,3 +2787,483 @@ def test_process_summary_log_omits_artifact_text(mocker, tmp_path, caplog):
     assert len(summary) == 1
     assert "confidential" not in summary[0]
     assert "secret words" not in summary[0]
+
+
+# --- call-booking gate helpers -------------------------------------------------
+
+GATE_FOLDER_ID = "f1"
+
+
+@pytest.fixture
+def gate_config(tmp_path):
+    """A config with the receiver enabled and the gate armed."""
+    config_file = tmp_path / "config.yml"
+    config_file.write_text("", encoding="utf-8")
+    return Config(
+        folders=(
+            EmployeeFolder(
+                folder_id=GATE_FOLDER_ID, name="Kate", email="kate@example.com"
+            ),
+        ),
+        poll_interval=600,
+        bitrate="96k",
+        data_dir=tmp_path,
+        proxy_url="",
+        stt_provider="deepgram",
+        openai_api_key="sk",
+        deepgram_api_key="dg",
+        stt_language="ru",
+        call_booking_enabled=True,
+        call_booking_disable_recognition=True,
+        call_booking_threshold_minutes=15,
+        config_file=config_file,
+    )
+
+
+def gate_item(file_id="v1", *, booking_match="", planfix_comment_task_id=""):
+    """One `list_folder_state` item for an mp4 that still needs a transcript."""
+    return {
+        "file": {"id": file_id, "name": f"{file_id}.mp4", "mimeType": "video/mp4"},
+        "has_mp3": True,
+        "has_txt": False,
+        "mp3_id": None,
+        "mp3_name": None,
+        "txt_id": None,
+        "artifact_ids": {},
+        "booking_match": booking_match,
+        "planfix_comment_task_id": planfix_comment_task_id,
+    }
+
+
+def patch_folder_items(monkeypatch, items):
+    monkeypatch.setattr(main.drive, "list_folder_state", lambda service, fid: items)
+
+
+def patch_decision(monkeypatch, decision):
+    monkeypatch.setattr(
+        main.booking_gate, "resolve", lambda file_info, folder_id, config: decision
+    )
+
+
+UNMATCHED_DECISION = BookingDecision(state="unmatched", reason="no-booking")
+MATCHED_DECISION = BookingDecision(state="matched", task_id="851030")
+
+
+def test_run_once_skips_and_marks_an_unmatched_recording(monkeypatch, gate_config):
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_decision(monkeypatch, UNMATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    marked = []
+    monkeypatch.setattr(
+        main.booking_gate, "mark_unmatched", lambda svc, fid: marked.append(fid)
+    )
+    process_item = MagicMock()
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), gate_config)
+
+    process_item.assert_not_called()
+    assert marked == ["v1"]
+
+
+def test_run_once_survives_a_drive_failure_while_marking(monkeypatch, gate_config, caplog):
+    """A transient Drive error from mark_unmatched must not kill the polling loop.
+
+    Carried from the Task 6 review: mark_unmatched/clear_mark do not catch Drive
+    API exceptions themselves, so run_once must contain the failure.
+    """
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_decision(monkeypatch, UNMATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+
+    def raise_http_error(svc, fid):
+        raise HttpError(MagicMock(status=503), b"unavailable")
+
+    monkeypatch.setattr(main.booking_gate, "mark_unmatched", raise_http_error)
+    process_item = MagicMock()
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    with caplog.at_level(logging.INFO):
+        main.run_once(MagicMock(), gate_config)
+
+    process_item.assert_not_called()
+    assert "Failed to mark" in caplog.text
+    assert "skipped_unmatched=1" in caplog.text
+
+
+def test_run_once_does_not_mark_when_the_receiver_is_down(
+    monkeypatch, gate_config, caplog
+):
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: False)
+    patch_decision(monkeypatch, UNMATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    marked = []
+    monkeypatch.setattr(
+        main.booking_gate, "mark_unmatched", lambda svc, fid: marked.append(fid)
+    )
+    process_item = MagicMock()
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    with caplog.at_level(logging.WARNING):
+        main.run_once(MagicMock(), gate_config)
+
+    process_item.assert_not_called()
+    assert marked == []
+    assert "not listening" in caplog.text
+
+
+def test_run_once_counts_skipped_unmatched_separately(monkeypatch, gate_config, caplog):
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_decision(monkeypatch, UNMATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    monkeypatch.setattr(main.booking_gate, "mark_unmatched", lambda svc, fid: None)
+
+    with caplog.at_level(logging.INFO):
+        main.run_once(MagicMock(), gate_config)
+
+    assert "skipped_unmatched=1" in caplog.text
+    assert "processed=0" in caplog.text
+
+
+def test_run_once_never_revisits_an_already_marked_recording(monkeypatch, gate_config):
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    resolve = MagicMock()
+    monkeypatch.setattr(main.booking_gate, "resolve", resolve)
+    patch_folder_items(monkeypatch, [gate_item("v1", booking_match="none")])
+    process_item = MagicMock()
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), gate_config)
+
+    process_item.assert_not_called()
+    resolve.assert_not_called()
+
+
+def test_run_once_processes_a_matched_recording(monkeypatch, gate_config):
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_decision(monkeypatch, MATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    process_item = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), gate_config)
+
+    process_item.assert_called_once()
+    assert process_item.call_args.kwargs["booking_decision"] == MATCHED_DECISION
+
+
+def test_run_once_processes_when_disable_recognition_is_off(monkeypatch, gate_config):
+    permissive = replace(gate_config, call_booking_disable_recognition=False)
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_decision(monkeypatch, UNMATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    marked = []
+    monkeypatch.setattr(
+        main.booking_gate, "mark_unmatched", lambda svc, fid: marked.append(fid)
+    )
+    process_item = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), permissive)
+
+    process_item.assert_called_once()
+    assert marked == []
+
+
+def test_process_target_ignores_the_mark_and_the_gate(monkeypatch, gate_config):
+    """Manual processing is the supported way to undo a mark."""
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_folder_items(monkeypatch, [gate_item("v1", booking_match="none")])
+    monkeypatch.setattr(
+        main.drive,
+        "get_file_metadata",
+        lambda service, fid: {
+            "id": "v1", "name": "v1.mp4", "mimeType": "video/mp4",
+            "parents": [GATE_FOLDER_ID],
+        },
+    )
+    marked = []
+    monkeypatch.setattr(
+        main.booking_gate, "mark_unmatched", lambda svc, fid: marked.append(fid)
+    )
+    process_item = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.process_target(MagicMock(), "v1", gate_config, is_folder=False)
+
+    process_item.assert_called_once()
+    assert marked == []
+    assert process_item.call_args.kwargs.get("booking_decision") is None
+
+
+def test_process_target_folder_branch_ignores_the_mark_and_the_gate(
+    monkeypatch, gate_config
+):
+    """The folder branch shares ``_pending_items`` with ``run_once`` -- the one place
+    a regression could leak the gate into manual processing. `process_target` must
+    still process a marked item without ever consulting the gate.
+    """
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_folder_items(monkeypatch, [gate_item("v1", booking_match="none")])
+    resolve = MagicMock()
+    monkeypatch.setattr(main.booking_gate, "resolve", resolve)
+    marked = []
+    monkeypatch.setattr(
+        main.booking_gate, "mark_unmatched", lambda svc, fid: marked.append(fid)
+    )
+    process_item = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.process_target(MagicMock(), GATE_FOLDER_ID, gate_config, is_folder=True)
+
+    process_item.assert_called_once()
+    resolve.assert_not_called()
+    assert marked == []
+
+
+def test_run_once_matches_a_real_booking_through_the_real_gate(monkeypatch, gate_config):
+    """Integration coverage for the seam every other gate test mocks around: Drive
+    file name -> meeting_time.parse_meeting_start -> journal load -> match ->
+    decision. Only the Drive listing and process_item are mocked; a real Config and
+    a real ``booking_gate.resolve`` run against a journal seeded with
+    ``call_booking.append``.
+    """
+    # "2026/08/08 09:00 GMT+04:00" is one of the formats parse_meeting_start
+    # accepts (see src/meeting_time.py); it resolves to 2026-08-08T05:00:00Z.
+    file_name = "Call with Kate - 2026/08/08 09:00 GMT+04:00 – Recording.mp4"
+    video_start_utc = datetime(2026, 8, 8, 5, 0, tzinfo=timezone.utc)
+
+    append_booking(
+        gate_config.call_bookings_file,
+        CallBooking(
+            task_id="851030",
+            manager_email="kate@example.com",
+            start_time=video_start_utc + timedelta(minutes=5),
+        ),
+    )
+    patch_folder_items(
+        monkeypatch,
+        [
+            {
+                "file": {"id": "v1", "name": file_name, "mimeType": "video/mp4"},
+                "has_mp3": True,
+                "has_txt": False,
+                "mp3_id": None,
+                "mp3_name": None,
+                "txt_id": None,
+                "artifact_ids": {},
+                "booking_match": "",
+                "planfix_comment_task_id": "",
+            }
+        ],
+    )
+    process_item = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), gate_config)
+
+    process_item.assert_called_once()
+    decision = process_item.call_args.kwargs["booking_decision"]
+    assert decision.is_matched is True
+    assert decision.task_id == "851030"
+
+
+# --- Planfix comment ------------------------------------------------------------
+
+
+@pytest.fixture
+def planfix_config(gate_config):
+    return replace(
+        gate_config,
+        planfix_create_comment_url="https://crm.example.com/planfix_create_comment",
+        planfix_token="planfix-token",
+        planfix_presets=("keypoints",),
+    )
+
+
+def test_planfix_description_concatenates_presets_in_order():
+    description = main._planfix_description(
+        {"keypoints": "Задачи: раз", "action-items": "Сделать два", "meta": "topic: x"},
+        ("keypoints", "action-items"),
+    )
+
+    assert description == "## keypoints\nЗадачи: раз\n\n## action-items\nСделать два"
+
+
+def test_planfix_description_skips_presets_without_an_artifact():
+    description = main._planfix_description(
+        {"keypoints": "Задачи: раз"}, ("keypoints", "action-items")
+    )
+
+    assert description == "## keypoints\nЗадачи: раз"
+
+
+def test_planfix_description_is_blank_when_nothing_matched():
+    assert main._planfix_description({"meta": "topic: x"}, ("keypoints",)) == ""
+
+
+def test_comment_is_sent_for_a_matched_recording(monkeypatch, planfix_config):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.planfix, "send_comment", send)
+    marked = MagicMock()
+    monkeypatch.setattr(main.drive, "set_file_app_properties", marked)
+
+    main._send_planfix_comment(
+        MagicMock(), gate_item("v1"), "v1", planfix_config,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_called_once()
+    assert send.call_args.kwargs["task_id"] == "851030"
+    assert send.call_args.kwargs["description"] == "## keypoints\nЗадачи: раз"
+    marked.assert_called_once()
+    assert marked.call_args[0][2] == {"planfix_comment_task_id": "851030"}
+
+
+def test_comment_is_not_sent_twice(monkeypatch, planfix_config):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.planfix, "send_comment", send)
+
+    main._send_planfix_comment(
+        MagicMock(),
+        gate_item("v1", planfix_comment_task_id="851030"),
+        "v1", planfix_config, {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_not_called()
+
+
+def test_comment_is_not_sent_for_an_unmatched_recording(monkeypatch, planfix_config):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.planfix, "send_comment", send)
+
+    main._send_planfix_comment(
+        MagicMock(), gate_item("v1"), "v1", planfix_config,
+        {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+    )
+
+    send.assert_not_called()
+
+
+def test_comment_is_not_sent_when_the_url_is_blank(monkeypatch, planfix_config):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.planfix, "send_comment", send)
+    unconfigured = replace(planfix_config, planfix_create_comment_url="")
+
+    main._send_planfix_comment(
+        MagicMock(), gate_item("v1"), "v1", unconfigured,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_not_called()
+
+
+def test_failed_comment_notifies_telegram_and_leaves_no_marker(
+    monkeypatch, planfix_config
+):
+    send = MagicMock(return_value=False)
+    monkeypatch.setattr(main.planfix, "send_comment", send)
+    marked = MagicMock()
+    monkeypatch.setattr(main.drive, "set_file_app_properties", marked)
+    notified = MagicMock()
+    monkeypatch.setattr(main.notify, "notify_error", notified)
+
+    main._send_planfix_comment(
+        MagicMock(), gate_item("v1"), "v1", planfix_config,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_called_once()
+    # No marker means `gdstt reprocess` can resend it.
+    marked.assert_not_called()
+    notified.assert_called_once()
+
+
+def test_process_item_sends_the_comment_on_the_success_path(mocker, tmp_path):
+    """Copy of ``test_webhook_fired_once_with_employee_and_artifacts``: same arrange,
+    with `_send_planfix_comment` mocked and `booking_decision` passed through."""
+    _mock_successful_run(mocker, tmp_path)
+    sent = MagicMock()
+    mocker.patch.object(main, "_send_planfix_comment", sent)
+
+    main.process_item(
+        MagicMock(),
+        _item("fid", "video.mp4"),
+        "folderX",
+        _webhook_config(),
+        booking_decision=MATCHED_DECISION,
+    )
+
+    sent.assert_called_once()
+
+
+def test_process_item_withholds_the_comment_when_a_preset_produced_nothing(
+    mocker, tmp_path
+):
+    """Copy of ``test_webhook_withheld_while_a_preset_produced_no_artifact``: same
+    arrange (a blank ``meta`` preset), with `_send_planfix_comment` mocked and
+    `booking_decision` passed through."""
+    _mock_successful_run(mocker, tmp_path, meta_text="   ")
+    sent = MagicMock()
+    mocker.patch.object(main, "_send_planfix_comment", sent)
+
+    main.process_item(
+        MagicMock(),
+        _item("fid", "video.mp4"),
+        "folderX",
+        _webhook_config(),
+        booking_decision=MATCHED_DECISION,
+    )
+
+    sent.assert_not_called()
+
+
+# --- start the receiver from the polling loop ----------------------------------
+
+
+class _StopLoop(Exception):
+    """Raised from a patched time.sleep to break main()'s infinite loop."""
+
+
+def stop_after_one_cycle(monkeypatch, config):
+    """Patch main() down to one cycle. Returns the run_once mock."""
+    monkeypatch.setattr(main, "load_config", lambda **kwargs: config)
+    monkeypatch.setattr(main, "build_drive_service", lambda **kwargs: MagicMock())
+    monkeypatch.setattr(main, "is_run_enabled", lambda **kwargs: True)
+    run_once = MagicMock()
+    monkeypatch.setattr(main, "run_once", run_once)
+
+    def _sleep(_seconds):
+        raise _StopLoop
+
+    monkeypatch.setattr(main.time, "sleep", _sleep)
+    return run_once
+
+
+def test_main_starts_the_receiver_when_enabled(monkeypatch, gate_config):
+    start = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr(main.booking_server, "start", start)
+    stop_after_one_cycle(monkeypatch, gate_config)
+
+    with pytest.raises(_StopLoop):
+        main.main()
+
+    start.assert_called_once_with(gate_config)
+
+
+def test_main_survives_a_receiver_bind_failure(monkeypatch, gate_config, caplog):
+    monkeypatch.setattr(
+        main.booking_server, "start", MagicMock(side_effect=OSError("port in use"))
+    )
+    notified = MagicMock()
+    monkeypatch.setattr(main.notify, "notify_error", notified)
+    run_once = stop_after_one_cycle(monkeypatch, gate_config)
+
+    with caplog.at_level(logging.ERROR), pytest.raises(_StopLoop):
+        main.main()
+
+    # The polling loop is the primary job; a dead receiver degrades the gate but must
+    # not stop transcription.
+    run_once.assert_called_once()
+    notified.assert_called_once()
+    assert "booking receiver" in caplog.text.lower()
