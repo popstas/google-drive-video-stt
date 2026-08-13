@@ -893,6 +893,11 @@ revives one. The mark is written only while the receiver is listening; if it fai
 to bind its port, unmatched recordings are skipped and retried on the next cycle
 rather than marked.
 
+Writing the mark counts as an edit in Drive, so it moves the recording's
+"Last modified" date. `gdstt bookings restore-dates --dry-run` lists the files
+whose date was moved that way, and the same command without the flag puts each
+one back to its creation time.
+
 ## Project layout
 
 ```

@@ -1,6 +1,21 @@
 # Changelog
 
 
+## Unreleased
+
+### Features
+
+- Add gdstt bookings restore-dates
+- Add Drive timestamp helpers and the stale-mark selection rule
+
+### Bug Fixes
+
+- Keep the Drive modifiedTime when writing appProperties
+
+### Documentation
+
+- Plan the Drive modifiedTime preservation and repair
+
 ## v0.4.0 - 2026-08-13
 
 ### Features

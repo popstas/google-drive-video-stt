@@ -220,16 +220,79 @@ def test_update_file_accepts_app_properties(tmp_path, mocker):
 
 def test_set_file_app_properties_updates_metadata_only():
     service = MagicMock()
+    service.files.return_value.get.return_value.execute.return_value = {
+        "modifiedTime": "2026-01-02T03:04:05.678Z"
+    }
     service.files.return_value.update.return_value.execute.return_value = {"id": "v1"}
 
     drive.set_file_app_properties(service, "v1", {"speaker_names": "[\"A\", \"B\"]"})
 
     service.files.return_value.update.assert_called_once_with(
         fileId="v1",
-        body={"appProperties": {"speaker_names": "[\"A\", \"B\"]"}},
+        body={
+            "appProperties": {"speaker_names": "[\"A\", \"B\"]"},
+            "modifiedTime": "2026-01-02T03:04:05.678Z",
+        },
         fields="id, name, appProperties",
         supportsAllDrives=True,
     )
+
+
+def test_set_file_app_properties_preserves_the_modified_time():
+    """Writing a property must not move the file's date.
+
+    Drive counts any files.update as an edit. People sort these shared folders by
+    "Last modified", so a bookkeeping write that bumps the date corrupts the column.
+    """
+    service = MagicMock()
+    service.files.return_value.get.return_value.execute.return_value = {
+        "modifiedTime": "2025-03-14T18:24:53.633Z"
+    }
+    service.files.return_value.update.return_value.execute.return_value = {"id": "v1"}
+
+    drive.set_file_app_properties(service, "v1", {"booking_match": "none"})
+
+    service.files.return_value.get.assert_called_once_with(
+        fileId="v1",
+        fields="modifiedTime",
+        supportsAllDrives=True,
+    )
+    service.files.return_value.update.assert_called_once_with(
+        fileId="v1",
+        body={
+            "appProperties": {"booking_match": "none"},
+            "modifiedTime": "2025-03-14T18:24:53.633Z",
+        },
+        fields="id, name, appProperties",
+        supportsAllDrives=True,
+    )
+
+
+def test_set_file_app_properties_preserves_the_date_when_deleting_a_property():
+    """The rematch path sends a null value to delete a property; same rule applies."""
+    service = MagicMock()
+    service.files.return_value.get.return_value.execute.return_value = {
+        "modifiedTime": "2025-03-14T18:24:53.633Z"
+    }
+    service.files.return_value.update.return_value.execute.return_value = {"id": "v1"}
+
+    drive.set_file_app_properties(service, "v1", {"booking_match": None})
+
+    body = service.files.return_value.update.call_args.kwargs["body"]
+    assert body["appProperties"] == {"booking_match": None}
+    assert body["modifiedTime"] == "2025-03-14T18:24:53.633Z"
+
+
+def test_set_file_app_properties_omits_modified_time_when_drive_returns_none():
+    """A response without modifiedTime must not send a null date and 400 the request."""
+    service = MagicMock()
+    service.files.return_value.get.return_value.execute.return_value = {}
+    service.files.return_value.update.return_value.execute.return_value = {"id": "v1"}
+
+    drive.set_file_app_properties(service, "v1", {"booking_match": "none"})
+
+    body = service.files.return_value.update.call_args.kwargs["body"]
+    assert "modifiedTime" not in body
 
 
 def test_list_folder_state_includes_txt_id():
@@ -537,3 +600,39 @@ def test_list_folder_state_defaults_booking_properties_to_blank():
 
     assert items[0]["booking_match"] == ""
     assert items[0]["planfix_comment_task_id"] == ""
+
+
+def test_list_mp4_timestamps_requests_the_timestamp_fields_and_pages():
+    """The polling loop's listing deliberately omits timestamps; this one needs them."""
+    service = MagicMock()
+    pages = [
+        {"files": [{"id": "v1", "name": "a.mp4"}], "nextPageToken": "page2"},
+        {"files": [{"id": "v2", "name": "b.mp4"}]},
+    ]
+    service.files.return_value.list.return_value.execute.side_effect = pages
+
+    result = drive.list_mp4_timestamps(service, "f1")
+
+    assert [f["id"] for f in result] == ["v1", "v2"]
+    first_call = service.files.return_value.list.call_args_list[0].kwargs
+    assert "createdTime" in first_call["fields"]
+    assert "modifiedTime" in first_call["fields"]
+    assert "appProperties" in first_call["fields"]
+    assert "'f1' in parents" in first_call["q"]
+    assert "video/mp4" in first_call["q"]
+    assert service.files.return_value.list.call_args_list[1].kwargs["pageToken"] == "page2"
+
+
+def test_set_file_modified_time_sends_only_the_date():
+    """The marks must survive the repair, or the backlog would be re-transcribed."""
+    service = MagicMock()
+    service.files.return_value.update.return_value.execute.return_value = {"id": "v1"}
+
+    drive.set_file_modified_time(service, "v1", "2025-03-14T18:24:52.949Z")
+
+    service.files.return_value.update.assert_called_once_with(
+        fileId="v1",
+        body={"modifiedTime": "2025-03-14T18:24:52.949Z"},
+        fields="id, name, modifiedTime",
+        supportsAllDrives=True,
+    )
