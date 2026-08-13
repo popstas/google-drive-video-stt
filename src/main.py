@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import logging
 import json
 import ssl
@@ -19,6 +20,7 @@ from src import (
     booking_server,
     drive,
     meta as meta_module,
+    meta_doc,
     notify,
     output,
     planfix,
@@ -26,6 +28,7 @@ from src import (
     postprocess,
     preset_pipeline,
     speaker_roles,
+    stt_document,
     webhook,
 )
 from src.auth import AuthError, build_drive_service
@@ -59,6 +62,10 @@ class _ProcessTelemetry:
     usage: dict[str, dict[str, int]] = field(default_factory=dict)
     transcript: str = ""
     artifacts: dict[str, str] = field(default_factory=dict)
+    # The merged meta document `_write_call_documents` built this cycle (None when no
+    # preset stage ran). Task 6 reads this to quote the meta fields into the Planfix
+    # comment instead of re-parsing the `meta` artifact a second time.
+    meta_document: dict[str, object] | None = None
 
 
 def _http_status_code(exc: Exception) -> int | None:
@@ -365,6 +372,96 @@ def _local_artifact_path(config: Config, mp4_name: str, suffix: str) -> Path | N
         return None
     stem = drive.drive_stem(mp4_name)
     return config.output_dir / (drive.safe_local_name(stem) + suffix)
+
+
+def _artifact_text(
+    name: str, artifacts: dict[str, str], config: Config, mp4_name: str
+) -> str:
+    """This cycle's text for a preset, or the artifact an earlier cycle left on disk.
+
+    A cycle that re-ran only the still-missing presets returns just those, so the
+    document would otherwise lose the sections that completed earlier.
+    """
+    text = artifacts.get(name, "")
+    if text.strip():
+        return text
+    preset = next((p for p in config.presets if p.name == name), None)
+    if preset is None:
+        return ""
+    path = _local_artifact_path(config, mp4_name, preset.artifact_suffix)
+    if path is None or not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not read %s for the .stt document: %s", path, type(exc).__name__)
+        return ""
+
+
+def _write_call_documents(
+    service: Any,
+    file_id: str,
+    file_name: str,
+    folder_id: str,
+    transcript: str,
+    artifacts: dict[str, str],
+    config: Config,
+    tmp_dir: Path,
+    *,
+    item: dict,
+    booking_decision: booking_gate.BookingDecision,
+) -> dict[str, object] | None:
+    """Write ``<stem>.meta.yml`` and ``<stem>.stt`` for one recording.
+
+    Returns the meta document so the Planfix comment can quote from it. Both files are
+    written from artifacts that already exist, so this costs no model call. Neither file
+    takes part in the processed/pending bookkeeping: only ``.txt`` and the preset
+    artifacts decide whether a recording still needs work, and a deleted ``.stt`` must
+    never put a recording back into the transcription queue.
+    """
+    stem = drive.drive_stem(file_name)
+    parsed = meta_module.parse_meta(
+        _artifact_text("meta", artifacts, config, file_name),
+        config.tags_allowed,
+        config.referrals_allowed,
+    )
+    task_id = booking_decision.task_id or str(item.get("planfix_comment_task_id") or "")
+    document = meta_doc.build(
+        meta=parsed,
+        file_id=file_id,
+        file_name=file_name,
+        folder_id=folder_id,
+        config=config,
+        transcript=transcript,
+        planfix_task_id=task_id,
+        processed_at=datetime.now(timezone.utc),
+    )
+    meta_yaml = meta_doc.to_yaml(document)
+
+    body = _artifact_text("transcript-cleanup", artifacts, config, file_name) or transcript
+    text = stt_document.assemble(
+        title=stem,
+        sections=[
+            _artifact_text(name, artifacts, config, file_name) for name in config.stt_presets
+        ],
+        meta_yaml=meta_yaml,
+        transcript=body,
+    )
+
+    output.write_artifact(
+        service, base_name=stem, suffix=".meta.yml", text=meta_yaml,
+        folder_id=folder_id, config=config, tmp_dir=tmp_dir,
+    )
+    output.write_artifact(
+        service, base_name=stem, suffix=".stt", text=text, folder_id=folder_id,
+        config=config, tmp_dir=tmp_dir,
+        app_properties={
+            drive.SOURCE_VIDEO_ID_PROPERTY: file_id,
+            drive.ARTIFACT_TYPE_PROPERTY: "stt",
+        },
+        mime_type=drive.TXT_MIME,
+    )
+    return document
 
 
 def _local_artifact_paths(item: dict) -> dict[str, Path]:
@@ -718,6 +815,7 @@ def process_item(
     transcript = ""
     artifacts: dict[str, str] = {}
     unproduced: set[str] = set()
+    meta_document: dict[str, object] | None = None
 
     try:
         with tempfile.TemporaryDirectory(prefix="gd-stt-") as tmp:
@@ -802,6 +900,10 @@ def process_item(
                     local_artifact_paths=_local_artifact_paths(item),
                     only_presets=reprocess_presets,
                 )
+                meta_document = _write_call_documents(
+                    service, file_id, file_name, folder_id, text, artifacts,
+                    config, tmp_dir, item=item, booking_decision=booking_decision,
+                )
             elif needs_presets:
                 # The transcript already exists on Drive; re-feed it to produce the
                 # still-missing presets (a failed earlier preset or a newly added
@@ -831,6 +933,10 @@ def process_item(
                     unproduced=unproduced,
                     local_artifact_paths=_local_artifact_paths(item),
                     only_presets=reprocess_presets,
+                )
+                meta_document = _write_call_documents(
+                    service, file_id, file_name, folder_id, text, artifacts,
+                    config, tmp_dir, item=item, booking_decision=booking_decision,
                 )
     except Exception as exc:
         error = exc
@@ -903,6 +1009,7 @@ def process_item(
         usage=usage,
         transcript=transcript,
         artifacts=artifacts,
+        meta_document=meta_document,
     )
 
 

@@ -46,6 +46,8 @@ def make_config(
     stt_postprocess=False,
     output_target="drive",
     output_dir=None,
+    output_also_drive=False,
+    stt_presets=("keypoints",),
     openai_keypoints=False,
     presets=None,
     tags_allowed=(),
@@ -73,6 +75,8 @@ def make_config(
         stt_postprocess=stt_postprocess,
         output_target=output_target,
         output_dir=output_dir,
+        output_also_drive=output_also_drive,
+        stt_presets=tuple(stt_presets),
         openai_keypoints=openai_keypoints,
         deepgram_audio_source=deepgram_audio_source,
         drive_mp3_artifact=drive_mp3_artifact,
@@ -190,8 +194,9 @@ def test_process_item_runs_stt_when_enabled(mocker, tmp_path):
     main.process_item(service, _item("fid", "video.mp4"), "f", cfg)
 
     transcribe_mock.assert_called_once_with(m4a_path, cfg, cost_usd={})
-    # Two uploads: mp3 and txt
-    assert upload_mock.call_count == 2
+    # Four uploads: mp3, txt, and the meta.yml/.stt written for every processed
+    # recording.
+    assert upload_mock.call_count == 4
     second_call = upload_mock.call_args_list[1]
     assert second_call.kwargs["mime_type"] == "text/plain"
     txt_path = second_call.args[1]
@@ -239,7 +244,8 @@ def test_process_item_only_stt_when_mp3_already_exists(mocker, tmp_path):
     )
 
     # mp3 artifact already exists, but Deepgram never reuses it: it re-derives
-    # audio from the source mp4 and uploads only the new .txt.
+    # audio from the source mp4 and uploads only the new .txt (plus the
+    # meta.yml/.stt written for every processed recording).
     cfg = make_config(stt_provider="deepgram", deepgram_api_key="dg-x")
     item = _item(
         "fid", "video.mp4", has_mp3=True, mp3_id="mp3id", mp3_name="video.mp3",
@@ -253,8 +259,10 @@ def test_process_item_only_stt_when_mp3_already_exists(mocker, tmp_path):
     assert args[1] == "fid"
     assert args[3] == "video.mp4"
     transcribe_mock.assert_called_once_with(m4a_path, cfg, cost_usd={})
-    upload_mock.assert_called_once()
-    assert upload_mock.call_args.kwargs["mime_type"] == "text/plain"
+    assert upload_mock.call_count == 3
+    first_call = upload_mock.call_args_list[0]
+    assert first_call.kwargs["mime_type"] == "text/plain"
+    assert first_call.kwargs["name"] == "video.txt"
 
 
 def test_process_item_passes_expected_source_size_to_download(mocker, tmp_path):
@@ -315,8 +323,11 @@ def test_process_item_extracts_temporary_audio_when_artifact_upload_is_disabled(
     assert download_mock.call_args.args[1] == "fid"
     extract_mock.assert_called_once_with(mp4_path, bitrate="96k")
     transcribe_mock.assert_called_once_with(mp3_path, cfg, cost_usd={})
-    upload_mock.assert_called_once()
-    assert upload_mock.call_args.kwargs["mime_type"] == "text/plain"
+    # txt, plus the meta.yml/.stt written for every processed recording.
+    assert upload_mock.call_count == 3
+    first_call = upload_mock.call_args_list[0]
+    assert first_call.kwargs["mime_type"] == "text/plain"
+    assert first_call.kwargs["name"] == "video.txt"
     assert telemetry.mp3_uploaded is False
     assert telemetry.txt_uploaded is True
 
@@ -359,8 +370,9 @@ def test_process_item_deepgram_m4a_downloads_mp4_even_when_mp3_exists(
     extract_mock.assert_not_called()
     m4a_mock.assert_called_once()
     transcribe_mock.assert_called_once_with(m4a_path, cfg, cost_usd={})
-    upload_mock.assert_called_once()
-    assert upload_mock.call_args.args[1].name == "video.txt"
+    # txt, plus the meta.yml/.stt written for every processed recording.
+    assert upload_mock.call_count == 3
+    assert upload_mock.call_args_list[0].args[1].name == "video.txt"
 
 
 def test_process_item_deepgram_m4a_does_not_upload_mp3_by_default(mocker, tmp_path):
@@ -384,8 +396,9 @@ def test_process_item_deepgram_m4a_does_not_upload_mp3_by_default(mocker, tmp_pa
     main.process_item(service, _item("fid", "video.mp4"), "folderX", cfg)
 
     extract_mp3_mock.assert_not_called()
-    assert upload_mock.call_count == 1
-    assert upload_mock.call_args.kwargs["mime_type"] == "text/plain"
+    # txt, plus the meta.yml/.stt written for every processed recording.
+    assert upload_mock.call_count == 3
+    assert upload_mock.call_args_list[0].kwargs["mime_type"] == "text/plain"
 
 
 def test_process_item_deepgram_m4a_uploads_mp3_when_artifact_enabled(
@@ -413,7 +426,8 @@ def test_process_item_deepgram_m4a_uploads_mp3_when_artifact_enabled(
     main.process_item(service, _item("fid", "video.mp4"), "folderX", cfg)
 
     extract_mp3_mock.assert_called_once_with(mp4_path, bitrate="96k")
-    assert upload_mock.call_count == 2
+    # mp3, txt, plus the meta.yml/.stt written for every processed recording.
+    assert upload_mock.call_count == 4
     assert upload_mock.call_args_list[0].kwargs["mime_type"] == "audio/mpeg"
     assert upload_mock.call_args_list[1].kwargs["mime_type"] == "text/plain"
 
@@ -451,7 +465,8 @@ def test_process_item_deepgram_mp3_96k_extracts_mp4_for_stt(mocker, tmp_path):
     extract_mock.assert_called_once()
     assert extract_mock.call_args.kwargs["bitrate"] == "96k"
     transcribe_mock.assert_called_once_with(mp3_path, cfg, cost_usd={})
-    upload_mock.assert_called_once()
+    # txt, plus the meta.yml/.stt written for every processed recording.
+    assert upload_mock.call_count == 3
 
 
 def test_process_item_deepgram_mp3_192k_extracts_mp4_for_stt(mocker, tmp_path):
@@ -487,7 +502,8 @@ def test_process_item_deepgram_mp3_192k_extracts_mp4_for_stt(mocker, tmp_path):
     extract_mock.assert_called_once()
     assert extract_mock.call_args.kwargs["bitrate"] == "192k"
     transcribe_mock.assert_called_once_with(mp3_path, cfg, cost_usd={})
-    upload_mock.assert_called_once()
+    # txt, plus the meta.yml/.stt written for every processed recording.
+    assert upload_mock.call_count == 3
 
 
 def test_process_item_skips_completely_when_mp3_and_txt_present(mocker):
@@ -1524,7 +1540,9 @@ def test_process_item_postprocesses_transcript_before_upload(mocker, tmp_path):
     captured = {}
 
     def fake_upload(svc, local_path, folder, mime_type, name=None, app_properties=None):
-        if mime_type == "text/plain":
+        # `.meta.yml`/`.stt` share this mime type too, so match on the `.txt`
+        # suffix specifically rather than on mime_type alone.
+        if name and name.endswith(".txt"):
             captured["txt"] = local_path.read_text(encoding="utf-8")
 
     mocker.patch("src.main.drive.upload", side_effect=fake_upload)
@@ -1632,7 +1650,11 @@ def test_process_item_overwrites_existing_keypoints_on_reprocess(mocker, tmp_pat
     update_ids = [call.args[1] for call in update_mock.call_args_list]
     assert "t1" in update_ids
     assert "k1" in update_ids
-    upload_mock.assert_not_called()
+    # .meta.yml/.stt have no id to update in place yet, so they land as fresh
+    # uploads every cycle.
+    assert upload_mock.call_count == 2
+    uploaded_names = {call.kwargs["name"] for call in upload_mock.call_args_list}
+    assert uploaded_names == {"video.meta.yml", "video.stt"}
 
 
 def test_process_item_skips_keypoints_when_disabled(mocker, tmp_path):
@@ -1780,8 +1802,9 @@ def test_process_item_does_not_write_empty_keypoints(mocker, tmp_path):
     )
     main.process_item(service, _item("fid", "video.mp4"), "folderX", cfg)
 
-    # Only the .txt is written; a blank keypoints doc is not uploaded.
-    assert captured["names"] == ["video.txt"]
+    # A blank keypoints doc is not uploaded, but the .txt and the meta.yml/.stt
+    # written for every processed recording still are.
+    assert captured["names"] == ["video.txt", "video.meta.yml", "video.stt"]
 
 
 def test_process_item_uses_speaker_names_from_drive_properties(mocker, tmp_path):
@@ -1794,7 +1817,9 @@ def test_process_item_uses_speaker_names_from_drive_properties(mocker, tmp_path)
     captured = {}
 
     def fake_upload(svc, local_path, folder, mime_type, name=None, app_properties=None):
-        if mime_type == "text/plain":
+        # `.meta.yml`/`.stt` share this mime type too, so match on the `.txt`
+        # suffix specifically rather than on mime_type alone.
+        if name and name.endswith(".txt"):
             captured["txt"] = local_path.read_text(encoding="utf-8")
 
     mocker.patch("src.main.drive.upload", side_effect=fake_upload)
@@ -3375,3 +3400,87 @@ def test_main_survives_a_receiver_bind_failure(monkeypatch, gate_config, caplog)
     run_once.assert_called_once()
     notified.assert_called_once()
     assert "booking receiver" in caplog.text.lower()
+
+
+# --- write .meta.yml and .stt for every processed recording -------------------
+
+
+_STT_NAME = "Angelica Munkueva(ExpertizeMe) и Mels - 2026/08/13 14:29 CEST.mp4"
+_STT_STEM = "Angelica Munkueva(ExpertizeMe) и Mels - 2026_08_13 14_29 CEST"
+_STT_TRANSCRIPT = "[00:00:05] Angelica Munkueva: Здравствуйте\n[00:31:42] Mels: Спасибо"
+# Named distinctly from the webhook tests' own `_META_ARTIFACT` (line 2537) so this
+# block does not shadow that constant's binding for readers scanning the file.
+_STT_META_ARTIFACT = "---\nsubject: Обсудили кейс\ntags: []\n---"
+
+
+def _stt_config(tmp_path, **overrides):
+    out = tmp_path / "results"
+    out.mkdir(exist_ok=True)
+    return make_config(
+        # `_as_folders` (used by `make_config`) only accepts bare ids or
+        # `EmployeeFolder` instances, not the {"folder_id": ...} mapping form the
+        # brief predicted -- that form silently binds the whole dict as `folder_id`,
+        # so `config.folder_by_id("folderA")` would never match and the meta
+        # document's manager/manager_email would go empty.
+        folders=[EmployeeFolder(
+            "folderA", name="Анжелика Мункуева", email="angelica@expertizeme.org"
+        )],
+        presets=(_KEYPOINTS_BUILTIN,),
+        output_target="folder",
+        output_dir=out,
+        **overrides,
+    )
+
+
+def _write_documents(cfg, tmp_path, artifacts, transcript=_STT_TRANSCRIPT):
+    return main._write_call_documents(
+        MagicMock(),
+        "fid1",
+        _STT_NAME,
+        "folderA",
+        transcript,
+        artifacts,
+        cfg,
+        tmp_path,
+        item={},
+        booking_decision=MATCHED_DECISION,
+    )
+
+
+def test_write_call_documents_writes_the_stt_and_the_meta_yml(tmp_path):
+    cfg = _stt_config(tmp_path)
+    document = _write_documents(
+        cfg, tmp_path, {"keypoints": "## Задачи\n- [ ] x", "meta": _STT_META_ARTIFACT}
+    )
+    stt = (cfg.output_dir / f"{_STT_STEM}.stt").read_text(encoding="utf-8")
+    assert stt.index("## Задачи") < stt.index("## Мета") < stt.index("## Расшифровка")
+    assert (cfg.output_dir / f"{_STT_STEM}.meta.yml").exists()
+    assert document["subject"] == "Обсудили кейс"
+    assert document["planfix_task_id"] == "851030"
+
+
+def test_write_call_documents_reads_a_preset_from_its_local_artifact(tmp_path):
+    """A cycle that re-ran only `meta` must still get keypoints into the .stt."""
+    cfg = _stt_config(tmp_path)
+    (cfg.output_dir / f"{_STT_STEM}.keypoints.md").write_text(
+        "## Задачи\n- [ ] x", encoding="utf-8"
+    )
+    _write_documents(cfg, tmp_path, {"meta": _STT_META_ARTIFACT})
+    stt = (cfg.output_dir / f"{_STT_STEM}.stt").read_text(encoding="utf-8")
+    assert "## Задачи" in stt
+
+
+def test_write_call_documents_falls_back_to_the_raw_transcript(tmp_path):
+    """No transcript-cleanup artifact means the .stt carries the raw text."""
+    cfg = _stt_config(tmp_path)
+    _write_documents(cfg, tmp_path, {})
+    stt = (cfg.output_dir / f"{_STT_STEM}.stt").read_text(encoding="utf-8")
+    assert "[00:00:05] Angelica Munkueva: Здравствуйте" in stt
+
+
+def test_write_call_documents_writes_the_meta_yml_when_the_preset_produced_nothing(tmp_path):
+    cfg = _stt_config(tmp_path)
+    document = _write_documents(cfg, tmp_path, {"keypoints": "## Задачи"})
+    assert (cfg.output_dir / f"{_STT_STEM}.meta.yml").exists()
+    assert document["subject"] == ""
+    assert document["client"] == "Mels"
