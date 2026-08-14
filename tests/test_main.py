@@ -2726,6 +2726,28 @@ def test_webhook_malformed_meta_degrades_to_empty_fields(mocker, tmp_path):
     }
 
 
+def test_webhook_meta_payload_carries_one_key_per_configured_entity():
+    entities = meta_entity.parse_entities(
+        [
+            {"name": "subject", "prompt": "Тема.", "label": ""},
+            {"name": "target_filing", "prompt": "Подача."},
+        ]
+    )
+    config = make_config(meta_entities=entities)
+    payload = main._webhook_payload(
+        "f1",
+        "запись.mp4",
+        "folder1",
+        config,
+        "[00:00:01] Менеджер: привет",
+        {"meta": "---\nsubject: Обсудили визу\ntarget_filing: O-1 осенью\n---\n"},
+    )
+    assert payload["artifacts"]["meta"] == {
+        "subject": "Обсудили визу",
+        "target_filing": "O-1 осенью",
+    }
+
+
 def test_webhook_not_fired_when_file_skipped(mocker, tmp_path):
     notify = mocker.patch("src.main.webhook.notify_complete")
 

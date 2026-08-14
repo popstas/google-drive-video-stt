@@ -12,6 +12,7 @@
 
 ### Bug Fixes
 
+- Empty an entire requires chain, not just its nearest link
 - Pin the empty-scalar literal in the meta prompt's general rules
 
 ### Documentation
