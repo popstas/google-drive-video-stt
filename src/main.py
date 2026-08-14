@@ -689,16 +689,16 @@ def _webhook_payload(
 
     Non-``meta`` presets pass through as raw text keyed by preset name, so adding a
     preset to config.yml extends the payload with no code change. ``meta`` is parsed
-    into ``{subject, tags, referral, referral_note}`` (tags and referral filtered to
-    the configured allow-lists). An unknown employee sends empty strings rather than
-    omitting the key.
+    into one key per configured entity (``config.meta_entities``) -- the built-in
+    ``{subject, tags, referral, referral_note}`` for an operator who hasn't declared
+    ``meta.entities``, or whatever else that config names instead. Enum values are
+    filtered to each entity's allow-list. An unknown employee sends empty strings
+    rather than omitting the key.
     """
     employee = config.folder_by_id(folder_id)
     payload_artifacts: dict[str, object] = dict(artifacts)
     meta_text = artifacts.get("meta")
     if meta_text is not None:
-        # TODO(next task): thread config.meta_entities through the payload shape
-        # instead of the fixed four keys below.
         parsed = meta_module.parse_meta(meta_text, config.meta_entities)
         payload_artifacts["meta"] = dict(parsed)
 

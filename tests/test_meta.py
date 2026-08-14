@@ -320,6 +320,27 @@ def test_requires_empties_a_dependent_when_its_target_was_dropped():
     assert values["referral_note"] == ""
 
 
+def test_requires_chain_empties_every_level_when_the_root_target_was_dropped():
+    """A -> B -> C -> D, with D an enum whose value gets dropped by the allow-list.
+
+    A single pass over the entities in declaration order only empties B (it sees
+    C's already-dropped value); A still sees B's stale, pre-drop value that same
+    pass. The whole chain must end up empty, not just the link nearest the root.
+    """
+    entities = meta_entity.parse_entities(
+        [
+            {"name": "a", "prompt": "A.", "requires": "b"},
+            {"name": "b", "prompt": "B.", "requires": "c"},
+            {"name": "c", "prompt": "C.", "requires": "d"},
+            {"name": "d", "prompt": "D.", "type": "enum", "allowed": ["ok"]},
+        ]
+    )
+    values = parse_meta(
+        "---\na: valA\nb: valB\nc: valC\nd: not-allowed\n---\n", entities
+    )
+    assert values == {"a": "", "b": "", "c": "", "d": ""}
+
+
 def test_a_colon_in_prose_does_not_take_the_document_down():
     values = parse_meta(
         "---\nsubject: Обсудили визу: сроки и бюджет\ntags: [O-1]\n---\n", ENTITIES

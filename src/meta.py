@@ -153,8 +153,22 @@ def parse_meta(
         values[entity.name] = _parse_value(parsed.get(entity.name), entity)
 
     # A dependent that survived while its target was dropped would smuggle the
-    # rejected value back in as prose.
-    for entity in entities:
-        if entity.requires and not values.get(entity.requires):
-            values[entity.name] = [] if entity.multiple else ""
+    # rejected value back in as prose. A chain (A requires B, B requires C) needs
+    # more than one pass: B is only emptied partway through a single pass, so a
+    # single pass can leave A holding B's stale, pre-drop value. Repeat until a
+    # pass changes nothing. `_validate` guarantees `requires` chains are acyclic,
+    # so this always converges; the range bound is kept anyway so a future
+    # validation regression degrades to a wrong-but-bounded result instead of
+    # hanging the parser.
+    for _ in range(len(entities)):
+        changed = False
+        for entity in entities:
+            if not entity.requires or values.get(entity.requires):
+                continue
+            empty = [] if entity.multiple else ""
+            if values[entity.name] != empty:
+                values[entity.name] = empty
+                changed = True
+        if not changed:
+            break
     return values
