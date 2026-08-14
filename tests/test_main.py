@@ -11,7 +11,7 @@ import pytest
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
-from src import main
+from src import main, meta_entity
 from src.auth import AuthError
 from src.booking_gate import BookingDecision
 from src.call_booking import CallBooking
@@ -67,6 +67,7 @@ def make_config(
     presets=None,
     tags_allowed=(),
     referrals_allowed=(),
+    meta_entities=None,
     webhook_url="",
     webhook_token="",
     proxy_url="",
@@ -80,6 +81,12 @@ def make_config(
         # whole BUILTIN_PRESETS tuple — `meta` is a built-in too, and pulling it in
         # here would silently widen every openai_keypoints=True test to two passes.
         presets = (_KEYPOINTS_BUILTIN,) if openai_keypoints else ()
+    if meta_entities is None:
+        # Mirrors how the real loader fills `meta.entities` when a config leaves it
+        # unset: the built-in four, wired to the deprecated top-level allow-lists.
+        meta_entities = meta_entity.default_entities(
+            tuple(tags_allowed), tuple(referrals_allowed)
+        )
     return Config(
         folders=_as_folders(folders if folders is not None else ["folderA"]),
         poll_interval=poll_interval,
@@ -100,6 +107,7 @@ def make_config(
         drive_mp3_artifact=drive_mp3_artifact,
         tags_allowed=tuple(tags_allowed),
         referrals_allowed=tuple(referrals_allowed),
+        meta_entities=tuple(meta_entities),
         webhook_url=webhook_url,
         webhook_token=webhook_token,
         planfix_meta_fields=tuple(planfix_meta_fields),

@@ -9,6 +9,10 @@
 - Read meta entities from config.yml
 - Describe meta entities as config-shaped data
 
+### Bug Fixes
+
+- Pin the empty-scalar literal in the meta prompt's general rules
+
 ### Documentation
 
 - Note the make_config keyword the webhook test needs

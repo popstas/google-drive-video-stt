@@ -421,14 +421,13 @@ def _write_call_documents(
     never put a recording back into the transcription queue.
     """
     stem = drive.drive_stem(file_name)
-    parsed = meta_module.parse_meta(
+    values = meta_module.parse_meta(
         _artifact_text("meta", artifacts, config, file_name),
-        config.tags_allowed,
-        config.referrals_allowed,
+        config.meta_entities,
     )
     task_id = booking_decision.task_id or str(item.get("planfix_comment_task_id") or "")
     document = meta_doc.build(
-        meta=parsed,
+        values=values,
         file_id=file_id,
         file_name=file_name,
         folder_id=folder_id,
@@ -437,7 +436,7 @@ def _write_call_documents(
         planfix_task_id=task_id,
         processed_at=datetime.now(timezone.utc),
     )
-    meta_yaml = meta_doc.to_yaml(document)
+    meta_yaml = meta_doc.to_yaml(document, config.meta_entities)
 
     body = _artifact_text("transcript-cleanup", artifacts, config, file_name) or transcript
     text = stt_document.assemble(
@@ -698,15 +697,10 @@ def _webhook_payload(
     payload_artifacts: dict[str, object] = dict(artifacts)
     meta_text = artifacts.get("meta")
     if meta_text is not None:
-        parsed = meta_module.parse_meta(
-            meta_text, config.tags_allowed, config.referrals_allowed
-        )
-        payload_artifacts["meta"] = {
-            "subject": parsed.subject,
-            "tags": list(parsed.tags),
-            "referral": parsed.referral,
-            "referral_note": parsed.referral_note,
-        }
+        # TODO(next task): thread config.meta_entities through the payload shape
+        # instead of the fixed four keys below.
+        parsed = meta_module.parse_meta(meta_text, config.meta_entities)
+        payload_artifacts["meta"] = dict(parsed)
 
     return {
         "file": {"id": file_id, "name": file_name, "folder_id": folder_id},
