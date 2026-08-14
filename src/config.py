@@ -1192,6 +1192,16 @@ def _default_config_dict(
                         "реклама",
                         "сми-публикация",
                         "вебинар-мероприятие",
+                        # Job boards and cold outreach were missing entirely, and an
+                        # enum with no fitting value does not come back empty -- the
+                        # model substitutes the nearest listed one. A client who said
+                        # "с Indeed я вас взяла" was recorded as `telegram`, then as
+                        # `поиск-google` once the prompt forbade substituting. Adding
+                        # the real channel is what fixed it.
+                        "indeed",
+                        "hh",
+                        "facebook",
+                        "холодная-рассылка",
                     ],
                     "prompt": (
                         "Откуда клиент впервые узнал о компании. Заполняй, только "
