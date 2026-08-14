@@ -13,6 +13,7 @@
 
 ### Bug Fixes
 
+- Widen the target_filing prompt to accept a bare visa type
 - Strip the hardcoded field name from the meta prompt's empty-value example
 - Name the offending entity in a broken requires chain and quiet the empty-allowed enum warning to info
 - Empty an entire requires chain, not just its nearest link

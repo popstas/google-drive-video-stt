@@ -132,6 +132,12 @@ def test_rendered_block_carries_the_response_template_and_per_entity_rules():
     assert "Return a list" in block
     assert "`referral`" in block  # referral_note's requires note
     assert "no values are configured" in block.lower()  # referral's empty allow-list
+    # An enum that lists values must also tell the model what to do when the real
+    # answer is absent from the list. Without it the model substitutes the nearest
+    # listed value: a client who said "Indeed" came back as `telegram`, which the
+    # parser happily accepts because it IS on the list.
+    assert "leave this field empty" in block
+    assert "Do not substitute the closest listed value." in block
 
 
 def test_rendered_block_is_stable_for_a_single_text_entity():

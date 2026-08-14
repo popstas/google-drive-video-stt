@@ -269,6 +269,15 @@ def _entity_rules(entity: MetaEntity) -> str:
         if entity.allowed:
             lines.append("- Use ONLY a value from this list, copied verbatim:")
             lines.extend(f"  - {value}" for value in entity.allowed)
+            # Without this the model answers the question rather than the list: asked
+            # for a referral channel by a client who said "Indeed" -- absent from the
+            # list -- it returned `telegram`, the nearest listed value. The parser
+            # drops off-list values, so the only thing that clause buys is silence
+            # instead of a confident wrong answer reaching the CRM.
+            lines.append(
+                "- If what was actually said is not on the list, leave this field "
+                "empty. Do not substitute the closest listed value."
+            )
         else:
             lines.append(
                 "- No values are configured for this field — return it empty."
