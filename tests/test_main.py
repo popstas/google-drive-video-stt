@@ -16,12 +16,27 @@ from src.auth import AuthError
 from src.booking_gate import BookingDecision
 from src.call_booking import CallBooking
 from src.call_booking import append as append_booking
-from src.config import Config, EmployeeFolder
+from src.config import Config, EmployeeFolder, resolve_config_file_path
 from src.presets import BUILTIN_PRESETS, Preset
 from src.preset_pipeline import PresetResult
 from src.stt.base import STTError
 
 _KEYPOINTS_BUILTIN = next(p for p in BUILTIN_PRESETS if p.name == "keypoints")
+
+
+def test_the_suite_never_resolves_the_repos_real_config():
+    """No test may read the operator's live data/config.yml.
+
+    `main()` calls `is_run_enabled()` on every loop iteration, and that reads the
+    effective config from disk. On a checkout where the operator has run `gdstt
+    stop`, the loop takes its paused branch -- whose only exit is `time.sleep`,
+    which these tests mock away. Every loop test then spins forever instead of
+    failing, which is how this suite once went from 12 seconds to a hang.
+
+    tests/conftest.py points GDSTT_HOME at a per-test throwaway directory to make
+    that impossible. This asserts the guard is actually in place.
+    """
+    assert resolve_config_file_path() != Path("data") / "config.yml"
 
 
 def _as_folders(entries) -> tuple[EmployeeFolder, ...]:

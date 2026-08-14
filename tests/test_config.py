@@ -26,15 +26,6 @@ from src.config import (
 )
 from src.presets import BUILTIN_PRESETS, PACKAGED_PROMPT_ASSETS
 
-@pytest.fixture(autouse=True)
-def clean_env(monkeypatch, tmp_path):
-    # Point the config-home resolver at a throwaway per-test directory so tests never
-    # read or write the repo's real data/config.yml. Resolver/init tests override or
-    # delete GDSTT_HOME as needed. The runtime reads no other environment variables.
-    monkeypatch.setenv("GDSTT_HOME", str(tmp_path))
-    yield
-
-
 def _write_yaml(path: Path, data: dict) -> None:
     path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
