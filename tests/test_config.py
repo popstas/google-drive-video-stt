@@ -584,6 +584,9 @@ def test_meta_builtin_prompt_renders_entities(tmp_path):
     assert "{{entities}}" not in instructions
     assert "- клиентская-консультация" in instructions
     assert "- EB-1" in instructions
+    # The empty-scalar literal must survive rendering, pinned explicitly rather
+    # than left for the model to guess (bare colon vs `null` vs `''`).
+    assert "`''`" in instructions
 
 
 def test_meta_prompt_is_rendered_with_the_configured_entities(tmp_path):

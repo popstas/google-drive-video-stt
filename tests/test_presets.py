@@ -95,6 +95,10 @@ def test_meta_prompt_asset_is_packaged():
 def test_load_packaged_prompt_returns_meta_text():
     text = load_packaged_prompt("meta.md")
     assert "{{entities}}" in text
+    # The empty-scalar literal must be pinned explicitly, or the model is free to
+    # emit a bare colon or `null` for "empty" instead of `''`.
+    assert "`''`" in text
+    assert "null" in text
 
 
 # --- packaged prompt assets -------------------------------------------------

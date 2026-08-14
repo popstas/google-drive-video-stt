@@ -5,6 +5,7 @@
 
 ### Features
 
+- Build the meta prompt from the configured entities
 - Read meta entities from config.yml
 - Describe meta entities as config-shaped data
 
