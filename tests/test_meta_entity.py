@@ -61,6 +61,13 @@ def test_label_defaults_to_the_name_and_empty_label_marks_the_heading():
         ([{"name": "tags", "prompt": "a", "type": "date"}], "date"),
         ([{"name": "subject", "prompt": "a", "allowed": ["x"]}], "allowed"),
         ([{"name": "note", "prompt": "a", "requires": "nope"}], "nope"),
+        (
+            [
+                {"name": "a", "prompt": "a", "requires": "b"},
+                {"name": "b", "prompt": "b", "requires": "nope"},
+            ],
+            "nope",
+        ),
         ([{"name": "subject", "prompt": ""}], "prompt"),
         ([{"name": "subject"}], "prompt"),
         (["subject"], "mapping"),
@@ -85,12 +92,15 @@ def test_requires_cycle_is_rejected():
 
 
 def test_enum_without_allowed_is_warned_not_rejected(caplog):
-    with caplog.at_level(logging.WARNING):
+    # INFO, not WARNING: the shipped default config declares `tags` this way, so
+    # a WARNING here would fire on every load of a fresh install.
+    with caplog.at_level(logging.INFO):
         entities = meta_entity.parse_entities(
             [{"name": "referral", "prompt": "Откуда.", "type": "enum"}]
         )
     assert entities[0].allowed == ()
     assert "referral" in caplog.text
+    assert caplog.records[0].levelno == logging.INFO
 
 
 def test_rendered_block_carries_the_response_template_and_per_entity_rules():

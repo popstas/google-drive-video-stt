@@ -184,14 +184,20 @@ def _validate(entities: tuple[MetaEntity, ...]) -> None:
             )
         by_name[entity.name] = entity
 
+    # Existence pass first, over every entity's own `requires` target: a chain
+    # like a->b->nope must name `nope` (b's stale link) rather than raising
+    # KeyError from inside the cycle walk below, which only ever dereferences
+    # links it has already confirmed exist.
     for entity in entities:
-        if not entity.requires:
-            continue
-        if entity.requires not in by_name:
+        if entity.requires and entity.requires not in by_name:
             raise ValueError(
                 f"meta entity {entity.name!r} requires {entity.requires!r}, "
                 "which is not a declared entity"
             )
+
+    for entity in entities:
+        if not entity.requires:
+            continue
         seen = {entity.name}
         cursor = by_name[entity.requires]
         while cursor.requires:
@@ -207,7 +213,12 @@ def _validate(entities: tuple[MetaEntity, ...]) -> None:
             # Legal: the model is handed nothing to choose from, so every value it
             # returns is invented and gets dropped. Worth saying out loud, because
             # an operator who meant to fill the list sees an always-empty field.
-            logger.warning(
+            # Deliberately `info`, not `warning`: the shipped default config
+            # declares `tags` as an enum with an empty `allowed` (the vocabulary
+            # is the operator's to fill in), so this fires on every load of a
+            # fresh install. A valid, working default is not worth a WARNING --
+            # that just trains operators to ignore warnings.
+            logger.info(
                 "meta entity %r is an enum with an empty allowed list; it will "
                 "always come back empty",
                 entity.name,
