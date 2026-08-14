@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import yaml
 
+from src import meta_entity
 from src.presets import (
     BUILTIN_PRESETS,
     PACKAGED_PROMPT_ASSETS,
@@ -116,12 +117,13 @@ class Config:
     # in the generated config.yml.
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
-    # The tag allow-list the ``meta`` preset may pick from. Empty means the preset
-    # has nothing to choose between and returns no tags.
+    # DEPRECATED: the allow-lists moved into ``meta.entities``. Still read for one
+    # more version so a config written before that keeps working; a config that
+    # declares ``meta.entities`` ignores these and gets a startup warning.
     tags_allowed: tuple[str, ...] = ()
-    # The referral channels the ``meta`` preset may pick from. Empty means the preset
-    # is handed no channels and must return an empty referral.
     referrals_allowed: tuple[str, ...] = ()
+    # What the ``meta`` preset extracts, in document order. See src/meta_entity.py.
+    meta_entities: tuple[meta_entity.MetaEntity, ...] = ()
     # Completion-webhook target. A blank URL disables the webhook; the token, when
     # set, is sent as ``Authorization: Bearer <token>``. See ``webhook`` in the
     # generated config.yml.
@@ -761,6 +763,7 @@ def _config_from_yaml(
     telegram = _as_mapping(notifications.get("telegram"), "notifications.telegram")
     tags = _as_mapping(raw.get("tags"), "tags")
     referrals = _as_mapping(raw.get("referrals"), "referrals")
+    meta = _as_mapping(raw.get("meta"), "meta")
     webhook = _as_mapping(raw.get("webhook"), "webhook")
     call_booking = _as_mapping(raw.get("call_booking"), "call_booking")
     planfix = _as_mapping(raw.get("planfix"), "planfix")
@@ -773,6 +776,17 @@ def _config_from_yaml(
 
     tags_allowed = _parse_tags_allowed(tags.get("allowed"))
     referrals_allowed = _parse_referrals_allowed(referrals.get("allowed"))
+
+    raw_entities = meta.get("entities")
+    if raw_entities is not None and (tags_allowed or referrals_allowed):
+        logger.warning(
+            "meta.entities is declared, so the deprecated top-level tags.allowed / "
+            "referrals.allowed are ignored; move those values into the entities' "
+            "allowed lists and delete the old keys"
+        )
+    meta_entities = meta_entity.parse_entities(
+        raw_entities, tags_allowed=tags_allowed, referrals_allowed=referrals_allowed
+    )
 
     webhook_url = _yaml_str(webhook.get("url"))
     webhook_token = _yaml_str(webhook.get("token"))
@@ -978,6 +992,7 @@ def _config_from_yaml(
         telegram_chat_id=telegram_chat_id,
         tags_allowed=tags_allowed,
         referrals_allowed=referrals_allowed,
+        meta_entities=meta_entities,
         webhook_url=webhook_url,
         webhook_token=webhook_token,
         call_booking_enabled=call_booking_enabled,
@@ -1165,21 +1180,96 @@ def _default_config_dict(
                 "chat_id": "",
             },
         },
-        # Seeded empty: the `meta` preset picks tags only from this list.
-        "tags": {"allowed": []},
-        # Seeded from how clients actually answer in existing transcripts (see the
-        # design spec); the `meta` preset picks `referral` only from this list.
-        "referrals": {
-            "allowed": [
-                "рекомендация",
-                "instagram",
-                "telegram",
-                "youtube",
-                "linkedin",
-                "поиск-google",
-                "реклама",
-                "сми-публикация",
-                "вебинар-мероприятие",
+        # The seven entities a freshly generated config ships extracting. An existing
+        # deployment upgrading in place does not get these silently: `parse_entities`
+        # falls back to the four-entity `default_entities()` when `meta.entities` is
+        # absent, wired to whatever the old top-level tags.allowed/referrals.allowed
+        # held. Only a config generated from scratch gets all seven.
+        "meta": {
+            "entities": [
+                {
+                    "name": "subject",
+                    "type": "text",
+                    "label": "",
+                    "prompt": (
+                        "Одно предложение о том, про что был звонок. Опирайся "
+                        "строго на транскрипт, ничего не выдумывай."
+                    ),
+                },
+                {
+                    "name": "tags",
+                    "type": "enum",
+                    "multiple": True,
+                    "label": "Теги",
+                    "allowed": [],
+                    "prompt": (
+                        "Выбери все теги, которые действительно подходят, и "
+                        "никакие другие."
+                    ),
+                },
+                {
+                    "name": "referral",
+                    "type": "enum",
+                    "label": "Откуда узнал",
+                    "allowed": [
+                        "рекомендация",
+                        "instagram",
+                        "telegram",
+                        "youtube",
+                        "linkedin",
+                        "поиск-google",
+                        "реклама",
+                        "сми-публикация",
+                        "вебинар-мероприятие",
+                    ],
+                    "prompt": (
+                        "Откуда клиент впервые узнал о компании. Заполняй, только "
+                        "если клиент сам это сказал: вопрос менеджера без ответа "
+                        "источником не является, и твоя догадка по контексту тоже."
+                    ),
+                },
+                {
+                    "name": "referral_note",
+                    "type": "text",
+                    "label": "Подробности",
+                    "requires": "referral",
+                    "prompt": (
+                        "Одна строка словами клиента о том, откуда он узнал о "
+                        "компании: кто порекомендовал, какой пост, какое "
+                        "мероприятие."
+                    ),
+                },
+                {
+                    "name": "case_deadline",
+                    "type": "text",
+                    "label": "Срок сбора кейса",
+                    "prompt": (
+                        "К какому сроку клиенту нужно собрать документы кейса. "
+                        "Оставь словами клиента, как он сказал на звонке, не "
+                        "переводи в дату. Пусто, если о сроке сбора не говорили."
+                    ),
+                },
+                {
+                    "name": "deadlines",
+                    "type": "text",
+                    "multiple": True,
+                    "label": "Дедлайны",
+                    "prompt": (
+                        "Прочие сроки, названные на звонке: виза, работа, учёба, "
+                        "переезд. Одна строка на срок, словами клиента, вместе с "
+                        "тем, к чему срок относится. Пустой список, если сроков "
+                        "не называли."
+                    ),
+                },
+                {
+                    "name": "target_filing",
+                    "type": "text",
+                    "label": "Целевая подача",
+                    "prompt": (
+                        "На какую подачу целится клиент: тип и/или окно, например "
+                        "«O-1 осенью». Пусто, если о цели подачи не говорили."
+                    ),
+                },
             ]
         },
         # Seeded empty: a blank url disables the completion webhook.
@@ -1284,6 +1374,21 @@ def _google_to_yaml_dict(config: Config, config_file: Path | None) -> dict:
     return block
 
 
+def _entity_to_dict(entity: meta_entity.MetaEntity) -> dict[str, object]:
+    """Serialize one entity, omitting keys that carry their default."""
+    data: dict[str, object] = {"name": entity.name, "type": entity.type}
+    if entity.multiple:
+        data["multiple"] = True
+    if entity.type == "enum":
+        data["allowed"] = list(entity.allowed)
+    if entity.label is not None:
+        data["label"] = entity.label
+    if entity.requires:
+        data["requires"] = entity.requires
+    data["prompt"] = entity.prompt
+    return data
+
+
 def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dict:
     """Serialize a Config into the grouped `config.yml` schema.
 
@@ -1344,10 +1449,14 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
                 "chat_id": config.telegram_chat_id,
             },
         },
-        # The tag allow-list is operator-owned data with no other home: omitting it
-        # here would drop it from the file on any whole-Config rewrite.
-        "tags": {"allowed": list(config.tags_allowed)},
-        "referrals": {"allowed": list(config.referrals_allowed)},
+        # Entity definitions are operator-owned data with prompts in them, and this
+        # serializer is a whole-file rewrite: omitting them would erase every entity
+        # the first time the worker is stopped. The deprecated top-level
+        # tags/referrals keys are deliberately not written back -- their values now
+        # live inside the entities, so the first rewrite migrates the file.
+        "meta": {
+            "entities": [_entity_to_dict(entity) for entity in config.meta_entities]
+        },
         "webhook": {"url": config.webhook_url, "token": config.webhook_token},
         # planfix.presets/create_comment_url/token were previously absent from this
         # serializer too (a whole-Config rewrite silently dropped them); meta_fields is

@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Features
+
+- Describe meta entities as config-shaped data
+
 ### Documentation
 
 - Note the make_config keyword the webhook test needs

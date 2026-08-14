@@ -330,7 +330,8 @@ def test_tags_non_mapping_rejected(tmp_path):
 def test_config_to_yaml_dict_round_trips_tags_allowed(tmp_path):
     # Regression: `tags.allowed` used to be absent from the serializer, so any
     # whole-Config rewrite (`gdstt config set`, token refresh) silently dropped the
-    # operator's tag list.
+    # operator's tag list. The allow-list now lives inside the `tags` entity under
+    # `meta.entities`, which is where the rewrite must carry it instead.
     cfg = _load_config(
         tmp_path,
         {
@@ -340,12 +341,14 @@ def test_config_to_yaml_dict_round_trips_tags_allowed(tmp_path):
     )
 
     data = _config_to_yaml_dict(cfg)
-    assert data["tags"] == {"allowed": ["клиентская-консультация", "EB-1"]}
+    tags_entity = next(e for e in data["meta"]["entities"] if e["name"] == "tags")
+    assert tags_entity["allowed"] == ["клиентская-консультация", "EB-1"]
 
     config_file = tmp_path / "roundtrip-tags.yml"
     _write_yaml(config_file, data)
     reloaded = load_config(config_path=config_file, validate_providers=False)
-    assert reloaded.tags_allowed == ("клиентская-консультация", "EB-1")
+    reloaded_tags_entity = next(e for e in reloaded.meta_entities if e.name == "tags")
+    assert reloaded_tags_entity.allowed == ("клиентская-консультация", "EB-1")
 
 
 # --- webhook -----------------------------------------------------------------
@@ -455,7 +458,9 @@ def test_default_chain_keeps_meta_and_drops_action_items():
 
 
 def test_default_config_seeds_the_referral_allow_list():
-    assert "рекомендация" in _default_config_dict()["referrals"]["allowed"]
+    entities = _default_config_dict()["meta"]["entities"]
+    referral = next(e for e in entities if e["name"] == "referral")
+    assert "рекомендация" in referral["allowed"]
 
 
 def test_default_config_writes_the_new_output_and_planfix_keys():
@@ -1574,7 +1579,8 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     assert data["openai"]["batch"] is True
     assert data["run"]["enabled"] is True
     # An empty tag allow-list is seeded so the operator has the block to fill in.
-    assert data["tags"] == {"allowed": []}
+    tags_entity = next(e for e in data["meta"]["entities"] if e["name"] == "tags")
+    assert tags_entity["allowed"] == []
     # The packaged prompt assets are copied beside the config, including
     # action-items.md: the preset is retired, not deleted, so re-enabling it is a
     # config edit, not a code change.
@@ -2524,3 +2530,107 @@ def test_planfix_task_url_defaults_to_empty(tmp_path):
 def test_default_config_writes_the_planfix_task_url_key():
     """The key must be visible in a generated config, or nobody knows it exists."""
     assert _default_config_dict()["planfix"]["task_url"] == ""
+
+
+# --- meta.entities -------------------------------------------------------------
+
+
+def test_meta_entities_default_to_the_builtins_wired_to_legacy_allow_lists(tmp_path):
+    config = _load_config(
+        tmp_path,
+        {
+            "tags": {"allowed": ["O-1"]},
+            "referrals": {"allowed": ["telegram"]},
+        },
+    )
+    by_name = {entity.name: entity for entity in config.meta_entities}
+    assert set(by_name) == {"subject", "tags", "referral", "referral_note"}
+    assert by_name["tags"].allowed == ("O-1",)
+    assert by_name["referral"].allowed == ("telegram",)
+
+
+def test_declared_meta_entities_replace_the_builtins(tmp_path):
+    config = _load_config(
+        tmp_path,
+        {
+            "meta": {
+                "entities": [
+                    {
+                        "name": "target_filing",
+                        "prompt": "На какую подачу целится клиент.",
+                        "label": "Целевая подача",
+                    }
+                ]
+            }
+        },
+    )
+    assert [entity.name for entity in config.meta_entities] == ["target_filing"]
+
+
+def test_declared_entities_make_the_legacy_allow_lists_a_logged_deprecation(
+    tmp_path, caplog
+):
+    with caplog.at_level(logging.WARNING):
+        config = _load_config(
+            tmp_path,
+            {
+                "tags": {"allowed": ["O-1"]},
+                "meta": {"entities": [{"name": "subject", "prompt": "Тема."}]},
+            },
+        )
+    assert [entity.name for entity in config.meta_entities] == ["subject"]
+    assert "tags.allowed" in caplog.text
+
+
+def test_invalid_meta_entities_fail_the_load_with_the_entity_named(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        _load_config(
+            tmp_path,
+            {"meta": {"entities": [{"name": "manager", "prompt": "Кто."}]}},
+        )
+    assert "manager" in str(excinfo.value)
+
+
+def test_whole_config_rewrite_round_trips_entities_with_their_prompts(tmp_path):
+    original = _load_config(
+        tmp_path,
+        {
+            "meta": {
+                "entities": [
+                    {
+                        "name": "deadlines",
+                        "prompt": "Сроки, названные на звонке.",
+                        "label": "Дедлайны",
+                        "multiple": True,
+                    },
+                    {
+                        "name": "referral",
+                        "prompt": "Откуда узнал.",
+                        "type": "enum",
+                        "allowed": ["telegram"],
+                    },
+                ]
+            }
+        },
+    )
+    rewritten = _load_config(tmp_path, _config_to_yaml_dict(original))
+    assert rewritten.meta_entities == original.meta_entities
+
+
+def test_generated_default_config_ships_the_seven_entities():
+    generated = _default_config_dict()
+    names = [entity["name"] for entity in generated["meta"]["entities"]]
+    assert names == [
+        "subject",
+        "tags",
+        "referral",
+        "referral_note",
+        "case_deadline",
+        "deadlines",
+        "target_filing",
+    ]
+    # The allow-lists moved inside the entities; the old top-level homes are gone.
+    assert "tags" not in generated
+    assert "referrals" not in generated
+    referral = next(e for e in generated["meta"]["entities"] if e["name"] == "referral")
+    assert "рекомендация" in referral["allowed"]
