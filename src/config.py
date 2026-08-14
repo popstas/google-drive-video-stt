@@ -1422,11 +1422,15 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
                 "chat_id": config.telegram_chat_id,
             },
         },
-        # Entity definitions are operator-owned data with prompts in them, and this
-        # serializer is a whole-file rewrite: omitting them would erase every entity
-        # the first time the worker is stopped. The deprecated top-level
-        # tags/referrals keys are deliberately not written back -- their values now
-        # live inside the entities, so the first rewrite migrates the file.
+        # This serializer (`_config_to_yaml_dict`) has no production caller: `gdstt
+        # stop`/`start` go through `set_run_enabled` -> `config_set`, which patches
+        # one dotted key in the raw YAML via `_set_nested` and writes that back, not
+        # this function. Only tests exercise this path today. It is also not
+        # exhaustive -- it drops the whole top-level `call_booking:` block -- so
+        # wiring it up as a real rewrite path would mean making it exhaustive first;
+        # being a whole-file dump, it would also strip every operator comment from
+        # the file. The deprecated top-level tags/referrals keys are deliberately
+        # not written back here -- their values now live inside the entities.
         "meta": {
             "entities": [_entity_to_dict(entity) for entity in config.meta_entities]
         },
