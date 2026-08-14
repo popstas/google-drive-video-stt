@@ -30,6 +30,7 @@
 
 ### Testing
 
+- Assert a configured entity reaches meta.yml, webhook, and planfix
 - Assert the webhook payload carries one key per entity
 - Keep the suite off the operator's live config
 

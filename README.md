@@ -349,10 +349,17 @@ variable is read at runtime:
 
 `tags.allowed` and `referrals.allowed` are read for one more version when
 `meta.entities` is absent, so an existing config keeps working untouched — no CLI
-command rewrites the whole file for you. Migrating is manual and not urgent: add a
+command migrates the shape for you. Migrating is manual and not urgent: add a
 `meta.entities` block by hand, moving each list into its entity's `allowed`, then
 delete the old `tags:`/`referrals:` sections. Once `meta.entities` is declared,
 the old keys are ignored and logged at startup.
+
+Edit by hand, and keep a copy of any comments you care about. `gdstt stop`,
+`gdstt start`, and `gdstt config set` patch one key and then write the whole file
+back through `yaml.safe_dump`: every value survives, but every comment in the file
+is stripped and long strings are reflowed. That is pre-existing behaviour and has
+nothing to do with `meta.entities` — it just bites hardest on a config you have
+annotated.
 
 ## Speech-to-text
 
