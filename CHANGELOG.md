@@ -5,6 +5,7 @@
 
 ### Documentation
 
+- Implementation plan for config-driven meta entities
 - Spec for config-driven meta entities
 
 ## v0.6.0 - 2026-08-13

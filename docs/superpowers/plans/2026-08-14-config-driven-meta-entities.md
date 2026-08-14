@@ -1332,8 +1332,10 @@ git commit -m "feat: parse meta artifacts into one value per configured entity"
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `tests/test_main.py`, building the config the way the neighbouring
-webhook tests already do:
+`tests/test_main.py`'s `make_config` helper (line 33) takes one explicit keyword
+per `Config` field — it already has `tags_allowed` and `referrals_allowed`. Add
+`meta_entities=()` to its signature and pass it through to the `Config(...)`
+construction, then add:
 
 ```python
 def test_webhook_meta_payload_carries_one_key_per_configured_entity():
