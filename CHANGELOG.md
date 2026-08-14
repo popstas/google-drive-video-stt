@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+
+### Features
+
+- Add reasoning_effort config, globally and per preset
+
 ## v0.7.0 - 2026-08-14
 
 ### Features
