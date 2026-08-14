@@ -9,6 +9,10 @@
 - Implementation plan for config-driven meta entities
 - Spec for config-driven meta entities
 
+### Testing
+
+- Keep the suite off the operator's live config
+
 ## v0.6.0 - 2026-08-13
 
 ### Features
