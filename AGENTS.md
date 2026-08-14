@@ -311,6 +311,17 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   (`process`, `latest`, `transcribe`, `reprocess`) let `process_item` resolve its own
   decision, which yields the `task_id` without the gate. Processing a marked file by
   hand is the supported way to revive it, alongside `gdstt bookings rematch`.
+- `call_booking.name_rules` (`{regex, task_id}`, both required, compiled at load
+  time so a broken pattern is a startup error) is checked at the very top of
+  `booking_gate.resolve` — **before** the `call_booking_enabled` short-circuit and
+  before the journal. First match wins, `re.search` against the Drive name, no
+  implicit `IGNORECASE`. The placement is the point: a rule is a routing mechanism
+  of its own, so it must produce a `task_id` even on a deployment with the receiver
+  off (where every decision is otherwise `disabled` with no task and no Planfix
+  comment), and it must outrank a real booking that happened to line up with a demo
+  call. Its decision is `matched` with `reason="name-rule"`, so everything
+  downstream — processing, the Planfix comment, `planfix_task_url` in the meta
+  document — needs no special case.
 - `booking_match=none` is written **only** while `booking_server.is_running()`. If
   the receiver never bound its port, every recording looks unmatched, and marking
   them would silently retire the whole backlog; with the receiver down the loop skips

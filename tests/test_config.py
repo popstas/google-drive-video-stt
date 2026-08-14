@@ -2361,6 +2361,81 @@ def test_call_booking_defaults_to_disabled(tmp_path):
     assert config.call_booking_token == ""
     assert config.call_booking_threshold_minutes == 15
     assert config.call_booking_disable_recognition is False
+    assert config.call_booking_name_rules == ()
+
+
+def test_name_rules_are_parsed_in_order(tmp_path):
+    raw = {
+        **CALL_BOOKING_BASE,
+        "call_booking": {
+            "name_rules": [
+                {"regex": "^Sale department B2B", "task_id": "861300"},
+                {"regex": "demo", "task_id": "861301"},
+            ],
+        },
+    }
+
+    config = load_config(config_path=write_config(tmp_path, raw))
+
+    assert [rule.task_id for rule in config.call_booking_name_rules] == [
+        "861300",
+        "861301",
+    ]
+    assert [rule.pattern.pattern for rule in config.call_booking_name_rules] == [
+        "^Sale department B2B",
+        "demo",
+    ]
+
+
+def test_name_rules_reject_an_invalid_regex(tmp_path):
+    """A broken pattern must fail at startup, not once per file in the poll loop."""
+    raw = {
+        **CALL_BOOKING_BASE,
+        "call_booking": {"name_rules": [{"regex": "Sale (B2B", "task_id": "861300"}]},
+    }
+
+    with pytest.raises(ValueError, match="call_booking.name_rules\\[0\\]"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_name_rules_require_a_task_id(tmp_path):
+    raw = {
+        **CALL_BOOKING_BASE,
+        "call_booking": {"name_rules": [{"regex": "^Sale department B2B"}]},
+    }
+
+    with pytest.raises(ValueError, match="task_id"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_name_rules_require_a_regex(tmp_path):
+    raw = {
+        **CALL_BOOKING_BASE,
+        "call_booking": {"name_rules": [{"task_id": "861300"}]},
+    }
+
+    with pytest.raises(ValueError, match="regex"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_name_rules_reject_a_non_list(tmp_path):
+    raw = {
+        **CALL_BOOKING_BASE,
+        "call_booking": {"name_rules": {"regex": "x", "task_id": "1"}},
+    }
+
+    with pytest.raises(ValueError, match="call_booking.name_rules must be a list"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_name_rules_reject_a_non_mapping_entry(tmp_path):
+    raw = {
+        **CALL_BOOKING_BASE,
+        "call_booking": {"name_rules": ["^Sale department B2B"]},
+    }
+
+    with pytest.raises(ValueError, match="call_booking.name_rules\\[0\\] must be a mapping"):
+        load_config(config_path=write_config(tmp_path, raw))
 
 
 def test_planfix_defaults(tmp_path):
@@ -2491,6 +2566,7 @@ def test_generated_config_ships_the_new_sections(tmp_path):
         "authorization_token": "",
         "threshold_minutes": 15,
         "disable_recognition": False,
+        "name_rules": [],
     }
     assert raw["planfix"] == {
         "create_comment_url": "",

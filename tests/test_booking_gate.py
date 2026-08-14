@@ -1,3 +1,4 @@
+import re
 from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
@@ -13,7 +14,7 @@ from src.booking_gate import (
     select_stale_marks,
 )
 from src.call_booking import CallBooking, append
-from src.config import Config, EmployeeFolder
+from src.config import Config, EmployeeFolder, NameRule
 
 MATCHED_NAME = "Call with Dmitrii - 2026/08/08 09:00 GMT+04:00 – Recording.mp4"
 
@@ -96,6 +97,93 @@ def test_booking_in_window_matches(config):
     assert decision.state == "matched"
     assert decision.task_id == "851030"
     assert decision.is_matched is True
+
+
+# --- name rules --------------------------------------------------------------
+
+SALE_NAME = "Sale department B2B - 2026/08/08 09:00 GMT+04:00 – Recording.mp4"
+
+
+def _with_rules(config, *rules):
+    return replace(
+        config,
+        call_booking_name_rules=tuple(
+            NameRule(pattern=re.compile(regex), task_id=task_id)
+            for regex, task_id in rules
+        ),
+    )
+
+
+def test_name_rule_matches_and_routes_to_its_task(config):
+    ruled = _with_rules(config, ("^Sale department B2B", "861300"))
+
+    decision = resolve({"id": "v1", "name": SALE_NAME}, "f1", ruled)
+
+    assert decision == BookingDecision(
+        state="matched", task_id="861300", reason="name-rule"
+    )
+
+
+def test_name_rule_applies_with_call_booking_disabled(config):
+    """The rule is a routing mechanism of its own, not an add-on to the gate.
+
+    With the receiver off, ``resolve`` short-circuits to ``disabled`` and no Planfix
+    comment is ever posted -- so the rule must be checked before that branch.
+    """
+    ruled = _with_rules(
+        replace(config, call_booking_enabled=False), ("^Sale department B2B", "861300")
+    )
+
+    decision = resolve({"id": "v1", "name": SALE_NAME}, "f1", ruled)
+
+    assert decision.state == "matched"
+    assert decision.task_id == "861300"
+
+
+def test_name_rule_overrides_a_real_booking(config):
+    """Explicit operator intent beats a booking that happened to line up."""
+    _seed(config, minutes_offset=5, task_id="851030")
+    ruled = _with_rules(config, ("^Sale department B2B", "861300"))
+
+    decision = resolve({"id": "v1", "name": SALE_NAME}, "f1", ruled)
+
+    assert decision.task_id == "861300"
+
+
+def test_name_rule_rescues_a_file_that_would_be_unmatched(config):
+    ruled = _with_rules(config, ("^Sale department B2B", "861300"))
+
+    decision = resolve({"id": "v1", "name": "Sale department B2B raw.mp4"}, "f1", ruled)
+
+    assert decision.state == "matched"
+    assert decision.task_id == "861300"
+
+
+def test_name_rule_does_not_fire_on_a_different_name(config):
+    ruled = _with_rules(config, ("^Sale department B2B", "861300"))
+
+    decision = resolve({"id": "v1", "name": MATCHED_NAME}, "f1", ruled)
+
+    assert decision == BookingDecision(state="unmatched", reason="no-booking")
+
+
+def test_first_matching_name_rule_wins(config):
+    ruled = _with_rules(
+        config, ("Sale department", "861300"), ("^Sale department B2B", "861301")
+    )
+
+    decision = resolve({"id": "v1", "name": SALE_NAME}, "f1", ruled)
+
+    assert decision.task_id == "861300"
+
+
+def test_name_rule_is_case_sensitive_unless_the_pattern_says_otherwise(config):
+    """No implicit IGNORECASE: whoever writes a regex can write ``(?i)``."""
+    ruled = _with_rules(config, ("^sale department b2b", "861300"))
+
+    decision = resolve({"id": "v1", "name": SALE_NAME}, "f1", ruled)
+
+    assert decision.state == "unmatched"
 
 
 def test_mark_unmatched_writes_the_property():

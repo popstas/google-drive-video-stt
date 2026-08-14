@@ -1,7 +1,6 @@
 # TODO
 
-- [x] сравнить gpt-5.4-mini vs gpt-5.6-luna, low, medium, high, выбрать effort, переключить конфиги
-- [x] перевести на luna
-- [x] сравнить стабильность case_deadline и deadlines на разных effort на том же mp4, выбрать effort, low|medium|high
 - [ ] /expertizeme-connect Перевести проекты на gpt-5.6-luna и убрать выключаемые модели
 - [ ] пересмотреть промпт `case_deadline`: поле пустое почти во всех прогонах на трёх записях, где сроки обсуждались
+- [x] настроить исключения, где запускать обработку. Пример: mp4 с названием, начинающимся на `Sale department B2B` — нужно всегда распознавать и отправлять в тестовую задачу
+- [ ] перенести `call_booking.name_rules` (`^Sale department B2B`, `^Walter and Andrei Smirnov` -> задача 861300) в боевой конфиг на us1 — локальный `data/config.yml` уже настроен

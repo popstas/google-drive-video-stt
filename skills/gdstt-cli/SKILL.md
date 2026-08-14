@@ -2,7 +2,7 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.10.0
+version: 2.11.0
 last_updated: 2026-08-14
 ---
 
@@ -360,6 +360,25 @@ The polling loop skips a recording when `call_booking.disable_recognition` is on
 2. Does the recording's Drive name carry a meeting time (`… - 2026/08/08 09:00 GMT+04:00 – Recording`)? A renamed or hand-uploaded file has none and can never match.
 3. Does the `folders` entry for that folder have the manager's `email`?
 4. Once fixed: `gdstt bookings rematch <file-id>`, or just process it directly with `gdstt process <file-id>` — manual commands ignore both the mark and the gate.
+
+### Записи, которые надо обрабатывать всегда
+
+Если такие записи идут регулярно и им нужна постоянная задача (демо, тесты, поток
+без броней) — заводи правило в `call_booking.name_rules`, а не `rematch` каждый раз:
+
+```yaml
+call_booking:
+  name_rules:
+    - regex: "^Sale department B2B"
+      task_id: "861300"
+```
+
+Совпавшая запись обрабатывается всегда (бронь не нужна, `disable_recognition` не
+мешает), комментарий уходит в `task_id` правила. `regex` — питоновская регулярка,
+`re.search` по имени с расширением: для префикса ставь `^`, регистр учитывается без
+`(?i)`. Побеждает первое совпавшее правило, и оно сильнее совпавшей по времени
+брони. Работает и при `enabled: false`, и в ручных командах. Оба поля обязательны,
+битая регулярка — ошибка старта.
 
 ## Правила безопасности
 
