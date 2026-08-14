@@ -18,6 +18,7 @@
 
 ### Documentation
 
+- Describe config-driven meta entities
 - Note the make_config keyword the webhook test needs
 - Implementation plan for config-driven meta entities
 - Spec for config-driven meta entities

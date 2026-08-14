@@ -340,9 +340,11 @@ variable is read at runtime:
 | `planfix.task_url` | (empty) | Where a task lives in the web UI, e.g. `https://<account>.planfix.com/task/<task-id>`. Fills `planfix_task_url` in the meta document and the link column of `gdstt planfix sent`. Empty leaves both blank |
 
 `tags.allowed` and `referrals.allowed` are read for one more version when
-`meta.entities` is absent. Once `meta.entities` is declared, the old keys are
-ignored and logged at startup. The first whole-config rewrite (`gdstt stop` is
-one) migrates the file to the new form.
+`meta.entities` is absent, so an existing config keeps working untouched — no CLI
+command rewrites the whole file for you. Migrating is manual and not urgent: add a
+`meta.entities` block by hand, moving each list into its entity's `allowed`, then
+delete the old `tags:`/`referrals:` sections. Once `meta.entities` is declared,
+the old keys are ignored and logged at startup.
 
 ## Speech-to-text
 
