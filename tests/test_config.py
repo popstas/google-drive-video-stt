@@ -113,7 +113,7 @@ def test_drive_mp3_artifact_can_be_enabled_for_deepgram_m4a(tmp_path):
 
 def test_openai_pipeline_defaults(tmp_path):
     cfg = _load_config(tmp_path, {"stt": {"provider": "disabled"}})
-    assert cfg.openai_model == "gpt-5.4-mini"
+    assert cfg.openai_model == "gpt-5.6-luna"
     assert cfg.openai_keypoints is False
     assert cfg.openai_batch is False
 
@@ -2684,3 +2684,69 @@ def test_generated_default_config_ships_the_seven_entities():
     assert "referrals" not in generated
     referral = next(e for e in generated["meta"]["entities"] if e["name"] == "referral")
     assert "рекомендация" in referral["allowed"]
+
+
+# --- openai.reasoning_effort -------------------------------------------------
+
+
+def test_reasoning_effort_defaults_to_empty(tmp_path):
+    cfg = _load_config(tmp_path, {"stt": {"provider": "disabled"}})
+
+    assert cfg.openai_reasoning_effort == ""
+
+
+def test_yaml_reasoning_effort_is_read(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {"stt": {"provider": "disabled"}, "openai": {"reasoning_effort": "High"}},
+    )
+
+    assert cfg.openai_reasoning_effort == "high"
+
+
+def test_yaml_reasoning_effort_rejects_unknown_value(tmp_path):
+    config_file = write_config(
+        tmp_path,
+        {"stt": {"provider": "disabled"}, "openai": {"reasoning_effort": "turbo"}},
+    )
+
+    with pytest.raises(ValueError, match="reasoning_effort must be one of"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
+def test_reasoning_effort_round_trips(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {"stt": {"provider": "disabled"}, "openai": {"reasoning_effort": "low"}},
+    )
+
+    out_file = tmp_path / "out.yml"
+    _write_yaml(out_file, _config_to_yaml_dict(cfg))
+    reloaded = load_config(config_path=out_file, validate_providers=False)
+
+    assert reloaded.openai_reasoning_effort == "low"
+
+
+def test_unset_reasoning_effort_stays_out_of_serialized_yaml(tmp_path):
+    cfg = _load_config(tmp_path, {"stt": {"provider": "disabled"}})
+
+    assert "reasoning_effort" not in _config_to_yaml_dict(cfg)["openai"]
+
+
+def test_preset_reasoning_effort_round_trips(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "openai": {"api_key": "sk-test"},
+            "presets": {"keypoints": {"reasoning_effort": "high"}},
+        },
+    )
+    assert cfg.presets[0].reasoning_effort == "high"
+
+    out_file = tmp_path / "out.yml"
+    _write_yaml(out_file, _config_to_yaml_dict(cfg))
+    reloaded = load_config(config_path=out_file, validate_providers=False)
+
+    by_name = {preset.name: preset for preset in reloaded.presets}
+    assert by_name["keypoints"].reasoning_effort == "high"

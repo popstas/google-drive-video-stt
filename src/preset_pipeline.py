@@ -171,6 +171,9 @@ def _run_one(
         model=preset.model or config.openai_model,
         proxy_url=config.proxy_url,
         use_batch=use_batch,
+        # Same fallback shape as `model`: the per-preset override wins, else the
+        # global default (itself empty by default, which omits the parameter).
+        reasoning_effort=preset.reasoning_effort or config.openai_reasoning_effort,
     )
     try:
         text, usage = pipeline.run(preset.instructions, input_text)

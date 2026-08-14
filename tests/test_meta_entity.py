@@ -125,7 +125,7 @@ def test_rendered_block_carries_the_response_template_and_per_entity_rules():
     block = meta_entity.render_entities_block(entities)
 
     assert "subject: <value>" in block
-    assert "tags: [<value>, <value>]" in block
+    assert 'tags: ["<value>", "<value>"]' in block
     assert "Тема звонка." in block
     assert "- O-1" in block
     assert "- EB-1A" in block
@@ -147,3 +147,20 @@ def test_rendered_block_is_stable_for_a_single_text_entity():
     block = meta_entity.render_entities_block(entities)
     assert "target_filing: <value>" in block
     assert "[<value>" not in block
+
+
+def test_list_template_quotes_items_and_says_so():
+    """A list item may contain a comma; unquoted inline YAML would split it.
+
+    The model copies the template's shape, so an unquoted `[<value>, <value>]`
+    teaches it to emit `[не раньше, чем 25-е число — обратная связь]`, which YAML
+    reads as two entries. Quoting the template (and saying so in the rules) is what
+    keeps a whole phrase whole.
+    """
+    entities = meta_entity.parse_entities(
+        [{"name": "deadlines", "prompt": "Сроки.", "multiple": True}]
+    )
+    block = meta_entity.render_entities_block(entities)
+
+    assert 'deadlines: ["<value>", "<value>"]' in block
+    assert "double quotes" in block.lower()

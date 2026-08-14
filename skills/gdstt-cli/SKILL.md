@@ -2,8 +2,8 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.9.0
-last_updated: 2026-08-13
+version: 2.10.0
+last_updated: 2026-08-14
 ---
 
 # gdstt CLI
@@ -301,12 +301,12 @@ presets:
 коллизия на диске); `prompt_file` - читаемый непустой файл; `depends_on` на
 неизвестный/отключённый пресет и циклы в DAG отвергаются.
 
-**Batch - дешевле и медленнее, не «качественнее».** `openai.batch: true` шлёт
-проход через Batch API (~на 50% дешевле ценой задержки), на качество не влияет.
-Рекомендация: глобально `openai.batch: true`, но `transcript-cleanup.batch: false`
-- batch на вышестоящей стадии задерживает все нижестоящие (ждут её артефакт). По
-умолчанию `openai.batch_wait: true` (синхронно ждём batch; асинхронного пути нет).
-Пер-пресетные `model`/`batch`/`batch_wait` переопределяют глобальные `openai.*`.
+**Batch - дешевле и медленнее, не «качественнее».** `openai.batch: true` шлёт проход
+через Batch API (~на 50% дешевле ценой задержки), качество то же. Рекомендация: глобально
+`true`, но `transcript-cleanup.batch: false` - batch наверху цепочки задерживает все
+нижестоящие. По умолчанию `openai.batch_wait: true` (ждём batch синхронно).
+`reasoning_effort: low|medium|high` - без ключа в API не уходит, выше effort дороже и
+медленнее. Пер-пресетные `model`/`reasoning_effort`/`batch`/`batch_wait` перебивают глобальные.
 
 ## Vault-интеграция (опционально)
 

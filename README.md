@@ -270,7 +270,8 @@ stt:
     keyterms_file: deepgram-keyterms-example.txt
 openai:
   api_key: "..."
-  model: gpt-5.4-mini    # global default model for presets
+  model: gpt-5.6-luna    # global default model for presets
+  reasoning_effort: low  # global default effort: low|medium|high (omit to leave it to the model)
   batch: false           # global default batch mode for presets
   batch_wait: true       # wait synchronously for batch results (default)
   max_parallel: 4        # cap on presets run concurrently
@@ -327,7 +328,8 @@ variable is read at runtime:
 | `output.also_drive` | `false` | Folder mode only: also publish the combined `.stt` document (keypoints + meta + transcript) as a Drive sibling. Every artifact still lands in `output.dir` regardless; this only adds the one Drive copy |
 | `output.stt_presets` | `[keypoints]` | Which preset sections (in order) open the `.stt` document, between the title and the meta block |
 | `openai.api_key` | — | Required when any OpenAI preset is enabled |
-| `openai.model` | `gpt-5.4-mini` | Global default model for presets |
+| `openai.model` | `gpt-5.6-luna` | Global default model for presets |
+| `openai.reasoning_effort` | — | Global default reasoning effort (`low`/`medium`/`high`). Omitted by default, which leaves the effort to the model; a preset's own `reasoning_effort` overrides it |
 | `openai.batch` | `false` | Global default batch mode. Batch API is ~50% cheaper but slower (not higher quality); batch on an upstream preset delays its downstream presets |
 | `openai.batch_wait` | `true` | Wait synchronously for batch results (the async path is unsupported) |
 | `openai.max_parallel` | `4` | Max number of independent presets run concurrently |
@@ -516,8 +518,17 @@ recommended layout is global `openai.batch: true` with
 `transcript-cleanup.batch: false`, because batch on an upstream stage delays every
 downstream stage (they wait for its artifact). `openai.batch_wait: true` is the
 default (the service waits synchronously for batch results; the async path is not
-supported). Per-preset `model`/`batch`/`batch_wait` override the global
-`openai.*` defaults.
+supported). Per-preset `model`/`reasoning_effort`/`batch`/`batch_wait` override the
+global `openai.*` defaults.
+
+**Reasoning effort.** `openai.reasoning_effort: low|medium|high` sets how much the
+model reasons before answering, and a preset's own `reasoning_effort` overrides it.
+Leaving the key out is a distinct fourth state: the request omits the parameter
+entirely and the model applies its own default, which differs per model — measured
+on `gpt-5.4-mini` it is no reasoning at all, while `gpt-5.6-luna` reasons anyway.
+Higher effort costs latency and reasoning tokens, so raise it only where extraction
+stability actually improves; see
+[docs/reviews/2026-08-14-luna-vs-mini-reasoning-effort.md](docs/reviews/2026-08-14-luna-vs-mini-reasoning-effort.md).
 
 Idempotency is per preset: `list_folder_state` reports an `artifact_ids` map keyed
 by `artifact_type`, so only the presets still missing an artifact are produced on a

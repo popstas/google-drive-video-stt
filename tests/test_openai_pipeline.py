@@ -540,3 +540,70 @@ def test_generate_keypoints_clears_reused_collector_when_usage_is_absent(monkeyp
         == "Alice: hi"
     )
     assert usage == {}
+
+
+# --- reasoning effort -------------------------------------------------------
+
+
+def test_sync_omits_reasoning_when_effort_unset():
+    """An unset effort must leave the request byte-identical to the old behavior."""
+    captured: dict = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(output_text="Alice: hi")
+
+    pipeline = OpenAIPipeline(api_key="sk-test")
+    pipeline._client = SimpleNamespace(responses=SimpleNamespace(create=create))
+
+    pipeline.run("INSTR", "transcript")
+    assert "reasoning" not in captured
+
+
+def test_sync_sends_reasoning_effort():
+    captured: dict = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(output_text="Alice: hi")
+
+    pipeline = OpenAIPipeline(api_key="sk-test", reasoning_effort="high")
+    pipeline._client = SimpleNamespace(responses=SimpleNamespace(create=create))
+
+    pipeline.run("INSTR", "transcript")
+    assert captured["reasoning"] == {"effort": "high"}
+
+
+def test_batch_body_carries_reasoning_effort():
+    line = json.dumps(
+        {"response": {"status_code": 200, "body": {"output_text": "Alice: hi"}}}
+    )
+    calls: dict = {}
+    pipeline = OpenAIPipeline(
+        api_key="sk-test", use_batch=True, poll_interval=0, reasoning_effort="low"
+    )
+    pipeline._client = _fake_batch_client(line + "\n", calls=calls)
+
+    pipeline.run("INSTR", "transcript")
+    _, payload = calls["upload"]["file"]
+    body = json.loads(payload.getvalue().decode("utf-8"))["body"]
+    assert body["reasoning"] == {"effort": "low"}
+
+
+def test_batch_body_omits_reasoning_when_effort_unset():
+    line = json.dumps(
+        {"response": {"status_code": 200, "body": {"output_text": "Alice: hi"}}}
+    )
+    calls: dict = {}
+    pipeline = OpenAIPipeline(api_key="sk-test", use_batch=True, poll_interval=0)
+    pipeline._client = _fake_batch_client(line + "\n", calls=calls)
+
+    pipeline.run("INSTR", "transcript")
+    _, payload = calls["upload"]["file"]
+    body = json.loads(payload.getvalue().decode("utf-8"))["body"]
+    assert "reasoning" not in body
+
+
+def test_get_pipeline_passes_config_reasoning_effort():
+    pipeline = get_pipeline(_config(openai_reasoning_effort="medium"))
+    assert pipeline._reasoning_effort == "medium"

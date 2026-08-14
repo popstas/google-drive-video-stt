@@ -252,8 +252,13 @@ def parse_entities(
 
 
 def _template_line(entity: MetaEntity) -> str:
+    # List items are quoted in the template because the model copies its shape, and
+    # a real answer routinely contains a comma ("не раньше, чем 25-е число — ..."):
+    # unquoted, YAML reads that one deadline as two entries and the CRM comment gets
+    # sentence fragments. Quoting costs nothing and cannot be recovered downstream,
+    # because by parse time the phrase is already split.
     return (
-        f"{entity.name}: [<value>, <value>]"
+        f'{entity.name}: ["<value>", "<value>"]'
         if entity.multiple
         else f"{entity.name}: <value>"
     )
@@ -262,7 +267,11 @@ def _template_line(entity: MetaEntity) -> str:
 def _entity_rules(entity: MetaEntity) -> str:
     lines = [f"## {entity.name}", "", entity.prompt, ""]
     if entity.multiple:
-        lines.append("- Return a list. Return an empty list (`[]`) when nothing fits.")
+        lines.append(
+            "- Return a list, wrapping every item in double quotes so a comma "
+            "inside an item cannot split it. Return an empty list (`[]`) when "
+            "nothing fits."
+        )
     else:
         lines.append("- Return a single value, on one line.")
     if entity.type == "enum":

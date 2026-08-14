@@ -25,6 +25,12 @@ from pathlib import Path
 _PACKAGED_PROMPTS_PACKAGE = "src.assets.prompts"
 _SRC_PROMPTS_DIR = Path(__file__).resolve().parent / "assets" / "prompts"
 
+# Accepted ``reasoning_effort`` values, globally and per preset. Unset (empty or
+# absent) is the fourth state and the default: the request omits the parameter
+# entirely, so the model picks its own effort and pre-existing configs keep
+# producing byte-identical API calls.
+REASONING_EFFORTS = ("low", "medium", "high")
+
 # Prompt assets shipped with the package. ``config init`` copies these beside a
 # generated config so the default chain
 # (transcript-cleanup -> keypoints + meta) works out of the box and extra
@@ -96,6 +102,10 @@ class Preset:
     instructions: str
     depends_on: tuple[str, ...] = ()
     model: str | None = None
+    # ``None`` inherits the global ``openai.reasoning_effort`` at execution time,
+    # which itself defaults to empty — meaning the request omits the parameter and
+    # the model applies its own default effort.
+    reasoning_effort: str | None = None
     batch: bool | None = None
     # ``None`` inherits the global ``openai.batch_wait`` default at execution time;
     # an explicit bool overrides it per preset.
@@ -155,6 +165,26 @@ def _opt_str(value: object) -> str | None:
     return text or None
 
 
+def parse_reasoning_effort(value: object, *, source: str) -> str | None:
+    """Normalize a ``reasoning_effort`` value, or ``None`` when unset.
+
+    Lives here rather than in ``config`` because both the global
+    ``openai.reasoning_effort`` and the per-preset override must accept exactly the
+    same vocabulary, and ``presets`` is the leaf module of the two.
+    """
+    if value is None:
+        return None
+    effort = str(value).strip().lower()
+    if not effort:
+        return None
+    if effort not in REASONING_EFFORTS:
+        raise ValueError(
+            f"{source} reasoning_effort must be one of {REASONING_EFFORTS!r}, "
+            f"got: {value!r}"
+        )
+    return effort
+
+
 def _opt_bool(value: object) -> bool | None:
     if value is None:
         return None
@@ -202,6 +232,9 @@ def _build_preset(name: str, raw: Mapping, base: Preset | None) -> Preset:
             instructions=instructions,
             depends_on=_depends_on(raw.get("depends_on")),
             model=_opt_str(raw.get("model")),
+            reasoning_effort=parse_reasoning_effort(
+                raw.get("reasoning_effort"), source=f"preset {name!r}:"
+            ),
             batch=_opt_bool(raw.get("batch")),
             batch_wait=_opt_bool(raw.get("batch_wait")),
             artifact_suffix=suffix or default_artifact_suffix(name),
@@ -224,6 +257,10 @@ def _build_preset(name: str, raw: Mapping, base: Preset | None) -> Preset:
         overrides["depends_on"] = _depends_on(raw.get("depends_on"))
     if "model" in raw:
         overrides["model"] = _opt_str(raw.get("model"))
+    if "reasoning_effort" in raw:
+        overrides["reasoning_effort"] = parse_reasoning_effort(
+            raw.get("reasoning_effort"), source=f"preset {name!r}:"
+        )
     if "batch" in raw:
         overrides["batch"] = _opt_bool(raw.get("batch"))
     if "batch_wait" in raw:

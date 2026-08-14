@@ -1,6 +1,17 @@
 # Changelog
 
 
+## Unreleased
+
+### Features
+
+- Default to gpt-5.6-luna at low reasoning effort
+- Add reasoning_effort config, globally and per preset
+
+### Bug Fixes
+
+- Quote list items in the meta response template
+
 ## v0.7.0 - 2026-08-14
 
 ### Features

@@ -19,6 +19,7 @@ from src.presets import (
     default_artifact_suffix,
     load_packaged_prompt,
     merge_presets,
+    parse_reasoning_effort,
     validate_dag,
 )
 
@@ -99,7 +100,11 @@ class Config:
     # disabled without invalidating the config.
     stt_presets: tuple[str, ...] = ("keypoints",)
     openai_keypoints: bool = False
-    openai_model: str = "gpt-5.4-mini"
+    openai_model: str = "gpt-5.6-luna"
+    # Global default reasoning effort for every preset (``low``/``medium``/``high``).
+    # Empty is the default and means "omit the parameter", so the model applies its
+    # own effort and a config written before this key keeps behaving identically.
+    openai_reasoning_effort: str = ""
     openai_batch: bool = False
     openai_batch_wait: bool = True
     openai_max_parallel: int = 4
@@ -834,7 +839,10 @@ def _config_from_yaml(
     stt_postprocess = _yaml_bool(stt.get("postprocess"), default=True)
 
     openai_api_key = _yaml_str(openai.get("api_key"))
-    openai_model = _yaml_str(openai.get("model"), "gpt-5.4-mini") or "gpt-5.4-mini"
+    openai_model = _yaml_str(openai.get("model"), "gpt-5.6-luna") or "gpt-5.6-luna"
+    openai_reasoning_effort = (
+        parse_reasoning_effort(openai.get("reasoning_effort"), source="openai.") or ""
+    )
     openai_keypoints = _yaml_bool(openai.get("keypoints"), default=False)
     openai_batch = _yaml_bool(openai.get("batch"), default=False)
     openai_batch_wait = _yaml_bool(openai.get("batch_wait"), default=True)
@@ -949,6 +957,7 @@ def _config_from_yaml(
         stt_presets=stt_presets,
         openai_keypoints=openai_keypoints,
         openai_model=openai_model,
+        openai_reasoning_effort=openai_reasoning_effort,
         openai_batch=openai_batch,
         openai_batch_wait=openai_batch_wait,
         openai_max_parallel=openai_max_parallel,
@@ -1037,6 +1046,8 @@ def _preset_to_yaml_entry(preset: Preset) -> dict:
         entry["depends_on"] = list(preset.depends_on)
     if preset.model is not None:
         entry["model"] = preset.model
+    if preset.reasoning_effort is not None:
+        entry["reasoning_effort"] = preset.reasoning_effort
     if preset.batch is not None:
         entry["batch"] = preset.batch
     # batch_wait is omitted unless explicitly set so the generated YAML stays a thin
@@ -1140,7 +1151,12 @@ def _default_config_dict(
         },
         "openai": {
             "api_key": "",
-            "model": "gpt-5.4-mini",
+            "model": "gpt-5.6-luna",
+            # low, not the model default: at higher efforts the extraction quality
+            # of the `meta` fields did not measurably improve, while latency and
+            # reasoning tokens grew several-fold. See
+            # docs/reviews/2026-08-14-luna-vs-mini-reasoning-effort.md.
+            "reasoning_effort": "low",
             "batch": True,
             "max_parallel": 4,
         },
@@ -1423,6 +1439,13 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
         "openai": {
             "api_key": config.openai_api_key,
             "model": config.openai_model,
+            # Omitted while unset so the generated YAML doesn't pin an effort the
+            # runtime would otherwise leave to the model.
+            **(
+                {"reasoning_effort": config.openai_reasoning_effort}
+                if config.openai_reasoning_effort
+                else {}
+            ),
             "batch": config.openai_batch,
             # batch_wait defaults to true and is omitted unless explicitly disabled,
             # keeping the generated YAML free of the (unsupported) async path.

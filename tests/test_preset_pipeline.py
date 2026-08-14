@@ -38,9 +38,10 @@ class FakePipeline:
     instances: list["FakePipeline"] = []
     barrier: threading.Barrier | None = None
 
-    def __init__(self, *, api_key, model, proxy_url, use_batch):
+    def __init__(self, *, api_key, model, proxy_url, use_batch, reasoning_effort=""):
         self.model = model
         self.use_batch = use_batch
+        self.reasoning_effort = reasoning_effort
         self.calls: list[tuple[str, str]] = []
         FakePipeline.instances.append(self)
 
@@ -368,3 +369,18 @@ def test_preset_result_usage_carried():
     results = run_presets("t", "f.mp4", _config(), presets)
     assert results["a"].usage == {"output_tokens": 1}
     assert isinstance(results["a"], PresetResult)
+
+
+def test_reasoning_effort_falls_back_to_global():
+    presets = {
+        "global": _preset("global"),
+        "custom": _preset("custom", reasoning_effort="high"),
+    }
+    preset_pipeline.run_presets(
+        "t", "f.mp4", _config(openai_reasoning_effort="low"), presets
+    )
+
+    by_name = {inst.model: inst for inst in FakePipeline.instances}
+    efforts = sorted(inst.reasoning_effort for inst in FakePipeline.instances)
+    assert efforts == ["high", "low"]
+    assert by_name  # both presets constructed a pipeline
