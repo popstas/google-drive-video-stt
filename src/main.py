@@ -22,6 +22,7 @@ from src import (
     drive,
     meta as meta_module,
     meta_doc,
+    meta_entity,
     notify,
     output,
     planfix,
@@ -713,19 +714,25 @@ def _webhook_payload(
     }
 
 
-# Labels for the meta fields the Planfix comment may carry. Fixed in code, not config:
-# a field's label is part of how the comment reads, not a deployment choice.
-_PLANFIX_META_LABELS = {
-    "subject": "",  # rendered as the heading, not as a labelled line
-    "tags": "Теги",
-    "referral": "Откуда узнал",
-    "referral_note": "Подробности",
+# Labels for the meta-document fields the code fills in itself. Entity labels come
+# from the entities -- see MetaEntity.planfix_label.
+_PLANFIX_CODE_LABELS = {
     "manager": "Менеджер",
     "client": "Клиент",
     "date": "Дата",
     "duration": "Длительность",
     "video_url": "Запись",
 }
+
+
+def _planfix_labels(
+    entities: tuple[meta_entity.MetaEntity, ...],
+) -> dict[str, str]:
+    """Every field that may appear in the comment header, mapped to its label."""
+    labels = dict(_PLANFIX_CODE_LABELS)
+    for entity in entities:
+        labels[entity.name] = entity.planfix_label
+    return labels
 
 
 # Markers prepended to the keypoints headings in the Planfix comment, so the three
@@ -763,44 +770,52 @@ def _mark_planfix_sections(text: str) -> str:
 
 
 def _planfix_meta_lines(
-    document: dict[str, object] | None, fields: tuple[str, ...]
+    document: dict[str, object] | None,
+    fields: tuple[str, ...],
+    entities: tuple[meta_entity.MetaEntity, ...],
 ) -> list[str]:
     """Render the selected meta fields as Markdown lines for the comment header.
 
-    A field that is empty or unknown is skipped silently, so shortening the configured
-    list or a call with no referral never leaves a dangling label. ``subject`` has an
-    empty label in ``_PLANFIX_META_LABELS`` but is deliberately not skipped for it --
-    it is rendered as the bold heading instead of a labelled line. Regardless of where
-    ``subject`` falls in ``fields``, it is always hoisted to the top of the returned
-    lines rather than following the configured order.
+    A field that is empty or has no label is skipped silently, so shortening the
+    configured list or a call with no referral never leaves a dangling label. A
+    field whose label is empty is rendered bold and without a label; the first such
+    field in ``fields`` is hoisted to the top as the comment's heading, and any
+    further ones follow in place as bold lines.
     """
     if not document:
         return []
+    labels = _planfix_labels(entities)
     lines: list[str] = []
+    heading_taken = False
     for field_name in fields:
-        if field_name not in _PLANFIX_META_LABELS:
+        if field_name not in labels:
             continue
         value = document.get(field_name)
         if isinstance(value, list):
             value = ", ".join(str(entry) for entry in value)
-        # Collapse embedded newlines (free LLM text like referral_note can carry them):
-        # markdown_to_html splits on "\n", so an unnormalised value would fracture the
-        # header into extra, label-less paragraphs -- or a stray bullet/heading if the
+        # Collapse embedded newlines (free LLM text can carry them): markdown_to_html
+        # splits on "\n", so an unnormalised value would fracture the header into
+        # extra, label-less paragraphs -- or a stray bullet/heading if the
         # continuation happened to start with "- " or "#".
         text = " ".join(str(value or "").split())
         if not text:
             continue
-        if field_name == "subject":
-            lines.insert(0, f"**{text}**")
+        label = labels[field_name]
+        if not label:
+            if heading_taken:
+                lines.append(f"**{text}**")
+            else:
+                lines.insert(0, f"**{text}**")
+                heading_taken = True
         elif field_name == "video_url":
             # source_name is excluded from the default field list *because* it becomes
             # this anchor's text instead of a line of its own; fall back to the fixed
             # label when the document carries no source_name (or an empty one).
             anchor = str(document.get("source_name") or "").strip()
-            anchor = " ".join(anchor.split()) or _PLANFIX_META_LABELS[field_name]
+            anchor = " ".join(anchor.split()) or label
             lines.append(f"[{anchor}]({text})")
         else:
-            lines.append(f"**{_PLANFIX_META_LABELS[field_name]}:** {text}")
+            lines.append(f"**{label}:** {text}")
     return lines
 
 
@@ -809,6 +824,7 @@ def _planfix_description(
     preset_names: tuple[str, ...],
     meta_document: dict[str, object] | None = None,
     meta_fields: tuple[str, ...] = (),
+    meta_entities: tuple[meta_entity.MetaEntity, ...] = (),
 ) -> str:
     """Concatenate the meta header and the configured preset artifacts into one body.
 
@@ -840,7 +856,9 @@ def _planfix_description(
     if not sections:
         return ""
 
-    header = "\n".join(_planfix_meta_lines(meta_document, meta_fields))
+    header = "\n".join(
+        _planfix_meta_lines(meta_document, meta_fields, meta_entities)
+    )
     blocks: list[str] = [header] if header else []
     for section in sections:
         if blocks:
@@ -881,7 +899,11 @@ def _send_planfix_comment(
         return
 
     description = _planfix_description(
-        artifacts, config.planfix_presets, meta_document, config.planfix_meta_fields
+        artifacts,
+        config.planfix_presets,
+        meta_document,
+        config.planfix_meta_fields,
+        meta_entities=config.meta_entities,
     )
     if not description:
         logger.warning(

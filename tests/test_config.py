@@ -467,7 +467,9 @@ def test_default_config_writes_the_new_output_and_planfix_keys():
     data = _default_config_dict()
     assert data["output"]["stt_presets"] == ["keypoints"]
     assert data["planfix"]["meta_fields"] == [
-        "subject", "tags", "referral", "referral_note", "duration", "video_url",
+        "subject", "tags", "referral", "referral_note",
+        "case_deadline", "deadlines", "target_filing",
+        "duration", "video_url",
     ]
 
 
@@ -2404,7 +2406,24 @@ def test_call_booking_and_planfix_are_parsed(tmp_path):
 
 def test_planfix_meta_fields_has_a_default(tmp_path):
     assert _load_config(tmp_path, {}).planfix_meta_fields == (
-        "subject", "tags", "referral", "referral_note", "duration", "video_url",
+        "subject", "tags", "referral", "referral_note",
+        "case_deadline", "deadlines", "target_filing",
+        "duration", "video_url",
+    )
+
+
+def test_planfix_meta_fields_default_includes_the_new_entities(tmp_path):
+    config = _load_config(tmp_path, {})
+    assert config.planfix_meta_fields == (
+        "subject",
+        "tags",
+        "referral",
+        "referral_note",
+        "case_deadline",
+        "deadlines",
+        "target_filing",
+        "duration",
+        "video_url",
     )
 
 
@@ -2478,7 +2497,9 @@ def test_generated_config_ships_the_new_sections(tmp_path):
         "token": "",
         "presets": ["keypoints"],
         "meta_fields": [
-            "subject", "tags", "referral", "referral_note", "duration", "video_url",
+            "subject", "tags", "referral", "referral_note",
+            "case_deadline", "deadlines", "target_filing",
+            "duration", "video_url",
         ],
         "task_url": "",
     }

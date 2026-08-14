@@ -146,7 +146,9 @@ class Config:
     # internal ids are deliberately absent: the comment is read by managers, not
     # operators.
     planfix_meta_fields: tuple[str, ...] = (
-        "subject", "tags", "referral", "referral_note", "duration", "video_url",
+        "subject", "tags", "referral", "referral_note",
+        "case_deadline", "deadlines", "target_filing",
+        "duration", "video_url",
     )
     # Where a task lives in the web UI, e.g.
     # ``https://tagilcity.planfix.com/task/<task-id>``. The account name is part of the
@@ -641,7 +643,9 @@ def _parse_planfix_meta_fields(value: object) -> tuple[str, ...]:
     """
     if value is None:
         return (
-            "subject", "tags", "referral", "referral_note", "duration", "video_url",
+            "subject", "tags", "referral", "referral_note",
+            "case_deadline", "deadlines", "target_filing",
+            "duration", "video_url",
         )
     if not isinstance(value, list):
         raise ValueError(f"planfix.meta_fields must be a list, got: {value!r}")
@@ -1257,7 +1261,9 @@ def _default_config_dict(
             "token": "",
             "presets": ["keypoints"],
             "meta_fields": [
-                "subject", "tags", "referral", "referral_note", "duration", "video_url",
+                "subject", "tags", "referral", "referral_note",
+                "case_deadline", "deadlines", "target_filing",
+                "duration", "video_url",
             ],
             # e.g. https://<account>.planfix.com/task/<task-id>
             "task_url": "",

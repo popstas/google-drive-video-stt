@@ -2903,6 +2903,7 @@ def gate_config(tmp_path):
         call_booking_enabled=True,
         call_booking_disable_recognition=True,
         call_booking_threshold_minutes=15,
+        meta_entities=meta_entity.default_entities(),
         config_file=config_file,
     )
 
@@ -3246,6 +3247,69 @@ def test_resolve_speaker_names_returns_none_when_the_name_has_one_participant(mo
     )
 
 
+def test_planfix_header_labels_come_from_the_entities():
+    entities = meta_entity.parse_entities(
+        [
+            {"name": "subject", "prompt": "Тема.", "label": ""},
+            {
+                "name": "deadlines",
+                "prompt": "Сроки.",
+                "multiple": True,
+                "label": "Дедлайны",
+            },
+            {"name": "target_filing", "prompt": "Подача."},
+        ]
+    )
+    document = {
+        "subject": "Обсудили визу",
+        "deadlines": ["виза до октября", "оффер к сентябрю"],
+        "target_filing": "O-1 осенью",
+        "duration": "00:31:02",
+    }
+    lines = main._planfix_meta_lines(
+        document,
+        ("subject", "deadlines", "target_filing", "duration"),
+        entities,
+    )
+    assert lines[0] == "**Обсудили визу**"
+    assert "**Дедлайны:** виза до октября, оффер к сентябрю" in lines
+    # No label declared, so the name is the label.
+    assert "**target_filing:** O-1 осенью" in lines
+    # Code-known fields keep their built-in labels.
+    assert "**Длительность:** 00:31:02" in lines
+
+
+def test_planfix_header_skips_an_entity_with_no_value():
+    entities = meta_entity.parse_entities(
+        [
+            {"name": "subject", "prompt": "Тема.", "label": ""},
+            {"name": "case_deadline", "prompt": "Срок.", "label": "Срок сбора кейса"},
+        ]
+    )
+    lines = main._planfix_meta_lines(
+        {"subject": "Обсудили визу", "case_deadline": ""},
+        ("subject", "case_deadline"),
+        entities,
+    )
+    assert lines == ["**Обсудили визу**"]
+
+
+def test_planfix_header_uses_the_first_empty_label_field_as_the_heading():
+    entities = meta_entity.parse_entities(
+        [
+            {"name": "alt", "prompt": "Другое.", "label": ""},
+            {"name": "subject", "prompt": "Тема.", "label": ""},
+        ]
+    )
+    lines = main._planfix_meta_lines(
+        {"subject": "Обсудили визу", "alt": "Второй заголовок"},
+        ("subject", "alt"),
+        entities,
+    )
+    assert lines[0] == "**Обсудили визу**"
+    assert "**Второй заголовок**" in lines[1:]
+
+
 def test_planfix_description_concatenates_presets_in_order():
     description = main._planfix_description(
         {"keypoints": "Задачи: раз", "action-items": "Сделать два", "meta": "topic: x"},
@@ -3297,6 +3361,7 @@ def test_planfix_description_puts_a_blank_line_around_a_marked_heading():
         ("keypoints",),
         {"subject": "Созвон"},
         ("subject",),
+        meta_entity.default_entities(),
     )
 
     assert description == (
@@ -3347,6 +3412,7 @@ def test_planfix_description_puts_the_subject_and_tags_on_top():
         ("keypoints",),
         {"subject": "Обсудили кейс", "tags": ["O-1"], "referral": "рекомендация"},
         ("subject", "tags", "referral"),
+        meta_entity.default_entities(),
     )
     assert html.index("Обсудили кейс") < html.index("Задачи")
     assert "O-1" in html and "рекомендация" in html
@@ -3359,6 +3425,7 @@ def test_planfix_description_skips_empty_and_unknown_fields():
         ("keypoints",),
         {"subject": "s", "referral": "", "tags": []},
         ("subject", "referral", "tags", "not_a_field"),
+        meta_entity.default_entities(),
     )
     # The brief's original assertion checked "Реферал" not in html, but no label in
     # _PLANFIX_META_LABELS spells "Реферал" (referral's label is "Откуда узнал"), so
@@ -3382,6 +3449,7 @@ def test_planfix_description_normalises_a_multiline_meta_value():
         {"keypoints": "х"}, ("keypoints",),
         {"referral_note": "Позвонила\nв понедельник,\n- уточнила детали"},
         ("referral_note",),
+        meta_entity.default_entities(),
     )
     assert "<p><b>Подробности:</b> Позвонила в понедельник, - уточнила детали</p>" in html
     assert "\n" not in html
