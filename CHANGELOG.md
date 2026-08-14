@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+
+### Features
+
+- Force processing and task routing by file-name rules
+
 ## v0.8.0 - 2026-08-14
 
 ### Features
