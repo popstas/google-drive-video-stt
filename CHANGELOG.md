@@ -13,6 +13,7 @@
 
 ### Bug Fixes
 
+- Name the offending entity in a broken requires chain and quiet the empty-allowed enum warning to info
 - Empty an entire requires chain, not just its nearest link
 - Pin the empty-scalar literal in the meta prompt's general rules
 

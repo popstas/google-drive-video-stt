@@ -14,5 +14,5 @@ General rules:
 - Keep every value on a single line, and quote it if it contains a colon.
 - Leave a field empty when the call does not cover it. An empty field is a
   correct answer; a guess is not.
-- Write an empty scalar value as `''` (for example `referral: ''`), never a bare
+- Write an empty scalar value as `''` (for example `<field>: ''`), never a bare
   colon or `null`.
