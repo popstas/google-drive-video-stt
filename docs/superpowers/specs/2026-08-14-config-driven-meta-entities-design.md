@@ -125,7 +125,11 @@ Every existing tolerance survives, because it is about YAML and not about field
 names: a fenced answer is unwrapped, a block missing its `---` delimiters is
 still loaded, and an unquoted prose value containing a colon is re-quoted before
 a second parse attempt. `_REQUOTABLE_FIELDS` stops being a constant and becomes
-"every `text` entity that is not `multiple`". A malformed artifact still
+"every entity that is not `multiple`" — wider than today's two prose fields on
+purpose. Re-quoting exists so one field's stray colon cannot take the whole
+document down; an `enum` value carrying a colon is dropped by its allow-list a
+moment later either way, but the *other* fields survive the parse. A malformed
+artifact still
 degrades to empty values and a `logger.warning`, never an exception: the file
 already transcribed and its artifacts are already on Drive.
 
