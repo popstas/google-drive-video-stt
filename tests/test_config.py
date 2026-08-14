@@ -26,15 +26,6 @@ from src.config import (
 )
 from src.presets import BUILTIN_PRESETS, PACKAGED_PROMPT_ASSETS
 
-@pytest.fixture(autouse=True)
-def clean_env(monkeypatch, tmp_path):
-    # Point the config-home resolver at a throwaway per-test directory so tests never
-    # read or write the repo's real data/config.yml. Resolver/init tests override or
-    # delete GDSTT_HOME as needed. The runtime reads no other environment variables.
-    monkeypatch.setenv("GDSTT_HOME", str(tmp_path))
-    yield
-
-
 def _write_yaml(path: Path, data: dict) -> None:
     path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
@@ -339,7 +330,8 @@ def test_tags_non_mapping_rejected(tmp_path):
 def test_config_to_yaml_dict_round_trips_tags_allowed(tmp_path):
     # Regression: `tags.allowed` used to be absent from the serializer, so any
     # whole-Config rewrite (`gdstt config set`, token refresh) silently dropped the
-    # operator's tag list.
+    # operator's tag list. The allow-list now lives inside the `tags` entity under
+    # `meta.entities`, which is where the rewrite must carry it instead.
     cfg = _load_config(
         tmp_path,
         {
@@ -349,12 +341,14 @@ def test_config_to_yaml_dict_round_trips_tags_allowed(tmp_path):
     )
 
     data = _config_to_yaml_dict(cfg)
-    assert data["tags"] == {"allowed": ["клиентская-консультация", "EB-1"]}
+    tags_entity = next(e for e in data["meta"]["entities"] if e["name"] == "tags")
+    assert tags_entity["allowed"] == ["клиентская-консультация", "EB-1"]
 
     config_file = tmp_path / "roundtrip-tags.yml"
     _write_yaml(config_file, data)
     reloaded = load_config(config_path=config_file, validate_providers=False)
-    assert reloaded.tags_allowed == ("клиентская-консультация", "EB-1")
+    reloaded_tags_entity = next(e for e in reloaded.meta_entities if e.name == "tags")
+    assert reloaded_tags_entity.allowed == ("клиентская-консультация", "EB-1")
 
 
 # --- webhook -----------------------------------------------------------------
@@ -464,27 +458,31 @@ def test_default_chain_keeps_meta_and_drops_action_items():
 
 
 def test_default_config_seeds_the_referral_allow_list():
-    assert "рекомендация" in _default_config_dict()["referrals"]["allowed"]
+    entities = _default_config_dict()["meta"]["entities"]
+    referral = next(e for e in entities if e["name"] == "referral")
+    assert "рекомендация" in referral["allowed"]
 
 
 def test_default_config_writes_the_new_output_and_planfix_keys():
     data = _default_config_dict()
     assert data["output"]["stt_presets"] == ["keypoints"]
     assert data["planfix"]["meta_fields"] == [
-        "subject", "tags", "referral", "referral_note", "duration", "video_url",
+        "subject", "tags", "referral", "referral_note",
+        "case_deadline", "deadlines", "target_filing",
+        "duration", "video_url",
     ]
 
 
-# --- {{allowed_tags}} prompt rendering ---------------------------------------
+# --- {{entities}} prompt rendering --------------------------------------------
 
 
 def _preset_by_name(cfg, name):
     return next(p for p in cfg.presets if p.name == name)
 
 
-def test_allowed_tags_placeholder_rendered_at_load(tmp_path):
+def test_entities_placeholder_rendered_at_load(tmp_path):
     prompt = tmp_path / "tagged.md"
-    prompt.write_text("Pick from:\n\n{{allowed_tags}}\n", encoding="utf-8")
+    prompt.write_text("Fields:\n\n{{entities}}\n", encoding="utf-8")
     cfg = _load_config(
         tmp_path,
         {
@@ -497,12 +495,12 @@ def test_allowed_tags_placeholder_rendered_at_load(tmp_path):
         },
     )
     instructions = _preset_by_name(cfg, "tagger").instructions
-    assert "{{allowed_tags}}" not in instructions
+    assert "{{entities}}" not in instructions
     assert "- клиентская-консультация" in instructions
     assert "- O-1" in instructions
 
 
-def test_allowed_tags_placeholder_rendered_in_inline_instructions(tmp_path):
+def test_entities_placeholder_rendered_in_inline_instructions(tmp_path):
     cfg = _load_config(
         tmp_path,
         {
@@ -510,11 +508,13 @@ def test_allowed_tags_placeholder_rendered_in_inline_instructions(tmp_path):
             "tags": {"allowed": ["O-1"]},
             "presets": {
                 "keypoints": {"enabled": False},
-                "tagger": {"instructions": "Tags:\n{{allowed_tags}}"},
+                "tagger": {"instructions": "Fields:\n{{entities}}"},
             },
         },
     )
-    assert _preset_by_name(cfg, "tagger").instructions == "Tags:\n- O-1"
+    instructions = _preset_by_name(cfg, "tagger").instructions
+    assert "{{entities}}" not in instructions
+    assert "- O-1" in instructions
 
 
 def test_prompt_without_placeholder_is_untouched(tmp_path):
@@ -533,28 +533,28 @@ def test_prompt_without_placeholder_is_untouched(tmp_path):
 
 
 def test_empty_allow_list_renders_explicit_none(tmp_path):
-    # With no tags configured the model must be told to return an empty list rather
-    # than being handed a blank section it might fill by inventing tags.
+    # With no tags configured the model must be told to return the field empty
+    # rather than being handed a blank section it might fill by inventing a tag.
     cfg = _load_config(
         tmp_path,
         {
             "stt": {"provider": "disabled"},
             "presets": {
                 "keypoints": {"enabled": False},
-                "tagger": {"instructions": "Tags:\n{{allowed_tags}}"},
+                "tagger": {"instructions": "Fields:\n{{entities}}"},
             },
         },
     )
     instructions = _preset_by_name(cfg, "tagger").instructions
-    assert "{{allowed_tags}}" not in instructions
-    assert "none" in instructions.lower()
+    assert "{{entities}}" not in instructions
+    assert "no values are configured" in instructions.lower()
 
 
-def test_allowed_tags_rendered_when_prompt_file_falls_back_to_packaged_asset(tmp_path):
+def test_entities_rendered_when_prompt_file_falls_back_to_packaged_asset(tmp_path):
     """A prompt_file resolved from the packaged assets (not from disk) must still be
-    rendered — an unrendered placeholder leaves the model free to invent tags."""
+    rendered — an unrendered placeholder leaves the model free to invent a tag."""
     config_file = tmp_path / "config.yml"
-    # meta.md carries {{allowed_tags}} and exists only as a packaged asset here.
+    # meta.md carries {{entities}} and exists only as a packaged asset here.
     _write_yaml(
         config_file,
         {
@@ -567,11 +567,11 @@ def test_allowed_tags_rendered_when_prompt_file_falls_back_to_packaged_asset(tmp
     cfg = load_config(config_path=config_file, validate_providers=False)
 
     instructions = _preset_by_name(cfg, "tagger").instructions
-    assert "{{allowed_tags}}" not in instructions
+    assert "{{entities}}" not in instructions
     assert "- EB-1" in instructions
 
 
-def test_meta_builtin_prompt_renders_allowed_tags(tmp_path):
+def test_meta_builtin_prompt_renders_entities(tmp_path):
     cfg = _load_config(
         tmp_path,
         {
@@ -583,9 +583,36 @@ def test_meta_builtin_prompt_renders_allowed_tags(tmp_path):
         },
     )
     instructions = _preset_by_name(cfg, "meta").instructions
-    assert "{{allowed_tags}}" not in instructions
+    assert "{{entities}}" not in instructions
     assert "- клиентская-консультация" in instructions
     assert "- EB-1" in instructions
+    # The empty-scalar literal must survive rendering, pinned explicitly rather
+    # than left for the model to guess (bare colon vs `null` vs `''`).
+    assert "`''`" in instructions
+
+
+def test_meta_prompt_is_rendered_with_the_configured_entities(tmp_path):
+    config = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "meta": {
+                "entities": [
+                    {
+                        "name": "target_filing",
+                        "prompt": "На какую подачу целится клиент.",
+                    }
+                ]
+            },
+            "presets": {"meta": {"enabled": True}},
+        },
+    )
+    meta_preset = next(p for p in config.presets if p.name == "meta")
+    assert "{{entities}}" not in meta_preset.instructions
+    assert "target_filing: <value>" in meta_preset.instructions
+    assert "На какую подачу целится клиент." in meta_preset.instructions
+    # The entity list replaced the old fixed fields entirely.
+    assert "referral_note" not in meta_preset.instructions
 
 
 def test_custom_poll_interval(tmp_path):
@@ -1583,7 +1610,8 @@ def test_init_creates_config_with_prompts_and_relative_paths(tmp_path):
     assert data["openai"]["batch"] is True
     assert data["run"]["enabled"] is True
     # An empty tag allow-list is seeded so the operator has the block to fill in.
-    assert data["tags"] == {"allowed": []}
+    tags_entity = next(e for e in data["meta"]["entities"] if e["name"] == "tags")
+    assert tags_entity["allowed"] == []
     # The packaged prompt assets are copied beside the config, including
     # action-items.md: the preset is retired, not deleted, so re-enabling it is a
     # config edit, not a code change.
@@ -2378,7 +2406,24 @@ def test_call_booking_and_planfix_are_parsed(tmp_path):
 
 def test_planfix_meta_fields_has_a_default(tmp_path):
     assert _load_config(tmp_path, {}).planfix_meta_fields == (
-        "subject", "tags", "referral", "referral_note", "duration", "video_url",
+        "subject", "tags", "referral", "referral_note",
+        "case_deadline", "deadlines", "target_filing",
+        "duration", "video_url",
+    )
+
+
+def test_planfix_meta_fields_default_includes_the_new_entities(tmp_path):
+    config = _load_config(tmp_path, {})
+    assert config.planfix_meta_fields == (
+        "subject",
+        "tags",
+        "referral",
+        "referral_note",
+        "case_deadline",
+        "deadlines",
+        "target_filing",
+        "duration",
+        "video_url",
     )
 
 
@@ -2452,7 +2497,9 @@ def test_generated_config_ships_the_new_sections(tmp_path):
         "token": "",
         "presets": ["keypoints"],
         "meta_fields": [
-            "subject", "tags", "referral", "referral_note", "duration", "video_url",
+            "subject", "tags", "referral", "referral_note",
+            "case_deadline", "deadlines", "target_filing",
+            "duration", "video_url",
         ],
         "task_url": "",
     }
@@ -2510,7 +2557,7 @@ def test_referrals_allowed_renders_into_the_meta_prompt(tmp_path):
         },
     )
     meta_preset = next(p for p in config.presets if p.name == "meta")
-    assert "{{allowed_referrals}}" not in meta_preset.instructions
+    assert "{{entities}}" not in meta_preset.instructions
     assert "- instagram" in meta_preset.instructions
 
 
@@ -2533,3 +2580,107 @@ def test_planfix_task_url_defaults_to_empty(tmp_path):
 def test_default_config_writes_the_planfix_task_url_key():
     """The key must be visible in a generated config, or nobody knows it exists."""
     assert _default_config_dict()["planfix"]["task_url"] == ""
+
+
+# --- meta.entities -------------------------------------------------------------
+
+
+def test_meta_entities_default_to_the_builtins_wired_to_legacy_allow_lists(tmp_path):
+    config = _load_config(
+        tmp_path,
+        {
+            "tags": {"allowed": ["O-1"]},
+            "referrals": {"allowed": ["telegram"]},
+        },
+    )
+    by_name = {entity.name: entity for entity in config.meta_entities}
+    assert set(by_name) == {"subject", "tags", "referral", "referral_note"}
+    assert by_name["tags"].allowed == ("O-1",)
+    assert by_name["referral"].allowed == ("telegram",)
+
+
+def test_declared_meta_entities_replace_the_builtins(tmp_path):
+    config = _load_config(
+        tmp_path,
+        {
+            "meta": {
+                "entities": [
+                    {
+                        "name": "target_filing",
+                        "prompt": "На какую подачу целится клиент.",
+                        "label": "Целевая подача",
+                    }
+                ]
+            }
+        },
+    )
+    assert [entity.name for entity in config.meta_entities] == ["target_filing"]
+
+
+def test_declared_entities_make_the_legacy_allow_lists_a_logged_deprecation(
+    tmp_path, caplog
+):
+    with caplog.at_level(logging.WARNING):
+        config = _load_config(
+            tmp_path,
+            {
+                "tags": {"allowed": ["O-1"]},
+                "meta": {"entities": [{"name": "subject", "prompt": "Тема."}]},
+            },
+        )
+    assert [entity.name for entity in config.meta_entities] == ["subject"]
+    assert "tags.allowed" in caplog.text
+
+
+def test_invalid_meta_entities_fail_the_load_with_the_entity_named(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        _load_config(
+            tmp_path,
+            {"meta": {"entities": [{"name": "manager", "prompt": "Кто."}]}},
+        )
+    assert "manager" in str(excinfo.value)
+
+
+def test_whole_config_rewrite_round_trips_entities_with_their_prompts(tmp_path):
+    original = _load_config(
+        tmp_path,
+        {
+            "meta": {
+                "entities": [
+                    {
+                        "name": "deadlines",
+                        "prompt": "Сроки, названные на звонке.",
+                        "label": "Дедлайны",
+                        "multiple": True,
+                    },
+                    {
+                        "name": "referral",
+                        "prompt": "Откуда узнал.",
+                        "type": "enum",
+                        "allowed": ["telegram"],
+                    },
+                ]
+            }
+        },
+    )
+    rewritten = _load_config(tmp_path, _config_to_yaml_dict(original))
+    assert rewritten.meta_entities == original.meta_entities
+
+
+def test_generated_default_config_ships_the_seven_entities():
+    generated = _default_config_dict()
+    names = [entity["name"] for entity in generated["meta"]["entities"]]
+    assert names == [
+        "subject",
+        "tags",
+        "referral",
+        "referral_note",
+        "case_deadline",
+        "deadlines",
+        "target_filing",
+    ]
+    # The allow-lists moved inside the entities; the old top-level homes are gone.
+    assert "tags" not in generated
+    assert "referrals" not in generated
+    referral = next(e for e in generated["meta"]["entities"] if e["name"] == "referral")
+    assert "рекомендация" in referral["allowed"]

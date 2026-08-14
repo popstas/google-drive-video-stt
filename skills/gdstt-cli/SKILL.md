@@ -274,9 +274,9 @@ STT-провайдера и DAG пресетов с номерами стади�
 умолчанию `.<имя>.md`, метка `artifact_type=<имя>`); независимые пресеты идут
 параллельно. Конфиг-пресеты переопределяют встроенные по полям, добавляют новые и отключают встроенный через `enabled: false`. Дефолтная цепочка `transcript-cleanup -> keypoints + meta` работает из коробки; третий пакетный пресет, `action-items`, по умолчанию отключён (дублирует `## Задачи` из keypoints) - промпт остаётся в пакете, включить снова = правка `presets:`, без кода. Идемпотентность - по пресетам: повторный прогон делает только недостающие артефакты.
 
-Второй встроенный пресет - `meta`: пишет `<base>.meta.md` из YAML-frontmatter - `subject:` (одно предложение), `tags:` **только** из `tags.allowed` (`{{allowed_tags}}`), `referral:`/`referral_note:` **только** из `referrals.allowed` (`{{allowed_referrals}}`; заполняется, только если клиент сам назвал источник, иначе пусто). Выдумки отсекаются на разборе; битый frontmatter даёт все четыре поля пустыми и не роняет файл. Словари меняются правкой `tags.allowed`/`referrals.allowed`, без кода.
+Второй встроенный пресет - `meta`: пишет `<base>.meta.md` из YAML-frontmatter, поля которого задаёт `meta.entities` в конфиге - список сущностей `{name, prompt, type: text|enum, multiple, allowed, label, requires}` (`name`/`prompt` обязательны, остальное опционально). `enum`-сущность берёт значения только из своего `allowed`; промпт для всех сущностей собирается через единый плейсхолдер `{{entities}}`. Дефолт - семь сущностей: `subject` (`label: ''` - идёт заголовком, а не строкой), `tags` и `referral` (`enum`), `referral_note` (`requires: referral`), и три новых - `case_deadline`, `deadlines` (`multiple: true`), `target_filing`, словами клиента, без нормализации в дату. Битый frontmatter даёт все сущности пустыми и не роняет файл. Старые `tags.allowed`/`referrals.allowed` устарели: читаются, только пока `meta.entities` не задан (подставляются в четыре встроенные сущности); при объявлении `meta.entities` игнорируются с предупреждением в лог.
 
-Каждая запись также получает `<base>.meta.yml` (эти четыре поля плюс уже известные факты - менеджер, клиент, дата, Planfix task id, модели) и `<base>.stt` (keypoints + мета-блок + транскрипт, секции - из `output.stt_presets`). При `output.target=drive` (дефолт) оба уходят в Drive как обычные соседние файлы; при `output.target=folder` оба остаются только локально в `output.dir`, и `output.also_drive: true` дополнительно публикует в Drive только `.stt` - `.meta.yml` в Drive при этом не попадает.
+Каждая запись также получает `<base>.meta.yml` (значения всех сущностей плюс уже известные факты - менеджер, клиент, дата, Planfix task id, модели) и `<base>.stt` (keypoints + мета-блок + транскрипт, секции - из `output.stt_presets`). При `output.target=drive` (дефолт) оба уходят в Drive как обычные соседние файлы; при `output.target=folder` оба остаются только локально в `output.dir`, и `output.also_drive: true` дополнительно публикует в Drive только `.stt` - `.meta.yml` в Drive при этом не попадает.
 
 **Откуда берётся промпт пресета (приоритет).** `instructions` (inline в YAML) >
 `prompt_file` (`.md`: как есть -> относительно папки конфига -> упакованный ассет
@@ -387,7 +387,7 @@ The polling loop skips a recording when `call_booking.disable_recognition` is on
   ключом падает на загрузке с подсказкой про `folders`; чинится только в `config.yml`.
 - `webhook.url` (+ опциональный `webhook.token` -> `Authorization: Bearer`) шлёт POST
   раз на файл и только при успехе: `{file, employee, transcript, artifacts}`, где
-  `artifacts` - тексты пресетов по именам, а `meta` разобран в `{subject, tags, referral, referral_note}`.
+  `artifacts` - тексты пресетов по именам, а `meta` разобран в словарь «одна сущность - один ключ» (`config.meta_entities`).
   Доставка fire-and-forget: сбой логируется (только тип исключения), файл всё равно
   обработан, ретраев нет. В payload есть PII (email и полный транскрипт) - эндпоинт
   должен быть HTTPS и с токеном.

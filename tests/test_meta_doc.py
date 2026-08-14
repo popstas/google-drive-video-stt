@@ -7,9 +7,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src import meta_doc
+from src import meta_doc, meta_entity
 from src.config import Config, EmployeeFolder
-from src.meta import Meta
 
 TRANSCRIPT = "[00:00:05] Angelica Munkueva: Здравствуйте\n[00:31:42] Mels: Спасибо\n"
 NAME = (
@@ -33,10 +32,17 @@ def config_with_folder():
     )
 
 
+ENTITIES = meta_entity.default_entities()
+
+
 def _document(config, **overrides):
     kwargs = {
-        "meta": Meta(subject="Обсудили кейс", tags=("O-1",), referral="рекомендация",
-                     referral_note="Посоветовала знакомая"),
+        "values": {
+            "subject": "Обсудили кейс",
+            "tags": ["O-1"],
+            "referral": "рекомендация",
+            "referral_note": "Посоветовала знакомая",
+        },
         "file_id": "FILE1",
         "file_name": NAME,
         "folder_id": "FOLDER1",
@@ -85,16 +91,40 @@ def test_build_leaves_the_duration_empty_without_timestamps(config_with_folder):
 
 
 def test_build_keeps_every_field_present_when_the_model_returned_nothing(config_with_folder):
-    document = _document(config_with_folder, meta=Meta())
-    assert set(document) == set(meta_doc.FIELD_ORDER)
+    document = _document(
+        config_with_folder,
+        values={"subject": "", "tags": [], "referral": "", "referral_note": ""},
+    )
+    assert set(document) == set(meta_doc.field_order(ENTITIES))
     assert document["subject"] == ""
     assert document["tags"] == []
 
 
 def test_to_yaml_round_trips_and_keeps_the_declared_order(config_with_folder):
-    text = meta_doc.to_yaml(_document(config_with_folder))
-    assert list(yaml.safe_load(text)) == list(meta_doc.FIELD_ORDER)
+    text = meta_doc.to_yaml(_document(config_with_folder), ENTITIES)
+    assert list(yaml.safe_load(text)) == list(meta_doc.field_order(ENTITIES))
     assert "Обсудили кейс" in text
+
+
+def test_field_order_puts_entities_first_then_the_code_fields():
+    entities = meta_entity.parse_entities(
+        [{"name": "target_filing", "prompt": "Подача."}]
+    )
+    order = meta_doc.field_order(entities)
+    assert order[0] == "target_filing"
+    assert order[1:] == meta_entity.CODE_FIELDS
+
+
+def test_to_yaml_keeps_every_entity_present_even_when_empty():
+    entities = meta_entity.parse_entities(
+        [
+            {"name": "subject", "prompt": "Тема.", "label": ""},
+            {"name": "deadlines", "prompt": "Сроки.", "multiple": True},
+        ]
+    )
+    text = meta_doc.to_yaml({"subject": "", "deadlines": []}, entities)
+    assert "subject: ''" in text
+    assert "deadlines: []" in text
 
 
 def test_task_url_substitutes_the_placeholder():

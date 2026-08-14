@@ -1,6 +1,42 @@
 # Changelog
 
 
+## Unreleased
+
+### Features
+
+- Label the Planfix header from the configured entities
+- Parse meta artifacts into one value per configured entity
+- Build the meta prompt from the configured entities
+- Read meta entities from config.yml
+- Describe meta entities as config-shaped data
+
+### Bug Fixes
+
+- Tell enum entities to stay empty rather than pick the nearest listed value
+- Widen the target_filing prompt to accept a bare visa type
+- Strip the hardcoded field name from the meta prompt's empty-value example
+- Name the offending entity in a broken requires chain and quiet the empty-allowed enum warning to info
+- Empty an entire requires chain, not just its nearest link
+- Pin the empty-scalar literal in the meta prompt's general rules
+
+### Documentation
+
+- Warn that gdstt stop rewrites config.yml and strips comments
+- Replace the deprecated tags/referrals sample in README with meta.entities
+- Correct the stale entity-serializer comment in config.py
+- Fix false claim that gdstt stop migrates meta.entities
+- Describe config-driven meta entities
+- Note the make_config keyword the webhook test needs
+- Implementation plan for config-driven meta entities
+- Spec for config-driven meta entities
+
+### Testing
+
+- Assert a configured entity reaches meta.yml, webhook, and planfix
+- Assert the webhook payload carries one key per entity
+- Keep the suite off the operator's live config
+
 ## v0.6.0 - 2026-08-13
 
 ### Features

@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import yaml
 
+from src import meta_entity
 from src.presets import (
     BUILTIN_PRESETS,
     PACKAGED_PROMPT_ASSETS,
@@ -42,12 +43,10 @@ DEEPGRAM_DEFAULT_KEYTERMS_FILE = Path("deepgram-keyterms-example.txt")
 DEEPGRAM_KEYTERMS_ASSET = "deepgram-keyterms-example.txt"
 DEEPGRAM_MAX_KEYTERMS = 100
 
-# Placeholder a preset prompt may carry to receive the config's ``tags.allowed``
-# list at load time. The built-in ``meta`` prompt uses it; any prompt may.
-ALLOWED_TAGS_PLACEHOLDER = "{{allowed_tags}}"
-# Placeholder a preset prompt may carry to receive the config's ``referrals.allowed``
-# list at load time. The built-in ``meta`` prompt uses it; any prompt may.
-ALLOWED_REFERRALS_PLACEHOLDER = "{{allowed_referrals}}"
+# Placeholder a preset prompt may carry to receive the configured meta entities --
+# the response template plus each field's rules -- rendered at config load time.
+# The built-in ``meta`` prompt uses it; any prompt may.
+ENTITIES_PLACEHOLDER = "{{entities}}"
 
 
 FOLDER_IDS_MIGRATION_ERROR = (
@@ -116,12 +115,13 @@ class Config:
     # in the generated config.yml.
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
-    # The tag allow-list the ``meta`` preset may pick from. Empty means the preset
-    # has nothing to choose between and returns no tags.
+    # DEPRECATED: the allow-lists moved into ``meta.entities``. Still read for one
+    # more version so a config written before that keeps working; a config that
+    # declares ``meta.entities`` ignores these and gets a startup warning.
     tags_allowed: tuple[str, ...] = ()
-    # The referral channels the ``meta`` preset may pick from. Empty means the preset
-    # is handed no channels and must return an empty referral.
     referrals_allowed: tuple[str, ...] = ()
+    # What the ``meta`` preset extracts, in document order. See src/meta_entity.py.
+    meta_entities: tuple[meta_entity.MetaEntity, ...] = ()
     # Completion-webhook target. A blank URL disables the webhook; the token, when
     # set, is sent as ``Authorization: Bearer <token>``. See ``webhook`` in the
     # generated config.yml.
@@ -146,7 +146,9 @@ class Config:
     # internal ids are deliberately absent: the comment is read by managers, not
     # operators.
     planfix_meta_fields: tuple[str, ...] = (
-        "subject", "tags", "referral", "referral_note", "duration", "video_url",
+        "subject", "tags", "referral", "referral_note",
+        "case_deadline", "deadlines", "target_filing",
+        "duration", "video_url",
     )
     # Where a task lives in the web UI, e.g.
     # ``https://tagilcity.planfix.com/task/<task-id>``. The account name is part of the
@@ -291,18 +293,6 @@ def _parse_tags_allowed(raw: object) -> tuple[str, ...]:
     return tuple(tag for tag in (_yaml_str(entry) for entry in raw) if tag)
 
 
-def _render_allowed_tags(tags_allowed: tuple[str, ...]) -> str:
-    """Render ``tags.allowed`` as the bullet list that replaces the placeholder.
-
-    An empty allow-list renders an explicit "none" line rather than a blank
-    section, so a prompt handed no tags tells the model to return an empty list
-    instead of leaving it free to invent one.
-    """
-    if not tags_allowed:
-        return "(none configured — return an empty tags list)"
-    return "\n".join(f"- {tag}" for tag in tags_allowed)
-
-
 def _parse_referrals_allowed(raw: object) -> tuple[str, ...]:
     """Parse the ``referrals.allowed`` list into a tuple of non-empty channel names."""
     if raw is None:
@@ -312,29 +302,17 @@ def _parse_referrals_allowed(raw: object) -> tuple[str, ...]:
     return tuple(name for name in (_yaml_str(entry) for entry in raw) if name)
 
 
-def _render_allowed_referrals(referrals_allowed: tuple[str, ...]) -> str:
-    """Render ``referrals.allowed`` as the bullet list that replaces the placeholder."""
-    if not referrals_allowed:
-        return "(none configured — return an empty referral)"
-    return "\n".join(f"- {name}" for name in referrals_allowed)
-
-
 def _render_prompt_placeholders(
-    text: str,
-    tags_allowed: tuple[str, ...],
-    referrals_allowed: tuple[str, ...] = (),
+    text: str, entities: tuple[meta_entity.MetaEntity, ...] = ()
 ) -> str:
     """Substitute the supported ``{{...}}`` placeholders in a resolved prompt.
 
-    Today those are ``{{allowed_tags}}`` and ``{{allowed_referrals}}`` (both the
-    ``meta`` preset's). A prompt without them is returned unchanged, so this is safe to
-    run over every preset's text.
+    Today that is ``{{entities}}`` (the ``meta`` preset's). A prompt without it is
+    returned unchanged, so this is safe to run over every preset's text.
     """
-    if ALLOWED_TAGS_PLACEHOLDER in text:
-        text = text.replace(ALLOWED_TAGS_PLACEHOLDER, _render_allowed_tags(tags_allowed))
-    if ALLOWED_REFERRALS_PLACEHOLDER in text:
+    if ENTITIES_PLACEHOLDER in text:
         text = text.replace(
-            ALLOWED_REFERRALS_PLACEHOLDER, _render_allowed_referrals(referrals_allowed)
+            ENTITIES_PLACEHOLDER, meta_entity.render_entities_block(entities)
         )
     return text
 
@@ -342,8 +320,7 @@ def _render_prompt_placeholders(
 def _resolve_prompt_text(
     preset: Preset,
     config_file: Path | None,
-    tags_allowed: tuple[str, ...] = (),
-    referrals_allowed: tuple[str, ...] = (),
+    entities: tuple[meta_entity.MetaEntity, ...] = (),
 ) -> str:
     """Resolve a preset's final prompt text from instructions or prompt_file.
 
@@ -354,14 +331,11 @@ def _resolve_prompt_text(
     that resolves but is missing/unreadable/empty raises ``ValueError``; a preset
     with neither instructions nor prompt_file also raises.
 
-    The resolved text has its ``{{...}}`` placeholders rendered from ``tags_allowed``/
-    ``referrals_allowed`` before it is returned, so the pipeline never sees an
-    unrendered prompt.
+    The resolved text has its ``{{...}}`` placeholders rendered from ``entities``
+    before it is returned, so the pipeline never sees an unrendered prompt.
     """
     if preset.instructions.strip():
-        return _render_prompt_placeholders(
-            preset.instructions, tags_allowed, referrals_allowed
-        )
+        return _render_prompt_placeholders(preset.instructions, entities)
     if not preset.prompt_file:
         raise ValueError(
             f"preset {preset.name!r} must define instructions or prompt_file"
@@ -378,7 +352,7 @@ def _resolve_prompt_text(
                     f"preset {preset.name!r} prompt_file {preset.prompt_file!r} "
                     f"is empty: {candidate}"
                 )
-            return _render_prompt_placeholders(text, tags_allowed, referrals_allowed)
+            return _render_prompt_placeholders(text, entities)
 
     try:
         text = load_packaged_prompt(os.path.basename(preset.prompt_file))
@@ -387,23 +361,20 @@ def _resolve_prompt_text(
             f"preset {preset.name!r} prompt_file {preset.prompt_file!r} "
             f"could not be resolved: {exc}"
         ) from exc
-    return _render_prompt_placeholders(text, tags_allowed, referrals_allowed)
+    return _render_prompt_placeholders(text, entities)
 
 
 def _resolve_presets(
     config_presets: dict | None,
     config_file: Path | None = None,
-    tags_allowed: tuple[str, ...] = (),
-    referrals_allowed: tuple[str, ...] = (),
+    entities: tuple[meta_entity.MetaEntity, ...] = (),
 ) -> tuple[Preset, ...]:
     """Merge config presets over built-ins, resolve prompts, validate, and freeze."""
     merged = merge_presets(BUILTIN_PRESETS, config_presets)
     resolved = {
         name: replace(
             preset,
-            instructions=_resolve_prompt_text(
-                preset, config_file, tags_allowed, referrals_allowed
-            ),
+            instructions=_resolve_prompt_text(preset, config_file, entities),
         )
         for name, preset in merged.items()
     }
@@ -672,7 +643,9 @@ def _parse_planfix_meta_fields(value: object) -> tuple[str, ...]:
     """
     if value is None:
         return (
-            "subject", "tags", "referral", "referral_note", "duration", "video_url",
+            "subject", "tags", "referral", "referral_note",
+            "case_deadline", "deadlines", "target_filing",
+            "duration", "video_url",
         )
     if not isinstance(value, list):
         raise ValueError(f"planfix.meta_fields must be a list, got: {value!r}")
@@ -761,6 +734,7 @@ def _config_from_yaml(
     telegram = _as_mapping(notifications.get("telegram"), "notifications.telegram")
     tags = _as_mapping(raw.get("tags"), "tags")
     referrals = _as_mapping(raw.get("referrals"), "referrals")
+    meta = _as_mapping(raw.get("meta"), "meta")
     webhook = _as_mapping(raw.get("webhook"), "webhook")
     call_booking = _as_mapping(raw.get("call_booking"), "call_booking")
     planfix = _as_mapping(raw.get("planfix"), "planfix")
@@ -773,6 +747,17 @@ def _config_from_yaml(
 
     tags_allowed = _parse_tags_allowed(tags.get("allowed"))
     referrals_allowed = _parse_referrals_allowed(referrals.get("allowed"))
+
+    raw_entities = meta.get("entities")
+    if raw_entities is not None and (tags_allowed or referrals_allowed):
+        logger.warning(
+            "meta.entities is declared, so the deprecated top-level tags.allowed / "
+            "referrals.allowed are ignored; move those values into the entities' "
+            "allowed lists and delete the old keys"
+        )
+    meta_entities = meta_entity.parse_entities(
+        raw_entities, tags_allowed=tags_allowed, referrals_allowed=referrals_allowed
+    )
 
     webhook_url = _yaml_str(webhook.get("url"))
     webhook_token = _yaml_str(webhook.get("token"))
@@ -854,7 +839,7 @@ def _config_from_yaml(
     openai_batch = _yaml_bool(openai.get("batch"), default=False)
     openai_batch_wait = _yaml_bool(openai.get("batch_wait"), default=True)
     openai_max_parallel = _parse_max_parallel(openai.get("max_parallel"), default=4)
-    presets = _resolve_presets(config_presets, config_file, tags_allowed, referrals_allowed)
+    presets = _resolve_presets(config_presets, config_file, meta_entities)
 
     deepgram_api_key = ""
     deepgram_model = _yaml_str(deepgram.get("model"), "nova-3") or "nova-3"
@@ -978,6 +963,7 @@ def _config_from_yaml(
         telegram_chat_id=telegram_chat_id,
         tags_allowed=tags_allowed,
         referrals_allowed=referrals_allowed,
+        meta_entities=meta_entities,
         webhook_url=webhook_url,
         webhook_token=webhook_token,
         call_booking_enabled=call_booking_enabled,
@@ -1165,21 +1151,115 @@ def _default_config_dict(
                 "chat_id": "",
             },
         },
-        # Seeded empty: the `meta` preset picks tags only from this list.
-        "tags": {"allowed": []},
-        # Seeded from how clients actually answer in existing transcripts (see the
-        # design spec); the `meta` preset picks `referral` only from this list.
-        "referrals": {
-            "allowed": [
-                "рекомендация",
-                "instagram",
-                "telegram",
-                "youtube",
-                "linkedin",
-                "поиск-google",
-                "реклама",
-                "сми-публикация",
-                "вебинар-мероприятие",
+        # The seven entities a freshly generated config ships extracting. An existing
+        # deployment upgrading in place does not get these silently: `parse_entities`
+        # falls back to the four-entity `default_entities()` when `meta.entities` is
+        # absent, wired to whatever the old top-level tags.allowed/referrals.allowed
+        # held. Only a config generated from scratch gets all seven.
+        "meta": {
+            "entities": [
+                {
+                    "name": "subject",
+                    "type": "text",
+                    "label": "",
+                    "prompt": (
+                        "Одно предложение о том, про что был звонок. Опирайся "
+                        "строго на транскрипт, ничего не выдумывай."
+                    ),
+                },
+                {
+                    "name": "tags",
+                    "type": "enum",
+                    "multiple": True,
+                    "label": "Теги",
+                    "allowed": [],
+                    "prompt": (
+                        "Выбери все теги, которые действительно подходят, и "
+                        "никакие другие."
+                    ),
+                },
+                {
+                    "name": "referral",
+                    "type": "enum",
+                    "label": "Откуда узнал",
+                    "allowed": [
+                        "рекомендация",
+                        "instagram",
+                        "telegram",
+                        "youtube",
+                        "linkedin",
+                        "поиск-google",
+                        "реклама",
+                        "сми-публикация",
+                        "вебинар-мероприятие",
+                        # Job boards and cold outreach were missing entirely, and an
+                        # enum with no fitting value does not come back empty -- the
+                        # model substitutes the nearest listed one. A client who said
+                        # "с Indeed я вас взяла" was recorded as `telegram`, then as
+                        # `поиск-google` once the prompt forbade substituting. Adding
+                        # the real channel is what fixed it.
+                        "indeed",
+                        "hh",
+                        "facebook",
+                        "холодная-рассылка",
+                    ],
+                    "prompt": (
+                        "Откуда клиент впервые узнал о компании. Заполняй, только "
+                        "если клиент сам это сказал: вопрос менеджера без ответа "
+                        "источником не является, и твоя догадка по контексту тоже."
+                    ),
+                },
+                {
+                    "name": "referral_note",
+                    "type": "text",
+                    "label": "Подробности",
+                    "requires": "referral",
+                    "prompt": (
+                        "Одна строка словами клиента о том, откуда он узнал о "
+                        "компании: кто порекомендовал, какой пост, какое "
+                        "мероприятие."
+                    ),
+                },
+                {
+                    "name": "case_deadline",
+                    "type": "text",
+                    "label": "Срок сбора кейса",
+                    "prompt": (
+                        "К какому сроку клиенту нужно собрать документы кейса. "
+                        "Оставь словами клиента, как он сказал на звонке, не "
+                        "переводи в дату. Пусто, если о сроке сбора не говорили."
+                    ),
+                },
+                {
+                    "name": "deadlines",
+                    "type": "text",
+                    "multiple": True,
+                    "label": "Дедлайны",
+                    "prompt": (
+                        "Прочие сроки, названные на звонке: виза, работа, учёба, "
+                        "переезд. Одна строка на срок, словами клиента, вместе с "
+                        "тем, к чему срок относится. Пустой список, если сроков "
+                        "не называли."
+                    ),
+                },
+                {
+                    "name": "target_filing",
+                    "type": "text",
+                    "label": "Целевая подача",
+                    # Both loosenings below come from a live miss: on a call where the
+                    # manager said "у вас основная цель - визы талантов" the field came
+                    # back empty, because the old wording's single example paired a type
+                    # with a window and "целится клиент" read as requiring the client's
+                    # own words.
+                    "prompt": (
+                        "На какую подачу целится клиент: тип визы и/или срок подачи. "
+                        "Годится и один тип без срока («виза талантов», «EB-1A»), и "
+                        "связка («O-1 осенью»), и один срок без типа. Цель "
+                        "засчитывается и тогда, когда её проговаривает менеджер со "
+                        "слов клиента («у вас основная цель — ...»). Пусто, только "
+                        "если о цели подачи вообще не говорили."
+                    ),
+                },
             ]
         },
         # Seeded empty: a blank url disables the completion webhook.
@@ -1200,7 +1280,9 @@ def _default_config_dict(
             "token": "",
             "presets": ["keypoints"],
             "meta_fields": [
-                "subject", "tags", "referral", "referral_note", "duration", "video_url",
+                "subject", "tags", "referral", "referral_note",
+                "case_deadline", "deadlines", "target_filing",
+                "duration", "video_url",
             ],
             # e.g. https://<account>.planfix.com/task/<task-id>
             "task_url": "",
@@ -1284,6 +1366,21 @@ def _google_to_yaml_dict(config: Config, config_file: Path | None) -> dict:
     return block
 
 
+def _entity_to_dict(entity: meta_entity.MetaEntity) -> dict[str, object]:
+    """Serialize one entity, omitting keys that carry their default."""
+    data: dict[str, object] = {"name": entity.name, "type": entity.type}
+    if entity.multiple:
+        data["multiple"] = True
+    if entity.type == "enum":
+        data["allowed"] = list(entity.allowed)
+    if entity.label is not None:
+        data["label"] = entity.label
+    if entity.requires:
+        data["requires"] = entity.requires
+    data["prompt"] = entity.prompt
+    return data
+
+
 def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dict:
     """Serialize a Config into the grouped `config.yml` schema.
 
@@ -1344,10 +1441,18 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
                 "chat_id": config.telegram_chat_id,
             },
         },
-        # The tag allow-list is operator-owned data with no other home: omitting it
-        # here would drop it from the file on any whole-Config rewrite.
-        "tags": {"allowed": list(config.tags_allowed)},
-        "referrals": {"allowed": list(config.referrals_allowed)},
+        # This serializer (`_config_to_yaml_dict`) has no production caller: `gdstt
+        # stop`/`start` go through `set_run_enabled` -> `config_set`, which patches
+        # one dotted key in the raw YAML via `_set_nested` and writes that back, not
+        # this function. Only tests exercise this path today. It is also not
+        # exhaustive -- it drops the whole top-level `call_booking:` block -- so
+        # wiring it up as a real rewrite path would mean making it exhaustive first;
+        # being a whole-file dump, it would also strip every operator comment from
+        # the file. The deprecated top-level tags/referrals keys are deliberately
+        # not written back here -- their values now live inside the entities.
+        "meta": {
+            "entities": [_entity_to_dict(entity) for entity in config.meta_entities]
+        },
         "webhook": {"url": config.webhook_url, "token": config.webhook_token},
         # planfix.presets/create_comment_url/token were previously absent from this
         # serializer too (a whole-Config rewrite silently dropped them); meta_fields is

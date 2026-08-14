@@ -1,8 +1,9 @@
 """Merge the ``meta`` preset's fields with the facts the code already knows.
 
-The model is asked for four things — subject, tags, referral, referral note. Everything
-else in the document is already in hand: the folder's employee, the recording's name,
-the booking, the configured models. Paying a model to restate them would be slower, more
+The model is asked about the configured entities -- subject, tags, referral, and
+whatever else the operator's ``meta.entities`` declares. Everything else in the
+document is already in hand: the folder's employee, the recording's name, the
+booking, the configured models. Paying a model to restate them would be slower, more
 expensive, and less reliable than reading them.
 
 Every field stays present even when empty. An operator reading the file must be able to
@@ -18,30 +19,17 @@ import yaml
 
 from src import meeting_time, postprocess
 from src.config import Config
-from src.meta import Meta
+from src.meta_entity import CODE_FIELDS, MetaEntity
 
-# The document's field order, top to bottom: what the call was about, who was on it,
-# when, then the technical trail.
-FIELD_ORDER = (
-    "subject",
-    "tags",
-    "referral",
-    "referral_note",
-    "manager",
-    "manager_email",
-    "client",
-    "date",
-    "duration",
-    "language",
-    "planfix_task_id",
-    "planfix_task_url",
-    "video_id",
-    "video_url",
-    "source_name",
-    "stt_model",
-    "llm_model",
-    "processed_at",
-)
+
+def field_order(entities: tuple[MetaEntity, ...]) -> tuple[str, ...]:
+    """The document's field order: what the model extracted, then what code knows.
+
+    Entities come first and in config order -- what the call was about and who was
+    on it -- followed by the technical trail.
+    """
+    return tuple(entity.name for entity in entities) + CODE_FIELDS
+
 
 _TIMESTAMP_RE = re.compile(r"\[(\d{2}:\d{2}:\d{2})\]")
 
@@ -105,7 +93,7 @@ def _date(file_name: str) -> str:
 
 def build(
     *,
-    meta: Meta,
+    values: dict[str, object],
     file_id: str,
     file_name: str,
     folder_id: str,
@@ -117,10 +105,7 @@ def build(
     """Assemble the full meta document for one recording."""
     employee = config.folder_by_id(folder_id)
     return {
-        "subject": meta.subject,
-        "tags": list(meta.tags),
-        "referral": meta.referral,
-        "referral_note": meta.referral_note,
+        **values,
         "manager": employee.name if employee else "",
         "manager_email": employee.email if employee else "",
         "client": _client(file_name),
@@ -138,7 +123,7 @@ def build(
     }
 
 
-def to_yaml(document: dict[str, object]) -> str:
+def to_yaml(document: dict[str, object], entities: tuple[MetaEntity, ...]) -> str:
     """Serialize the document with its declared field order and readable Cyrillic."""
-    ordered = {key: document.get(key, "") for key in FIELD_ORDER}
+    ordered = {key: document.get(key, "") for key in field_order(entities)}
     return yaml.safe_dump(ordered, allow_unicode=True, sort_keys=False, width=1000)

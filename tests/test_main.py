@@ -11,17 +11,32 @@ import pytest
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
-from src import main
+from src import main, meta_entity
 from src.auth import AuthError
 from src.booking_gate import BookingDecision
 from src.call_booking import CallBooking
 from src.call_booking import append as append_booking
-from src.config import Config, EmployeeFolder
+from src.config import Config, EmployeeFolder, resolve_config_file_path
 from src.presets import BUILTIN_PRESETS, Preset
 from src.preset_pipeline import PresetResult
 from src.stt.base import STTError
 
 _KEYPOINTS_BUILTIN = next(p for p in BUILTIN_PRESETS if p.name == "keypoints")
+
+
+def test_the_suite_never_resolves_the_repos_real_config():
+    """No test may read the operator's live data/config.yml.
+
+    `main()` calls `is_run_enabled()` on every loop iteration, and that reads the
+    effective config from disk. On a checkout where the operator has run `gdstt
+    stop`, the loop takes its paused branch -- whose only exit is `time.sleep`,
+    which these tests mock away. Every loop test then spins forever instead of
+    failing, which is how this suite once went from 12 seconds to a hang.
+
+    tests/conftest.py points GDSTT_HOME at a per-test throwaway directory to make
+    that impossible. This asserts the guard is actually in place.
+    """
+    assert resolve_config_file_path() != Path("data") / "config.yml"
 
 
 def _as_folders(entries) -> tuple[EmployeeFolder, ...]:
@@ -52,6 +67,7 @@ def make_config(
     presets=None,
     tags_allowed=(),
     referrals_allowed=(),
+    meta_entities=None,
     webhook_url="",
     webhook_token="",
     proxy_url="",
@@ -65,6 +81,12 @@ def make_config(
         # whole BUILTIN_PRESETS tuple — `meta` is a built-in too, and pulling it in
         # here would silently widen every openai_keypoints=True test to two passes.
         presets = (_KEYPOINTS_BUILTIN,) if openai_keypoints else ()
+    if meta_entities is None:
+        # Mirrors how the real loader fills `meta.entities` when a config leaves it
+        # unset: the built-in four, wired to the deprecated top-level allow-lists.
+        meta_entities = meta_entity.default_entities(
+            tuple(tags_allowed), tuple(referrals_allowed)
+        )
     return Config(
         folders=_as_folders(folders if folders is not None else ["folderA"]),
         poll_interval=poll_interval,
@@ -85,6 +107,7 @@ def make_config(
         drive_mp3_artifact=drive_mp3_artifact,
         tags_allowed=tuple(tags_allowed),
         referrals_allowed=tuple(referrals_allowed),
+        meta_entities=tuple(meta_entities),
         webhook_url=webhook_url,
         webhook_token=webhook_token,
         planfix_meta_fields=tuple(planfix_meta_fields),
@@ -2703,6 +2726,28 @@ def test_webhook_malformed_meta_degrades_to_empty_fields(mocker, tmp_path):
     }
 
 
+def test_webhook_meta_payload_carries_one_key_per_configured_entity():
+    entities = meta_entity.parse_entities(
+        [
+            {"name": "subject", "prompt": "Тема.", "label": ""},
+            {"name": "target_filing", "prompt": "Подача."},
+        ]
+    )
+    config = make_config(meta_entities=entities)
+    payload = main._webhook_payload(
+        "f1",
+        "запись.mp4",
+        "folder1",
+        config,
+        "[00:00:01] Менеджер: привет",
+        {"meta": "---\nsubject: Обсудили визу\ntarget_filing: O-1 осенью\n---\n"},
+    )
+    assert payload["artifacts"]["meta"] == {
+        "subject": "Обсудили визу",
+        "target_filing": "O-1 осенью",
+    }
+
+
 def test_webhook_not_fired_when_file_skipped(mocker, tmp_path):
     notify = mocker.patch("src.main.webhook.notify_complete")
 
@@ -2858,6 +2903,7 @@ def gate_config(tmp_path):
         call_booking_enabled=True,
         call_booking_disable_recognition=True,
         call_booking_threshold_minutes=15,
+        meta_entities=meta_entity.default_entities(),
         config_file=config_file,
     )
 
@@ -3201,6 +3247,69 @@ def test_resolve_speaker_names_returns_none_when_the_name_has_one_participant(mo
     )
 
 
+def test_planfix_header_labels_come_from_the_entities():
+    entities = meta_entity.parse_entities(
+        [
+            {"name": "subject", "prompt": "Тема.", "label": ""},
+            {
+                "name": "deadlines",
+                "prompt": "Сроки.",
+                "multiple": True,
+                "label": "Дедлайны",
+            },
+            {"name": "target_filing", "prompt": "Подача."},
+        ]
+    )
+    document = {
+        "subject": "Обсудили визу",
+        "deadlines": ["виза до октября", "оффер к сентябрю"],
+        "target_filing": "O-1 осенью",
+        "duration": "00:31:02",
+    }
+    lines = main._planfix_meta_lines(
+        document,
+        ("subject", "deadlines", "target_filing", "duration"),
+        entities,
+    )
+    assert lines[0] == "**Обсудили визу**"
+    assert "**Дедлайны:** виза до октября, оффер к сентябрю" in lines
+    # No label declared, so the name is the label.
+    assert "**target_filing:** O-1 осенью" in lines
+    # Code-known fields keep their built-in labels.
+    assert "**Длительность:** 00:31:02" in lines
+
+
+def test_planfix_header_skips_an_entity_with_no_value():
+    entities = meta_entity.parse_entities(
+        [
+            {"name": "subject", "prompt": "Тема.", "label": ""},
+            {"name": "case_deadline", "prompt": "Срок.", "label": "Срок сбора кейса"},
+        ]
+    )
+    lines = main._planfix_meta_lines(
+        {"subject": "Обсудили визу", "case_deadline": ""},
+        ("subject", "case_deadline"),
+        entities,
+    )
+    assert lines == ["**Обсудили визу**"]
+
+
+def test_planfix_header_uses_the_first_empty_label_field_as_the_heading():
+    entities = meta_entity.parse_entities(
+        [
+            {"name": "alt", "prompt": "Другое.", "label": ""},
+            {"name": "subject", "prompt": "Тема.", "label": ""},
+        ]
+    )
+    lines = main._planfix_meta_lines(
+        {"subject": "Обсудили визу", "alt": "Второй заголовок"},
+        ("subject", "alt"),
+        entities,
+    )
+    assert lines[0] == "**Обсудили визу**"
+    assert "**Второй заголовок**" in lines[1:]
+
+
 def test_planfix_description_concatenates_presets_in_order():
     description = main._planfix_description(
         {"keypoints": "Задачи: раз", "action-items": "Сделать два", "meta": "topic: x"},
@@ -3252,6 +3361,7 @@ def test_planfix_description_puts_a_blank_line_around_a_marked_heading():
         ("keypoints",),
         {"subject": "Созвон"},
         ("subject",),
+        meta_entity.default_entities(),
     )
 
     assert description == (
@@ -3302,6 +3412,7 @@ def test_planfix_description_puts_the_subject_and_tags_on_top():
         ("keypoints",),
         {"subject": "Обсудили кейс", "tags": ["O-1"], "referral": "рекомендация"},
         ("subject", "tags", "referral"),
+        meta_entity.default_entities(),
     )
     assert html.index("Обсудили кейс") < html.index("Задачи")
     assert "O-1" in html and "рекомендация" in html
@@ -3314,11 +3425,15 @@ def test_planfix_description_skips_empty_and_unknown_fields():
         ("keypoints",),
         {"subject": "s", "referral": "", "tags": []},
         ("subject", "referral", "tags", "not_a_field"),
+        meta_entity.default_entities(),
     )
-    # The brief's original assertion checked "Реферал" not in html, but no label in
-    # _PLANFIX_META_LABELS spells "Реферал" (referral's label is "Откуда узнал"), so
-    # that half could never fail and proved nothing. Asserting on the label the code
-    # actually emits for the empty `referral` field makes this cover the skip.
+    # The brief's original assertion checked "Реферал" not in html, but no label
+    # `_planfix_labels()` returns spells "Реферал" (referral's label is "Откуда
+    # узнал", supplied by the entity, not the deleted `_PLANFIX_META_LABELS`
+    # constant -- see `_PLANFIX_CODE_LABELS` for what's left of it, the code-known
+    # fields only), so that half could never fail and proved nothing. Asserting on
+    # the label the code actually emits for the empty `referral` field makes this
+    # cover the skip.
     assert "Откуда узнал" not in html and "Теги" not in html
 
 
@@ -3337,6 +3452,7 @@ def test_planfix_description_normalises_a_multiline_meta_value():
         {"keypoints": "х"}, ("keypoints",),
         {"referral_note": "Позвонила\nв понедельник,\n- уточнила детали"},
         ("referral_note",),
+        meta_entity.default_entities(),
     )
     assert "<p><b>Подробности:</b> Позвонила в понедельник, - уточнила детали</p>" in html
     assert "\n" not in html
@@ -3569,6 +3685,98 @@ def test_process_item_withholds_the_comment_when_a_preset_produced_nothing(
     )
 
     sent.assert_not_called()
+
+
+_CONFIGURED_ENTITY_META_ARTIFACT = (
+    "---\n"
+    "subject: Консультация по визе O-1\n"
+    "tags: [O-1, клиентская-консультация]\n"
+    "referral: рекомендация\n"
+    "referral_note: Посоветовала знакомая\n"
+    "target_filing: O-1 осенью\n"
+    "---\n"
+)
+
+
+def test_process_item_carries_a_configured_entity_into_meta_yml_webhook_and_planfix(
+    mocker, tmp_path
+):
+    """The composition the spec asked a test for: a config-declared entity that is
+    none of the built-in four (`target_filing`) must reach all three outputs of one
+    `process_item` call -- the written `.meta.yml`, the webhook payload's
+    `artifacts.meta`, and the Planfix comment -- not just whichever one its own
+    unit test happens to cover. Each of those three is unit-tested alone elsewhere;
+    nothing before this exercised the composition.
+    """
+    entities = meta_entity.parse_entities(
+        [
+            {"name": "subject", "prompt": "Тема.", "label": ""},
+            {
+                "name": "tags",
+                "prompt": "Теги.",
+                "type": "enum",
+                "multiple": True,
+                "allowed": ["O-1", "клиентская-консультация"],
+            },
+            {
+                "name": "referral",
+                "prompt": "Откуда.",
+                "type": "enum",
+                "allowed": ["рекомендация"],
+            },
+            {"name": "referral_note", "prompt": "Детали.", "requires": "referral"},
+            # The non-default entity: it is in none of the built-in four
+            # (subject/tags/referral/referral_note).
+            {"name": "target_filing", "prompt": "Куда подача."},
+        ]
+    )
+    out_dir = tmp_path / "out"
+    config = _webhook_config(
+        meta_entities=entities,
+        planfix_meta_fields=(
+            "subject", "tags", "referral", "referral_note", "target_filing",
+        ),
+        output_target="folder",
+        output_dir=out_dir,
+    )
+    # `_webhook_config`/`make_config` do not expose the Planfix settings, so wire
+    # them on afterwards -- mirrors how `planfix_config` extends `gate_config`.
+    config = replace(
+        config,
+        planfix_create_comment_url="https://crm.example.com/planfix_create_comment",
+        planfix_token="planfix-token",
+    )
+
+    notify = _mock_successful_run(
+        mocker, tmp_path, meta_text=_CONFIGURED_ENTITY_META_ARTIFACT
+    )
+    send_comment = mocker.patch(
+        "src.main.planfix.send_comment", return_value=True
+    )
+    mocker.patch("src.main.drive.set_file_app_properties")
+
+    main.process_item(
+        MagicMock(),
+        _item("fid", "video.mp4"),
+        "folderX",
+        config,
+        booking_decision=MATCHED_DECISION,
+    )
+
+    # 1. the written `.meta.yml`
+    meta_yml = (out_dir / "video.meta.yml").read_text(encoding="utf-8")
+    assert "target_filing: O-1 осенью" in meta_yml
+
+    # 2. the webhook payload's `artifacts.meta`
+    notify.assert_called_once()
+    payload_meta = notify.call_args.kwargs["payload"]["artifacts"]["meta"]
+    assert payload_meta["target_filing"] == "O-1 осенью"
+
+    # 3. the Planfix comment
+    send_comment.assert_called_once()
+    description = send_comment.call_args.kwargs["description"]
+    assert "target_filing" in description
+    assert "O-1 осенью" in description
 
 
 # --- start the receiver from the polling loop ----------------------------------

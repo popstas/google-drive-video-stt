@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src import cli
+from src import cli, meta_entity
 from src.config import _load_deepgram_api_key
 from src.meta import parse_meta
 
@@ -93,8 +93,9 @@ def test_preset_dag_end_to_end_writes_each_artifact(tmp_path, monkeypatch):
                 "depends_on": ["transcript-cleanup"],
                 "instructions": _MANAGERS_INSTRUCTIONS,
             },
-            # Built-in prompt; the `{{allowed_tags}}` placeholder is rendered from
-            # the `tags.allowed` block above at config load.
+            # Built-in prompt; the `{{entities}}` placeholder is rendered from the
+            # configured meta entities (the built-in four here, using the
+            # `tags.allowed` block above) at config load.
             "meta": {"depends_on": ["transcript-cleanup"]},
         },
     }
@@ -122,6 +123,7 @@ def test_preset_dag_end_to_end_writes_each_artifact(tmp_path, monkeypatch):
 
     # The meta artifact must parse back into a subject, and any tags it carries must
     # come from the configured allow-list.
-    parsed = parse_meta(meta_files[0].read_text(encoding="utf-8"), allowed=_E2E_ALLOWED_TAGS)
-    assert parsed.subject, "meta artifact carried no subject"
-    assert set(parsed.tags) <= set(_E2E_ALLOWED_TAGS)
+    entities = meta_entity.default_entities(tags_allowed=tuple(_E2E_ALLOWED_TAGS))
+    parsed = parse_meta(meta_files[0].read_text(encoding="utf-8"), entities)
+    assert parsed["subject"], "meta artifact carried no subject"
+    assert set(parsed["tags"]) <= set(_E2E_ALLOWED_TAGS)

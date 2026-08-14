@@ -71,14 +71,11 @@ def load_packaged_prompt(name: str) -> str:
 # asset ``src/assets/prompts/keypoints.md``; ``openai_pipeline`` imports this str.
 INSTRUCTIONS = load_packaged_prompt("keypoints.md")
 
-# Built-in `meta` preset prompt: describe the conversation with a one-sentence
-# subject, tags picked only from the config's `tags.allowed` list, and where the
-# client heard about the company (a referral channel picked only from
-# `referrals.allowed`, plus a free-text note), returned as a YAML frontmatter block
-# so `meta.parse_meta` can read it back into structured fields for the completion
-# webhook. The `{{allowed_tags}}`/`{{allowed_referrals}}` placeholders in the asset
-# are rendered from `Config.tags_allowed`/`Config.referrals_allowed` at load time
-# (`config.py`).
+# Built-in `meta` preset prompt: describe the conversation with the fields
+# declared in `meta.entities` (the built-in four when a config omits the key),
+# returned as a YAML frontmatter block so `meta.parse_meta` can read it back into
+# structured fields for the completion webhook. The `{{entities}}` placeholder in
+# the asset is rendered from `Config.meta_entities` at load time (`config.py`).
 META_INSTRUCTIONS = load_packaged_prompt("meta.md")
 
 

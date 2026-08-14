@@ -1,10 +1,11 @@
-"""Parse the ``meta`` preset's artifact into a subject plus allow-listed fields.
+"""Parse the ``meta`` preset's artifact into one value per configured entity.
 
-The ``meta`` preset answers with a YAML frontmatter block (``subject:``, ``tags:``,
-``referral:``, ``referral_note:``) so the completion webhook can forward structured
-fields instead of raw prose. The reply comes from an LLM, so every failure mode here
-degrades to an empty ``Meta()`` rather than raising: a garbled block must never fail a
-file that already transcribed and wrote its artifacts.
+The ``meta`` preset answers with a YAML frontmatter block shaped by the operator's
+configured entities (``data/config.yml``'s ``meta.entities``) so the completion
+webhook can forward structured fields instead of raw prose. The reply comes from an
+LLM, so every failure mode here degrades to an all-empty dict rather than raising: a
+garbled block must never fail a file that already transcribed and wrote its
+artifacts.
 """
 
 from __future__ import annotations
@@ -12,10 +13,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Iterable
-from dataclasses import dataclass
 
 import yaml
+
+from src.meta_entity import MetaEntity
 
 logger = logging.getLogger(__name__)
 
@@ -40,22 +41,6 @@ _FENCE_RE = re.compile(
 _YAML_VALUE_INDICATORS = "\"'|>&*!"
 
 
-@dataclass(frozen=True)
-class Meta:
-    """The ``meta`` preset's structured output."""
-
-    subject: str = ""
-    tags: tuple[str, ...] = ()
-    referral: str = ""
-    referral_note: str = ""
-
-
-# The prose fields a model routinely writes unquoted, and routinely writes a colon
-# into. YAML then reads the line as a nested mapping and rejects the whole document,
-# taking the fields that parsed fine down with it.
-_REQUOTABLE_FIELDS = ("subject", "referral_note")
-
-
 def _field_line_re(field: str) -> re.Pattern[str]:
     return re.compile(
         rf"^(?P<indent>[ \t]*){field}:[ \t]*(?P<value>\S.*?)[ \t]*$",
@@ -76,11 +61,11 @@ def _requote_field(body: str, field: str) -> str | None:
     return body[: match.start()] + repaired + body[match.end() :]
 
 
-def _requote_prose(body: str) -> str | None:
+def _requote_prose(body: str, fields: tuple[str, ...]) -> str | None:
     """Apply ``_requote_field`` to every repairable field; None when nothing changed."""
     repaired = body
     changed = False
-    for field in _REQUOTABLE_FIELDS:
+    for field in fields:
         candidate = _requote_field(repaired, field)
         if candidate is not None:
             repaired = candidate
@@ -88,7 +73,7 @@ def _requote_prose(body: str) -> str | None:
     return repaired if changed else None
 
 
-def _parse_frontmatter(text: str) -> dict | None:
+def _parse_frontmatter(text: str, requotable: tuple[str, ...]) -> dict | None:
     fence = _FENCE_RE.match(text or "")
     unfenced = fence.group("inner") if fence else (text or "")
     match = _FRONTMATTER_RE.search(unfenced)
@@ -101,7 +86,7 @@ def _parse_frontmatter(text: str) -> dict | None:
     except yaml.YAMLError as exc:
         # Only a document that already failed gets repaired, so a well-formed reply
         # keeps parsing exactly as written.
-        repaired = _requote_prose(body)
+        repaired = _requote_prose(body, requotable)
         if repaired is None:
             logger.warning("meta artifact is not valid YAML: %s", type(exc).__name__)
             return None
@@ -118,73 +103,72 @@ def _parse_frontmatter(text: str) -> dict | None:
     return parsed
 
 
-def _parse_tags(raw: object, allowed: Iterable[str]) -> tuple[str, ...]:
-    """Normalize the ``tags:`` value and drop anything outside the allow-list.
-
-    An empty ``allowed`` drops every tag: a config with no ``tags.allowed`` gave the
-    model nothing to pick from, so any tag it returned is invented.
-    """
+def _parse_value(raw: object, entity: MetaEntity) -> str | list[str]:
+    """Normalize one field's value and drop anything outside an enum's allow-list."""
     if raw is None:
-        return ()
-    if isinstance(raw, (list, tuple)):
-        candidates = raw
+        return [] if entity.multiple else ""
+
+    if entity.multiple:
+        candidates = list(raw) if isinstance(raw, (list, tuple)) else [raw]
     else:
-        # A model answering `tags: O-1` instead of a list shouldn't lose the tag.
         candidates = [raw]
 
-    allow_set = {str(tag).strip() for tag in allowed}
-    tags: list[str] = []
+    allow_set = {value.strip() for value in entity.allowed}
+    values: list[str] = []
     for candidate in candidates:
-        tag = str(candidate).strip()
-        if not tag or tag in tags:
+        value = str(candidate).strip()
+        if not value or value in values:
             continue
-        if tag not in allow_set:
-            logger.debug("dropping meta tag outside the allow-list: %r", tag)
+        if entity.type == "enum" and value not in allow_set:
+            logger.debug(
+                "dropping meta %s outside the allow-list: %r", entity.name, value
+            )
             continue
-        tags.append(tag)
-    return tuple(tags)
+        values.append(value)
 
-
-def _parse_referral(raw: object, allowed: Iterable[str]) -> str:
-    """Return the referral channel when it is on the allow-list, else an empty string.
-
-    An empty ``allowed`` rejects everything: a config with no ``referrals.allowed``
-    gave the model nothing to pick from, so any channel it returned is invented.
-    """
-    if raw is None:
-        return ""
-    channel = str(raw).strip()
-    if not channel:
-        return ""
-    if channel not in {str(entry).strip() for entry in allowed}:
-        logger.debug("dropping meta referral outside the allow-list: %r", channel)
-        return ""
-    return channel
+    if entity.multiple:
+        return values
+    return values[0] if values else ""
 
 
 def parse_meta(
-    text: str, allowed: Iterable[str], referrals_allowed: Iterable[str] = ()
-) -> Meta:
-    """Read the ``meta`` artifact's YAML frontmatter into structured fields.
+    text: str, entities: tuple[MetaEntity, ...]
+) -> dict[str, str | list[str]]:
+    """Read the ``meta`` artifact's YAML frontmatter into one value per entity.
 
-    ``allowed``/``referrals_allowed`` are the configured allow-lists; values outside
-    them are dropped, and an empty allow-list drops all of them. A missing or malformed
-    block yields an empty ``Meta``.
+    Every entity is present in the result, empty when the model omitted it or its
+    value was rejected. A missing or malformed block yields all-empty values rather
+    than raising: the recording already transcribed and its artifacts are already
+    written.
     """
-    parsed = _parse_frontmatter(text)
+    values: dict[str, str | list[str]] = {
+        entity.name: ([] if entity.multiple else "") for entity in entities
+    }
+    requotable = tuple(entity.name for entity in entities if not entity.multiple)
+    parsed = _parse_frontmatter(text, requotable)
     if parsed is None:
-        return Meta()
+        return values
 
-    subject_raw = parsed.get("subject")
-    subject = "" if subject_raw is None else str(subject_raw).strip()
-    referral = _parse_referral(parsed.get("referral"), referrals_allowed)
-    note_raw = parsed.get("referral_note")
-    note = "" if note_raw is None else str(note_raw).strip()
-    return Meta(
-        subject=subject,
-        tags=_parse_tags(parsed.get("tags"), allowed),
-        referral=referral,
-        # A note without a surviving channel describes a source we rejected; keeping
-        # it would smuggle an off-list channel back in as prose.
-        referral_note=note if referral else "",
-    )
+    for entity in entities:
+        values[entity.name] = _parse_value(parsed.get(entity.name), entity)
+
+    # A dependent that survived while its target was dropped would smuggle the
+    # rejected value back in as prose. A chain (A requires B, B requires C) needs
+    # more than one pass: B is only emptied partway through a single pass, so a
+    # single pass can leave A holding B's stale, pre-drop value. Repeat until a
+    # pass changes nothing. `_validate` guarantees `requires` chains are acyclic,
+    # so this always converges; the range bound is kept anyway so a future
+    # validation regression degrades to a wrong-but-bounded result instead of
+    # hanging the parser.
+    for _ in range(len(entities)):
+        changed = False
+        for entity in entities:
+            if not entity.requires or values.get(entity.requires):
+                continue
+            empty = [] if entity.multiple else ""
+            if values[entity.name] != empty:
+                values[entity.name] = empty
+                changed = True
+        if not changed:
+            break
+    return values
