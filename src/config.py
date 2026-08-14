@@ -1236,9 +1236,18 @@ def _default_config_dict(
                     "name": "target_filing",
                     "type": "text",
                     "label": "Целевая подача",
+                    # Both loosenings below come from a live miss: on a call where the
+                    # manager said "у вас основная цель - визы талантов" the field came
+                    # back empty, because the old wording's single example paired a type
+                    # with a window and "целится клиент" read as requiring the client's
+                    # own words.
                     "prompt": (
-                        "На какую подачу целится клиент: тип и/или окно, например "
-                        "«O-1 осенью». Пусто, если о цели подачи не говорили."
+                        "На какую подачу целится клиент: тип визы и/или срок подачи. "
+                        "Годится и один тип без срока («виза талантов», «EB-1A»), и "
+                        "связка («O-1 осенью»), и один срок без типа. Цель "
+                        "засчитывается и тогда, когда её проговаривает менеджер со "
+                        "слов клиента («у вас основная цель — ...»). Пусто, только "
+                        "если о цели подачи вообще не говорили."
                     ),
                 },
             ]

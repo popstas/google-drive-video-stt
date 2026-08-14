@@ -20,6 +20,7 @@
 
 ### Documentation
 
+- Warn that gdstt stop rewrites config.yml and strips comments
 - Replace the deprecated tags/referrals sample in README with meta.entities
 - Correct the stale entity-serializer comment in config.py
 - Fix false claim that gdstt stop migrates meta.entities
