@@ -91,3 +91,43 @@ def test_enum_without_allowed_is_warned_not_rejected(caplog):
         )
     assert entities[0].allowed == ()
     assert "referral" in caplog.text
+
+
+def test_rendered_block_carries_the_response_template_and_per_entity_rules():
+    entities = meta_entity.parse_entities(
+        [
+            {"name": "subject", "prompt": "Тема звонка.", "label": ""},
+            {
+                "name": "tags",
+                "prompt": "Подходящие теги.",
+                "type": "enum",
+                "multiple": True,
+                "allowed": ["O-1", "EB-1A"],
+            },
+            {
+                "name": "referral_note",
+                "prompt": "Словами клиента.",
+                "requires": "referral",
+            },
+            {"name": "referral", "prompt": "Откуда узнал.", "type": "enum"},
+        ]
+    )
+    block = meta_entity.render_entities_block(entities)
+
+    assert "subject: <value>" in block
+    assert "tags: [<value>, <value>]" in block
+    assert "Тема звонка." in block
+    assert "- O-1" in block
+    assert "- EB-1A" in block
+    assert "Return a list" in block
+    assert "`referral`" in block  # referral_note's requires note
+    assert "no values are configured" in block.lower()  # referral's empty allow-list
+
+
+def test_rendered_block_is_stable_for_a_single_text_entity():
+    entities = meta_entity.parse_entities(
+        [{"name": "target_filing", "prompt": "Целевая подача."}]
+    )
+    block = meta_entity.render_entities_block(entities)
+    assert "target_filing: <value>" in block
+    assert "[<value>" not in block

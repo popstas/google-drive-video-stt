@@ -93,8 +93,9 @@ def test_preset_dag_end_to_end_writes_each_artifact(tmp_path, monkeypatch):
                 "depends_on": ["transcript-cleanup"],
                 "instructions": _MANAGERS_INSTRUCTIONS,
             },
-            # Built-in prompt; the `{{allowed_tags}}` placeholder is rendered from
-            # the `tags.allowed` block above at config load.
+            # Built-in prompt; the `{{entities}}` placeholder is rendered from the
+            # configured meta entities (the built-in four here, using the
+            # `tags.allowed` block above) at config load.
             "meta": {"depends_on": ["transcript-cleanup"]},
         },
     }

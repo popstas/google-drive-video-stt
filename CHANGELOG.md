@@ -5,6 +5,7 @@
 
 ### Features
 
+- Read meta entities from config.yml
 - Describe meta entities as config-shaped data
 
 ### Documentation

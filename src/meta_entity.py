@@ -238,3 +238,41 @@ def parse_entities(
     )
     _validate(entities)
     return entities
+
+
+def _template_line(entity: MetaEntity) -> str:
+    return (
+        f"{entity.name}: [<value>, <value>]"
+        if entity.multiple
+        else f"{entity.name}: <value>"
+    )
+
+
+def _entity_rules(entity: MetaEntity) -> str:
+    lines = [f"## {entity.name}", "", entity.prompt, ""]
+    if entity.multiple:
+        lines.append("- Return a list. Return an empty list (`[]`) when nothing fits.")
+    else:
+        lines.append("- Return a single value, on one line.")
+    if entity.type == "enum":
+        if entity.allowed:
+            lines.append("- Use ONLY a value from this list, copied verbatim:")
+            lines.extend(f"  - {value}" for value in entity.allowed)
+        else:
+            lines.append(
+                "- No values are configured for this field — return it empty."
+            )
+    if entity.requires:
+        lines.append(f"- Leave this empty whenever `{entity.requires}` is empty.")
+    return "\n".join(lines)
+
+
+def render_entities_block(entities: tuple[MetaEntity, ...]) -> str:
+    """Render the response template and per-field rules for the ``meta`` prompt.
+
+    The asset holds what is true of every field -- YAML only, transcript's
+    language, invent nothing. This holds what is true of each one.
+    """
+    template = "\n".join(_template_line(entity) for entity in entities)
+    rules = "\n\n".join(_entity_rules(entity) for entity in entities)
+    return f"---\n{template}\n---\n\nField rules:\n\n{rules}"

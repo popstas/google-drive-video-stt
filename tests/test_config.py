@@ -471,16 +471,16 @@ def test_default_config_writes_the_new_output_and_planfix_keys():
     ]
 
 
-# --- {{allowed_tags}} prompt rendering ---------------------------------------
+# --- {{entities}} prompt rendering --------------------------------------------
 
 
 def _preset_by_name(cfg, name):
     return next(p for p in cfg.presets if p.name == name)
 
 
-def test_allowed_tags_placeholder_rendered_at_load(tmp_path):
+def test_entities_placeholder_rendered_at_load(tmp_path):
     prompt = tmp_path / "tagged.md"
-    prompt.write_text("Pick from:\n\n{{allowed_tags}}\n", encoding="utf-8")
+    prompt.write_text("Fields:\n\n{{entities}}\n", encoding="utf-8")
     cfg = _load_config(
         tmp_path,
         {
@@ -493,12 +493,12 @@ def test_allowed_tags_placeholder_rendered_at_load(tmp_path):
         },
     )
     instructions = _preset_by_name(cfg, "tagger").instructions
-    assert "{{allowed_tags}}" not in instructions
+    assert "{{entities}}" not in instructions
     assert "- клиентская-консультация" in instructions
     assert "- O-1" in instructions
 
 
-def test_allowed_tags_placeholder_rendered_in_inline_instructions(tmp_path):
+def test_entities_placeholder_rendered_in_inline_instructions(tmp_path):
     cfg = _load_config(
         tmp_path,
         {
@@ -506,11 +506,13 @@ def test_allowed_tags_placeholder_rendered_in_inline_instructions(tmp_path):
             "tags": {"allowed": ["O-1"]},
             "presets": {
                 "keypoints": {"enabled": False},
-                "tagger": {"instructions": "Tags:\n{{allowed_tags}}"},
+                "tagger": {"instructions": "Fields:\n{{entities}}"},
             },
         },
     )
-    assert _preset_by_name(cfg, "tagger").instructions == "Tags:\n- O-1"
+    instructions = _preset_by_name(cfg, "tagger").instructions
+    assert "{{entities}}" not in instructions
+    assert "- O-1" in instructions
 
 
 def test_prompt_without_placeholder_is_untouched(tmp_path):
@@ -529,28 +531,28 @@ def test_prompt_without_placeholder_is_untouched(tmp_path):
 
 
 def test_empty_allow_list_renders_explicit_none(tmp_path):
-    # With no tags configured the model must be told to return an empty list rather
-    # than being handed a blank section it might fill by inventing tags.
+    # With no tags configured the model must be told to return the field empty
+    # rather than being handed a blank section it might fill by inventing a tag.
     cfg = _load_config(
         tmp_path,
         {
             "stt": {"provider": "disabled"},
             "presets": {
                 "keypoints": {"enabled": False},
-                "tagger": {"instructions": "Tags:\n{{allowed_tags}}"},
+                "tagger": {"instructions": "Fields:\n{{entities}}"},
             },
         },
     )
     instructions = _preset_by_name(cfg, "tagger").instructions
-    assert "{{allowed_tags}}" not in instructions
-    assert "none" in instructions.lower()
+    assert "{{entities}}" not in instructions
+    assert "no values are configured" in instructions.lower()
 
 
-def test_allowed_tags_rendered_when_prompt_file_falls_back_to_packaged_asset(tmp_path):
+def test_entities_rendered_when_prompt_file_falls_back_to_packaged_asset(tmp_path):
     """A prompt_file resolved from the packaged assets (not from disk) must still be
-    rendered — an unrendered placeholder leaves the model free to invent tags."""
+    rendered — an unrendered placeholder leaves the model free to invent a tag."""
     config_file = tmp_path / "config.yml"
-    # meta.md carries {{allowed_tags}} and exists only as a packaged asset here.
+    # meta.md carries {{entities}} and exists only as a packaged asset here.
     _write_yaml(
         config_file,
         {
@@ -563,11 +565,11 @@ def test_allowed_tags_rendered_when_prompt_file_falls_back_to_packaged_asset(tmp
     cfg = load_config(config_path=config_file, validate_providers=False)
 
     instructions = _preset_by_name(cfg, "tagger").instructions
-    assert "{{allowed_tags}}" not in instructions
+    assert "{{entities}}" not in instructions
     assert "- EB-1" in instructions
 
 
-def test_meta_builtin_prompt_renders_allowed_tags(tmp_path):
+def test_meta_builtin_prompt_renders_entities(tmp_path):
     cfg = _load_config(
         tmp_path,
         {
@@ -579,9 +581,33 @@ def test_meta_builtin_prompt_renders_allowed_tags(tmp_path):
         },
     )
     instructions = _preset_by_name(cfg, "meta").instructions
-    assert "{{allowed_tags}}" not in instructions
+    assert "{{entities}}" not in instructions
     assert "- клиентская-консультация" in instructions
     assert "- EB-1" in instructions
+
+
+def test_meta_prompt_is_rendered_with_the_configured_entities(tmp_path):
+    config = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "meta": {
+                "entities": [
+                    {
+                        "name": "target_filing",
+                        "prompt": "На какую подачу целится клиент.",
+                    }
+                ]
+            },
+            "presets": {"meta": {"enabled": True}},
+        },
+    )
+    meta_preset = next(p for p in config.presets if p.name == "meta")
+    assert "{{entities}}" not in meta_preset.instructions
+    assert "target_filing: <value>" in meta_preset.instructions
+    assert "На какую подачу целится клиент." in meta_preset.instructions
+    # The entity list replaced the old fixed fields entirely.
+    assert "referral_note" not in meta_preset.instructions
 
 
 def test_custom_poll_interval(tmp_path):
@@ -2507,7 +2533,7 @@ def test_referrals_allowed_renders_into_the_meta_prompt(tmp_path):
         },
     )
     meta_preset = next(p for p in config.presets if p.name == "meta")
-    assert "{{allowed_referrals}}" not in meta_preset.instructions
+    assert "{{entities}}" not in meta_preset.instructions
     assert "- instagram" in meta_preset.instructions
 
 

@@ -43,12 +43,10 @@ DEEPGRAM_DEFAULT_KEYTERMS_FILE = Path("deepgram-keyterms-example.txt")
 DEEPGRAM_KEYTERMS_ASSET = "deepgram-keyterms-example.txt"
 DEEPGRAM_MAX_KEYTERMS = 100
 
-# Placeholder a preset prompt may carry to receive the config's ``tags.allowed``
-# list at load time. The built-in ``meta`` prompt uses it; any prompt may.
-ALLOWED_TAGS_PLACEHOLDER = "{{allowed_tags}}"
-# Placeholder a preset prompt may carry to receive the config's ``referrals.allowed``
-# list at load time. The built-in ``meta`` prompt uses it; any prompt may.
-ALLOWED_REFERRALS_PLACEHOLDER = "{{allowed_referrals}}"
+# Placeholder a preset prompt may carry to receive the configured meta entities --
+# the response template plus each field's rules -- rendered at config load time.
+# The built-in ``meta`` prompt uses it; any prompt may.
+ENTITIES_PLACEHOLDER = "{{entities}}"
 
 
 FOLDER_IDS_MIGRATION_ERROR = (
@@ -293,18 +291,6 @@ def _parse_tags_allowed(raw: object) -> tuple[str, ...]:
     return tuple(tag for tag in (_yaml_str(entry) for entry in raw) if tag)
 
 
-def _render_allowed_tags(tags_allowed: tuple[str, ...]) -> str:
-    """Render ``tags.allowed`` as the bullet list that replaces the placeholder.
-
-    An empty allow-list renders an explicit "none" line rather than a blank
-    section, so a prompt handed no tags tells the model to return an empty list
-    instead of leaving it free to invent one.
-    """
-    if not tags_allowed:
-        return "(none configured — return an empty tags list)"
-    return "\n".join(f"- {tag}" for tag in tags_allowed)
-
-
 def _parse_referrals_allowed(raw: object) -> tuple[str, ...]:
     """Parse the ``referrals.allowed`` list into a tuple of non-empty channel names."""
     if raw is None:
@@ -314,29 +300,17 @@ def _parse_referrals_allowed(raw: object) -> tuple[str, ...]:
     return tuple(name for name in (_yaml_str(entry) for entry in raw) if name)
 
 
-def _render_allowed_referrals(referrals_allowed: tuple[str, ...]) -> str:
-    """Render ``referrals.allowed`` as the bullet list that replaces the placeholder."""
-    if not referrals_allowed:
-        return "(none configured — return an empty referral)"
-    return "\n".join(f"- {name}" for name in referrals_allowed)
-
-
 def _render_prompt_placeholders(
-    text: str,
-    tags_allowed: tuple[str, ...],
-    referrals_allowed: tuple[str, ...] = (),
+    text: str, entities: tuple[meta_entity.MetaEntity, ...] = ()
 ) -> str:
     """Substitute the supported ``{{...}}`` placeholders in a resolved prompt.
 
-    Today those are ``{{allowed_tags}}`` and ``{{allowed_referrals}}`` (both the
-    ``meta`` preset's). A prompt without them is returned unchanged, so this is safe to
-    run over every preset's text.
+    Today that is ``{{entities}}`` (the ``meta`` preset's). A prompt without it is
+    returned unchanged, so this is safe to run over every preset's text.
     """
-    if ALLOWED_TAGS_PLACEHOLDER in text:
-        text = text.replace(ALLOWED_TAGS_PLACEHOLDER, _render_allowed_tags(tags_allowed))
-    if ALLOWED_REFERRALS_PLACEHOLDER in text:
+    if ENTITIES_PLACEHOLDER in text:
         text = text.replace(
-            ALLOWED_REFERRALS_PLACEHOLDER, _render_allowed_referrals(referrals_allowed)
+            ENTITIES_PLACEHOLDER, meta_entity.render_entities_block(entities)
         )
     return text
 
@@ -344,8 +318,7 @@ def _render_prompt_placeholders(
 def _resolve_prompt_text(
     preset: Preset,
     config_file: Path | None,
-    tags_allowed: tuple[str, ...] = (),
-    referrals_allowed: tuple[str, ...] = (),
+    entities: tuple[meta_entity.MetaEntity, ...] = (),
 ) -> str:
     """Resolve a preset's final prompt text from instructions or prompt_file.
 
@@ -356,14 +329,11 @@ def _resolve_prompt_text(
     that resolves but is missing/unreadable/empty raises ``ValueError``; a preset
     with neither instructions nor prompt_file also raises.
 
-    The resolved text has its ``{{...}}`` placeholders rendered from ``tags_allowed``/
-    ``referrals_allowed`` before it is returned, so the pipeline never sees an
-    unrendered prompt.
+    The resolved text has its ``{{...}}`` placeholders rendered from ``entities``
+    before it is returned, so the pipeline never sees an unrendered prompt.
     """
     if preset.instructions.strip():
-        return _render_prompt_placeholders(
-            preset.instructions, tags_allowed, referrals_allowed
-        )
+        return _render_prompt_placeholders(preset.instructions, entities)
     if not preset.prompt_file:
         raise ValueError(
             f"preset {preset.name!r} must define instructions or prompt_file"
@@ -380,7 +350,7 @@ def _resolve_prompt_text(
                     f"preset {preset.name!r} prompt_file {preset.prompt_file!r} "
                     f"is empty: {candidate}"
                 )
-            return _render_prompt_placeholders(text, tags_allowed, referrals_allowed)
+            return _render_prompt_placeholders(text, entities)
 
     try:
         text = load_packaged_prompt(os.path.basename(preset.prompt_file))
@@ -389,23 +359,20 @@ def _resolve_prompt_text(
             f"preset {preset.name!r} prompt_file {preset.prompt_file!r} "
             f"could not be resolved: {exc}"
         ) from exc
-    return _render_prompt_placeholders(text, tags_allowed, referrals_allowed)
+    return _render_prompt_placeholders(text, entities)
 
 
 def _resolve_presets(
     config_presets: dict | None,
     config_file: Path | None = None,
-    tags_allowed: tuple[str, ...] = (),
-    referrals_allowed: tuple[str, ...] = (),
+    entities: tuple[meta_entity.MetaEntity, ...] = (),
 ) -> tuple[Preset, ...]:
     """Merge config presets over built-ins, resolve prompts, validate, and freeze."""
     merged = merge_presets(BUILTIN_PRESETS, config_presets)
     resolved = {
         name: replace(
             preset,
-            instructions=_resolve_prompt_text(
-                preset, config_file, tags_allowed, referrals_allowed
-            ),
+            instructions=_resolve_prompt_text(preset, config_file, entities),
         )
         for name, preset in merged.items()
     }
@@ -868,7 +835,7 @@ def _config_from_yaml(
     openai_batch = _yaml_bool(openai.get("batch"), default=False)
     openai_batch_wait = _yaml_bool(openai.get("batch_wait"), default=True)
     openai_max_parallel = _parse_max_parallel(openai.get("max_parallel"), default=4)
-    presets = _resolve_presets(config_presets, config_file, tags_allowed, referrals_allowed)
+    presets = _resolve_presets(config_presets, config_file, meta_entities)
 
     deepgram_api_key = ""
     deepgram_model = _yaml_str(deepgram.get("model"), "nova-3") or "nova-3"
