@@ -142,9 +142,9 @@ presets run in parallel (a `ThreadPoolExecutor` capped at `openai.max_parallel`)
 and each non-empty output is written as `<base><artifact_suffix>` tagged
 `artifact_type=<preset-name>`. Built-in presets ship in `BUILTIN_PRESETS`:
 `keypoints` (producing `## Задачи` / `## Тезисы` / `## Открытые вопросы`, plain
-text) and `meta` (a `.meta.md` YAML-frontmatter artifact with a one-sentence
-`subject:`, `tags:` drawn from `tags.allowed`, and `referral:`/`referral_note:`
-drawn from `referrals.allowed`, parsed back by `src/meta.py`). The generated
+text) and `meta` (a `.meta.md` YAML-frontmatter artifact whose fields come from
+`meta.entities` in `config.yml` — config-shaped data, `src/meta_entity.py` —
+parsed back into a `dict[str, str | list[str]]` by `src/meta.py`). The generated
 default chain is `transcript-cleanup -> keypoints + meta`; the third packaged
 preset, `action-items`, ships disabled (its output duplicates `keypoints`' `##
 Задачи` section) but its prompt asset stays packaged, so re-enabling it is a
@@ -161,6 +161,11 @@ override built-ins field-by-field, add new presets, and disable a built-in with
 independent branches still persist, then an aggregated error makes the file retry
 and re-run only the still-missing presets on a later cycle.
 
+**`src/meta_entity.py`** — what the `meta` preset extracts, as config-shaped
+data (the `MetaEntity` dataclass, YAML parsing, validation, and the
+`{{entities}}` renderer). A leaf module: `config`, `meta`, and `meta_doc` all
+import it, and it imports none of them.
+
 **Output layer** (`src/output.py`): `write_artifact` writes each artifact either as
 a Drive sibling (`output.target=drive` — upload, or update an existing sibling in
 place via `drive.update_file`, its id flowing through `list_folder_state`) or into a
@@ -176,8 +181,8 @@ every artifact is written — normally once per file, and again if a later cycle
 re-feeds its transcript to produce a newly added preset (`file.id` is the
 receiver's dedupe key). The employee comes from
 `config.folder_by_id(folder_id)`; `artifacts` carries each preset's raw text keyed
-by name, except `meta`, which `meta.parse_meta` turns into
-`{subject, tags, referral, referral_note}`.
+by name, except `meta`, which `meta.parse_meta` turns into one key per configured
+entity (`config.meta_entities`).
 `notify_complete` mirrors `notify.notify_error`'s contract and never raises: a
 blank url is a `logger.debug` no-op, and any failure logs only the exception *type*
 so the token cannot leak. The whole block is additionally wrapped in `try/except` —
@@ -259,14 +264,20 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   `Config.folder_ids` compatibility shim (it would revive the exact name the
   migration error bans). `Config.folder_by_id()` resolves an entry back to its
   `EmployeeFolder`.
-- `tags.allowed` is the only vocabulary the `meta` preset may tag with, and
-  `referrals.allowed` the only channels it may pick `referral` from. Both reach
-  prompts through the `{{allowed_tags}}`/`{{allowed_referrals}}` placeholders
-  rendered at load time by `_resolve_prompt_text` (inline, file, and packaged
-  prompts alike), and are enforced again in `meta.parse_meta`, which drops tags and
-  a referral outside their allow-lists (and drops `referral_note` whenever
-  `referral` was dropped). `parse_meta` degrades to an all-empty `Meta()` on a
-  missing/malformed block — a bad LLM reply must not fail the file.
+- `meta.entities` in `config.yml` is the single source of what the `meta` preset
+  extracts; each entity is `name`/`prompt` (required) plus optional `type`
+  (`text`/`enum`), `multiple`, `allowed`, `label`, `requires`. An `enum` entity's
+  `allowed` list is the only vocabulary the model may use for that field, and it
+  reaches the prompt through the single `{{entities}}` placeholder rendered at
+  load time by `_resolve_prompt_text` (inline, file, and packaged prompts alike).
+  `meta.parse_meta` enforces it again: it drops an `enum` value outside `allowed`,
+  and empties any entity whose `requires` target came back empty. A
+  missing/malformed block degrades to every entity empty (a dict, not a `Meta()` —
+  that dataclass is gone) — a bad LLM reply must not fail the file. The top-level
+  `tags.allowed`/`referrals.allowed` keys are deprecated: read only while
+  `meta.entities` is absent, feeding the four built-in entities
+  (`meta_entity.default_entities`); once `meta.entities` is declared, the old keys
+  are ignored and logged at startup.
 - The completion webhook (`webhook.url`, optional `webhook.token`) is
   fire-and-forget: it fires on the success path only (once per transcription, plus
   once per later preset-backfill cycle), and any failure is logged without failing

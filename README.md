@@ -24,9 +24,9 @@ speech-to-text pipelines.
 - Config-defined DAG of OpenAI presets (each writes its own sibling artifact, e.g.
   the built-in Keypoints pass: `## Задачи` / `## Тезисы` / `## Открытые вопросы`),
   with independent presets run in parallel via the OpenAI Responses API
-- Built-in `meta` preset recording a one-sentence conversation subject, tags drawn
-  only from `tags.allowed`, and a referral channel drawn only from
-  `referrals.allowed`
+- Built-in `meta` preset extracting whatever `meta.entities` declares in
+  `config.yml` — seven entities by default: subject, tags, referral +
+  referral note, and case/other-deadlines + target-filing fields
 - One combined `.stt` document per call (keypoints + meta + transcript) and a
   `<stem>.meta.yml` alongside every other artifact
 - Optional fire-and-forget completion webhook posting `{file, employee, transcript,
@@ -283,7 +283,7 @@ webhook:
   token: ""              # optional; sent as "Authorization: Bearer <token>"
 google: {}               # inline-first auth; empty => data_dir fallback
 planfix:
-  meta_fields: [subject, tags, referral, referral_note, duration, video_url]   # header fields on the Planfix comment
+  meta_fields: [subject, tags, referral, referral_note, case_deadline, deadlines, target_filing, duration, video_url]   # header fields on the Planfix comment
   task_url: ""           # e.g. https://<account>.planfix.com/task/<task-id>
 presets:
   transcript-cleanup:
@@ -331,12 +331,18 @@ variable is read at runtime:
 | `stt.deepgram.txt_formatter` | `word_speaker` | Deepgram TXT formatter: `word_speaker` or `utterance` |
 | `stt.deepgram.keyterms_enabled` | `true` | Enables Nova-3 keyterm prompting |
 | `stt.deepgram.keyterms_file` | `deepgram-keyterms-example.txt` | Keyterms file, one term per line, max 100. Resolved beside `config.yml`; point it at your own list (e.g. `data/deepgram-keyterms.txt`). A missing default is a warning; a missing path you set explicitly is an error |
-| `tags.allowed` | (empty) | Allow-list the `meta` preset picks conversation tags from. Empty means `meta` returns no tags |
-| `referrals.allowed` | seeded list (see below) | Allow-list the `meta` preset picks the `referral` channel from. A value outside the list is dropped |
+| `tags.allowed` | (empty) | **Deprecated.** Read only while `meta.entities` is absent, wiring the built-in `tags` entity's allow-list. Move the values into that entity's `allowed` list and delete this key |
+| `referrals.allowed` | seeded list (see below) | **Deprecated.** Read only while `meta.entities` is absent, wiring the built-in `referral` entity's allow-list. Move the values into that entity's `allowed` list and delete this key |
+| `meta.entities` | four built-in entities (see [Conversation meta](#conversation-meta-config-driven-entities)) | The `meta` preset's field list: one mapping per entity (`name`, `prompt`, `type`, `multiple`, `allowed`, `label`, `requires`) |
 | `webhook.url` | (empty) | Completion webhook endpoint; must be an absolute `http://` or `https://` URL. Empty disables it; a failure never fails the file |
 | `webhook.token` | (empty) | Optional bearer token sent as `Authorization: Bearer <token>` |
-| `planfix.meta_fields` | `[subject, tags, referral, referral_note, duration, video_url]` | Which meta fields open the Planfix comment, and in what order |
+| `planfix.meta_fields` | `[subject, tags, referral, referral_note, case_deadline, deadlines, target_filing, duration, video_url]` | Which meta fields open the Planfix comment, and in what order |
 | `planfix.task_url` | (empty) | Where a task lives in the web UI, e.g. `https://<account>.planfix.com/task/<task-id>`. Fills `planfix_task_url` in the meta document and the link column of `gdstt planfix sent`. Empty leaves both blank |
+
+`tags.allowed` and `referrals.allowed` are read for one more version when
+`meta.entities` is absent. Once `meta.entities` is declared, the old keys are
+ignored and logged at startup. The first whole-config rewrite (`gdstt stop` is
+one) migrates the file to the new form.
 
 ## Speech-to-text
 
@@ -447,7 +453,7 @@ Two built-in presets ship with the code. `keypoints` produces a
 `<base>.keypoints.md` document containing `## Задачи` (grouped by
 `### Ответственный`), `## Тезисы`, and `## Открытые вопросы` in plain text.
 `meta` produces a `<base>.meta.md` YAML-frontmatter artifact describing the call
-(see [Conversation meta](#conversation-meta-subject-tags-and-referral)). A
+(see [Conversation meta](#conversation-meta-config-driven-entities)). A
 generated config enables the full chain `transcript-cleanup -> keypoints + meta`
 out of the box (with `openai.batch: true`); `transcript-cleanup` is written above
 its dependents. `action-items` ships disabled — its output duplicates `keypoints`'
@@ -466,9 +472,11 @@ nor `prompt_file` is an error. The packaged prompt assets (`keypoints.md`,
 `<config_dir>/prompts/` beside the config — there is no hidden runtime prompt in
 Python.
 
-A prompt may contain the `{{allowed_tags}}` placeholder; it is rendered at config
-load time with the `tags.allowed` list (and with an explicit "none configured" line
-when the list is empty, so a model is never invited to invent tags). The packaged
+A prompt may contain the `{{entities}}` placeholder; it is rendered at config load
+time from `meta.entities` into two things: a YAML response template (one line per
+entity, list syntax for `multiple`) and a rules block per entity carrying its
+`prompt`, its `allowed` list when `enum`, a "return a list" note when `multiple`,
+and a "leave empty when *X* is empty" note when `requires` is set. The packaged
 `meta.md` uses it; the placeholder works in inline `instructions` and in any
 `prompt_file` too.
 
@@ -504,10 +512,11 @@ For an agent-driven path (reason about speakers, confirm the mapping, relabel
 deterministically, and write the Keypoints document by hand), see
 [`skills/gdstt-cli/SKILL.md`](skills/gdstt-cli/SKILL.md).
 
-### Conversation meta (subject, tags, and referral)
+### Conversation meta (config-driven entities)
 
-The built-in `meta` preset summarizes what a call was about in one OpenAI pass and
-writes a `<base>.meta.md` artifact holding nothing but YAML frontmatter:
+The built-in `meta` preset extracts whatever `meta.entities` declares in
+`config.yml`, in one OpenAI pass, and writes a `<base>.meta.md` artifact holding
+nothing but YAML frontmatter — one key per configured entity:
 
 ```markdown
 ---
@@ -515,27 +524,44 @@ subject: Консультация по визе O-1 для research-профил
 tags: [клиентская-консультация, O-1, рекомендательные-письма]
 referral: рекомендация
 referral_note: Посоветовала знакомая из Нью-Йорка
+case_deadline: к концу лета
+deadlines: []
+target_filing: O-1 осенью
 ---
 ```
 
-`subject` is a single sentence. `tags` are drawn **only** from `tags.allowed` in
-`config.yml`, injected into the prompt through `{{allowed_tags}}`; an empty
-allow-list means an empty tags list. `referral` is drawn **only** from
-`referrals.allowed`, injected through `{{allowed_referrals}}`, and is filled only
-when the client themselves states where they heard about the company — a manager
-asking with no answer is not a source. `referral_note` carries the client's own
-words about it and stays empty whenever `referral` does. The model is asked to
-constrain itself, and `src/meta.py` enforces it independently: `parse_meta`
-intersects the reply's tags with `tags.allowed`, drops any `referral` outside
-`referrals.allowed`, and drops `referral_note` whenever `referral` was dropped. A
-missing or malformed frontmatter block degrades to all four fields empty rather
-than failing the file — a bad LLM reply must never cost you a processed recording.
+Each entity under `meta.entities` is a mapping with these keys:
 
-Tune the vocabularies by editing `tags.allowed` / `referrals.allowed`; no code
-change is needed.
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `name` | yes | YAML key in the artifact, the meta document, and the webhook payload |
+| `prompt` | yes | the instruction handed to the model for this entity |
+| `type` | no, default `text` | `text` = free string in the transcript's own words; `enum` = a value copied verbatim from `allowed` |
+| `multiple` | no, default `false` | `true` yields a list instead of a scalar |
+| `allowed` | `enum` only | the values the model may pick from |
+| `label` | no, default `name` | the label in the Planfix comment header; `''` means "render as the bold heading, not a labelled line" |
+| `requires` | no | name of another entity; this one is emptied when that one came back empty |
 
-Every processed recording also gets a `<stem>.meta.yml` merging these four model
-fields with facts the code already knows — manager, client, date, duration, Planfix
+The shipped default is seven entities: `subject` (the heading, `label: ''`),
+`tags` and `referral` (`enum`, values from their `allowed` lists),
+`referral_note` (`requires: referral`), and three fields added on this branch —
+`case_deadline`, `deadlines` (`multiple: true`), and `target_filing` — kept in
+the client's own words, never normalized to an ISO date, and empty when the call
+never covered them.
+
+The model is asked to constrain itself, and `src/meta.py` enforces it
+independently: `parse_meta` intersects an `enum` entity's reply with its
+`allowed` list, and empties any entity whose `requires` target came back empty.
+A missing or malformed frontmatter block degrades to every entity empty rather
+than failing the file — a bad LLM reply must never cost you a processed
+recording.
+
+Tune an entity's vocabulary by editing its `allowed` list; add, remove, or
+reword a question by editing `meta.entities`. No code change is needed either
+way.
+
+Every processed recording also gets a `<stem>.meta.yml` merging every entity
+value with facts the code already knows — manager, client, date, duration, Planfix
 task id, models used — and a combined `<stem>.stt` document (keypoints, then this
 meta block, then the transcript). Where they land depends on `output.target`: the
 default `drive` target uploads both as ordinary Drive siblings, same as every other
@@ -543,11 +569,13 @@ artifact; `folder` mode keeps every artifact local, including `.meta.yml`, and
 `output.also_drive: true` additionally publishes **only** the `.stt` to Drive —
 `.meta.yml` itself is never published on its own.
 
-`config init` enables `meta` for you. Unlike `keypoints`, it is **opt-in** for
-configs written before it existed — otherwise upgrading would silently add an
-OpenAI pass to every deployment, including STT-only ones that carry no
-`openai.api_key`. To turn it on in an existing `config.yml`, add it under
-`presets:` with the dependency wired, exactly as the generated config does:
+`config init` enables `meta` for you, with the seven entities above. Unlike
+`keypoints`, it is **opt-in** for configs written before it existed — otherwise
+upgrading would silently add an OpenAI pass to every deployment, including
+STT-only ones that carry no `openai.api_key`. To turn it on in an existing
+`config.yml`, add it under `presets:` with the dependency wired, and declare
+`meta.entities` (or leave it absent, which falls back to the four built-in
+entities wired to the deprecated `tags.allowed`/`referrals.allowed`):
 
 ```yaml
 presets:
@@ -575,7 +603,10 @@ success path only, after every artifact has been written:
       "subject": "...",
       "tags": ["клиентская-консультация"],
       "referral": "рекомендация",
-      "referral_note": "Посоветовала знакомая"
+      "referral_note": "Посоветовала знакомая",
+      "case_deadline": "к концу лета",
+      "deadlines": [],
+      "target_filing": "O-1 осенью"
     },
     "keypoints": "## Задачи\n..."
   }
@@ -585,9 +616,11 @@ success path only, after every artifact has been written:
 The employee comes from the `folders` entry the file was found in; a folder with no
 `name`/`email` sends empty strings rather than omitting the key. Every enabled
 preset's output appears under `artifacts` keyed by preset name — raw text, except
-`meta`, which is parsed into `{subject, tags, referral, referral_note}`. Adding a
-preset to `config.yml` therefore extends the payload with no code change, so a
-consumer must tolerate new keys appearing.
+`meta`, which is parsed into one key per configured entity (the built-in
+`{subject, tags, referral, referral_note}` when `meta.entities` is absent, or
+whatever else `meta.entities` names). Adding a preset — or an entity — to
+`config.yml` therefore extends the payload with no code change, so a consumer must
+tolerate new keys appearing.
 
 A file normally notifies once, when it is transcribed. It notifies **again** if it
 is later re-selected and produces preset output — after you add a preset to

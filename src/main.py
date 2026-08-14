@@ -776,11 +776,14 @@ def _planfix_meta_lines(
 ) -> list[str]:
     """Render the selected meta fields as Markdown lines for the comment header.
 
-    A field that is empty or has no label is skipped silently, so shortening the
-    configured list or a call with no referral never leaves a dangling label. A
-    field whose label is empty is rendered bold and without a label; the first such
-    field in ``fields`` is hoisted to the top as the comment's heading, and any
-    further ones follow in place as bold lines.
+    A field that is empty, or is not in ``labels`` at all (an unknown name -- e.g.
+    a stale entry left in ``planfix.meta_fields`` after an entity was removed), is
+    skipped silently, so shortening the configured list or a call with no referral
+    never leaves a dangling label. That is a different case from a field whose
+    *label* is the empty string: such a field is rendered bold with no label
+    instead of being skipped; the first one encountered in ``fields`` is hoisted to
+    the top as the comment's heading, and any further ones follow in place as bold
+    lines.
     """
     if not document:
         return []

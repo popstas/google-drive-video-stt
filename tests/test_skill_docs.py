@@ -214,10 +214,10 @@ def test_skill_documents_folders_not_removed_folder_ids():
 def test_skill_documents_meta_preset_and_completion_webhook():
     text = SKILL_PATH.read_text(encoding="utf-8")
 
-    # The `meta` preset: its artifact, and that tags come only from the allow-list.
+    # The `meta` preset: its artifact, and that its fields come from config.
     assert ".meta.md" in text
-    assert "tags.allowed" in text
-    assert "{{allowed_tags}}" in text
+    assert "meta.entities" in text
+    assert "{{entities}}" in text
     # The webhook: config keys, payload keys, and the fire-and-forget contract.
     assert "webhook.url" in text
     assert "webhook.token" in text
@@ -304,10 +304,13 @@ def test_docs_document_the_completion_webhook_and_meta_preset():
     assert "fire-and-forget" in readme.lower()
     assert "webhook" in agents.lower()
 
-    # meta preset: the artifact, the allow-list, and the placeholder.
+    # meta preset: the artifact, the config-driven entity list, and the
+    # placeholder; the deprecated allow-list keys are still documented as the
+    # migration path for a config that hasn't declared meta.entities yet.
     assert ".meta.md" in readme
+    assert "meta.entities" in readme
+    assert "{{entities}}" in readme
     assert "tags.allowed" in readme
-    assert "{{allowed_tags}}" in readme
     assert "tags.allowed" in agents
 
 

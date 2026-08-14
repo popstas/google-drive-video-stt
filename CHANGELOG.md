@@ -5,6 +5,7 @@
 
 ### Features
 
+- Label the Planfix header from the configured entities
 - Parse meta artifacts into one value per configured entity
 - Build the meta prompt from the configured entities
 - Read meta entities from config.yml

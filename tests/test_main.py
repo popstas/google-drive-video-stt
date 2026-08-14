@@ -3427,10 +3427,13 @@ def test_planfix_description_skips_empty_and_unknown_fields():
         ("subject", "referral", "tags", "not_a_field"),
         meta_entity.default_entities(),
     )
-    # The brief's original assertion checked "Реферал" not in html, but no label in
-    # _PLANFIX_META_LABELS spells "Реферал" (referral's label is "Откуда узнал"), so
-    # that half could never fail and proved nothing. Asserting on the label the code
-    # actually emits for the empty `referral` field makes this cover the skip.
+    # The brief's original assertion checked "Реферал" not in html, but no label
+    # `_planfix_labels()` returns spells "Реферал" (referral's label is "Откуда
+    # узнал", supplied by the entity, not the deleted `_PLANFIX_META_LABELS`
+    # constant -- see `_PLANFIX_CODE_LABELS` for what's left of it, the code-known
+    # fields only), so that half could never fail and proved nothing. Asserting on
+    # the label the code actually emits for the empty `referral` field makes this
+    # cover the skip.
     assert "Откуда узнал" not in html and "Теги" not in html
 
 
