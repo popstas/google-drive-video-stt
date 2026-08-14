@@ -1,10 +1,11 @@
 # Changelog
 
 
-## Unreleased
+## v0.7.0 - 2026-08-14
 
 ### Features
 
+- Add job-board and cold-outreach referral channels to the default list
 - Label the Planfix header from the configured entities
 - Parse meta artifacts into one value per configured entity
 - Build the meta prompt from the configured entities
