@@ -3687,6 +3687,98 @@ def test_process_item_withholds_the_comment_when_a_preset_produced_nothing(
     sent.assert_not_called()
 
 
+_CONFIGURED_ENTITY_META_ARTIFACT = (
+    "---\n"
+    "subject: Консультация по визе O-1\n"
+    "tags: [O-1, клиентская-консультация]\n"
+    "referral: рекомендация\n"
+    "referral_note: Посоветовала знакомая\n"
+    "target_filing: O-1 осенью\n"
+    "---\n"
+)
+
+
+def test_process_item_carries_a_configured_entity_into_meta_yml_webhook_and_planfix(
+    mocker, tmp_path
+):
+    """The composition the spec asked a test for: a config-declared entity that is
+    none of the built-in four (`target_filing`) must reach all three outputs of one
+    `process_item` call -- the written `.meta.yml`, the webhook payload's
+    `artifacts.meta`, and the Planfix comment -- not just whichever one its own
+    unit test happens to cover. Each of those three is unit-tested alone elsewhere;
+    nothing before this exercised the composition.
+    """
+    entities = meta_entity.parse_entities(
+        [
+            {"name": "subject", "prompt": "Тема.", "label": ""},
+            {
+                "name": "tags",
+                "prompt": "Теги.",
+                "type": "enum",
+                "multiple": True,
+                "allowed": ["O-1", "клиентская-консультация"],
+            },
+            {
+                "name": "referral",
+                "prompt": "Откуда.",
+                "type": "enum",
+                "allowed": ["рекомендация"],
+            },
+            {"name": "referral_note", "prompt": "Детали.", "requires": "referral"},
+            # The non-default entity: it is in none of the built-in four
+            # (subject/tags/referral/referral_note).
+            {"name": "target_filing", "prompt": "Куда подача."},
+        ]
+    )
+    out_dir = tmp_path / "out"
+    config = _webhook_config(
+        meta_entities=entities,
+        planfix_meta_fields=(
+            "subject", "tags", "referral", "referral_note", "target_filing",
+        ),
+        output_target="folder",
+        output_dir=out_dir,
+    )
+    # `_webhook_config`/`make_config` do not expose the Planfix settings, so wire
+    # them on afterwards -- mirrors how `planfix_config` extends `gate_config`.
+    config = replace(
+        config,
+        planfix_create_comment_url="https://crm.example.com/planfix_create_comment",
+        planfix_token="planfix-token",
+    )
+
+    notify = _mock_successful_run(
+        mocker, tmp_path, meta_text=_CONFIGURED_ENTITY_META_ARTIFACT
+    )
+    send_comment = mocker.patch(
+        "src.main.planfix.send_comment", return_value=True
+    )
+    mocker.patch("src.main.drive.set_file_app_properties")
+
+    main.process_item(
+        MagicMock(),
+        _item("fid", "video.mp4"),
+        "folderX",
+        config,
+        booking_decision=MATCHED_DECISION,
+    )
+
+    # 1. the written `.meta.yml`
+    meta_yml = (out_dir / "video.meta.yml").read_text(encoding="utf-8")
+    assert "target_filing: O-1 осенью" in meta_yml
+
+    # 2. the webhook payload's `artifacts.meta`
+    notify.assert_called_once()
+    payload_meta = notify.call_args.kwargs["payload"]["artifacts"]["meta"]
+    assert payload_meta["target_filing"] == "O-1 осенью"
+
+    # 3. the Planfix comment
+    send_comment.assert_called_once()
+    description = send_comment.call_args.kwargs["description"]
+    assert "target_filing" in description
+    assert "O-1 осенью" in description
+
+
 # --- start the receiver from the polling loop ----------------------------------
 
 
