@@ -20,6 +20,7 @@
 
 ### Documentation
 
+- Correct the stale entity-serializer comment in config.py
 - Fix false claim that gdstt stop migrates meta.entities
 - Describe config-driven meta entities
 - Note the make_config keyword the webhook test needs

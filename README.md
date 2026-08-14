@@ -229,7 +229,7 @@ the last path segment in the browser URL:
 
 All configuration lives in the active `config.yml` (`<GDSTT_HOME>/config.yml`, or
 `./data/config.yml` when `GDSTT_HOME` is unset). It is grouped under `output`, `stt`
-(with a nested `deepgram` block), `openai`, `tags`, and `webhook`, plus a top-level
+(with a nested `deepgram` block), `openai`, `meta`, and `webhook`, plus a top-level
 `presets` map.
 There is no auto-generation: create the file with `gdstt config init` (or by hand),
 then edit it. Resolve a one-shot non-default file with `gdstt --config PATH ...`.
@@ -274,10 +274,18 @@ openai:
   batch: false           # global default batch mode for presets
   batch_wait: true       # wait synchronously for batch results (default)
   max_parallel: 4        # cap on presets run concurrently
-tags:
-  allowed: [клиентская-консультация, O-1, EB-1]   # the only tags `meta` may pick
-referrals:
-  allowed: [рекомендация, instagram, telegram, youtube, linkedin]   # the only channels `meta` may pick for `referral`
+meta:
+  entities:              # the `meta` preset's field list; illustrative subset, see below
+    - name: subject
+      type: text
+      label: ''          # renders as the bold heading instead of a labelled line
+      prompt: Одно предложение о том, про что был звонок.
+    - name: tags
+      type: enum
+      multiple: true
+      label: Теги
+      allowed: [клиентская-консультация, O-1, EB-1]   # the only tags `meta` may pick
+      prompt: Выбери все теги, которые действительно подходят.
 webhook:
   url: ""                # empty => no completion webhook is sent
   token: ""              # optional; sent as "Authorization: Bearer <token>"
@@ -332,7 +340,7 @@ variable is read at runtime:
 | `stt.deepgram.keyterms_enabled` | `true` | Enables Nova-3 keyterm prompting |
 | `stt.deepgram.keyterms_file` | `deepgram-keyterms-example.txt` | Keyterms file, one term per line, max 100. Resolved beside `config.yml`; point it at your own list (e.g. `data/deepgram-keyterms.txt`). A missing default is a warning; a missing path you set explicitly is an error |
 | `tags.allowed` | (empty) | **Deprecated.** Read only while `meta.entities` is absent, wiring the built-in `tags` entity's allow-list. Move the values into that entity's `allowed` list and delete this key |
-| `referrals.allowed` | seeded list (see below) | **Deprecated.** Read only while `meta.entities` is absent, wiring the built-in `referral` entity's allow-list. Move the values into that entity's `allowed` list and delete this key |
+| `referrals.allowed` | (empty) | **Deprecated.** Read only while `meta.entities` is absent, wiring the built-in `referral` entity's allow-list. Move the values into that entity's `allowed` list and delete this key |
 | `meta.entities` | four built-in entities (see [Conversation meta](#conversation-meta-config-driven-entities)) | The `meta` preset's field list: one mapping per entity (`name`, `prompt`, `type`, `multiple`, `allowed`, `label`, `requires`) |
 | `webhook.url` | (empty) | Completion webhook endpoint; must be an absolute `http://` or `https://` URL. Empty disables it; a failure never fails the file |
 | `webhook.token` | (empty) | Optional bearer token sent as `Authorization: Bearer <token>` |
