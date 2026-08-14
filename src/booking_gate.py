@@ -7,26 +7,33 @@ ask about a file without downloading it.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from src import call_booking, drive
-from src.config import Config
+from src.config import Config, NameRule
 from src.meeting_time import parse_meeting_start
+
+logger = logging.getLogger(__name__)
 
 DISABLED = "disabled"
 MATCHED = "matched"
 UNMATCHED = "unmatched"
+
+# ``reason`` for a match a name rule forced, as opposed to one the journal produced.
+NAME_RULE = "name-rule"
 
 
 @dataclass(frozen=True)
 class BookingDecision:
     """What the gate concluded about one recording.
 
-    ``reason`` is only set for ``unmatched`` and exists for the log line: "no-booking"
-    and "no-meeting-time" call for very different fixes.
+    ``reason`` explains the state for the log line: for ``unmatched``, "no-booking"
+    and "no-meeting-time" call for very different fixes; a ``matched`` decision
+    carries it only when a name rule, not the journal, produced the task.
     """
 
     state: str
@@ -38,8 +45,35 @@ class BookingDecision:
         return self.state == MATCHED
 
 
+def _match_name_rule(file_name: str, config: Config) -> NameRule | None:
+    """Return the first name rule the recording matches, or None.
+
+    Order is priority: the config lists the rules the operator wants tried first.
+    """
+    for rule in config.call_booking_name_rules:
+        if rule.pattern.search(file_name):
+            return rule
+    return None
+
+
 def resolve(file_info: dict, folder_id: str, config: Config) -> BookingDecision:
-    """Match one Drive mp4 against the booking journal."""
+    """Match one Drive mp4 against the name rules, then the booking journal."""
+    file_name = file_info.get("name", "")
+
+    # Before the ``enabled`` gate on purpose: a name rule is a routing mechanism in its
+    # own right. With the receiver off, every decision below is ``disabled`` with no
+    # task id, so a deployment that only wants "this recording always goes to task X"
+    # would never get a Planfix comment. The rule also outranks the journal: it is
+    # explicit operator intent, and a demo call must not be re-routed by a real
+    # booking that happened to line up with it.
+    rule = _match_name_rule(file_name, config)
+    if rule is not None:
+        logger.info(
+            "Name rule %r matched %s: forcing processing into task %s",
+            rule.pattern.pattern, file_name, rule.task_id,
+        )
+        return BookingDecision(state=MATCHED, task_id=rule.task_id, reason=NAME_RULE)
+
     if not config.call_booking_enabled:
         return BookingDecision(state=DISABLED)
 
@@ -48,7 +82,6 @@ def resolve(file_info: dict, folder_id: str, config: Config) -> BookingDecision:
     if not email:
         return BookingDecision(state=UNMATCHED, reason="no-folder-email")
 
-    file_name = file_info.get("name", "")
     video_start = parse_meeting_start(file_name)
     if video_start is None:
         return BookingDecision(state=UNMATCHED, reason="no-meeting-time")

@@ -81,7 +81,9 @@ def test_skill_is_a_single_compact_file():
     """The skill collapsed to one SKILL.md with no references/ or examples/."""
     skill_files = list(CANONICAL_SKILL_ROOT.rglob("SKILL.md"))
     assert skill_files == [SKILL_PATH]
-    assert len(SKILL_PATH.read_text(encoding="utf-8").splitlines()) <= 400
+    # A compactness guard, not a budget to spend: raise it only when a real feature
+    # adds operator surface, and pay for the raise by keeping the new section tight.
+    assert len(SKILL_PATH.read_text(encoding="utf-8").splitlines()) <= 420
 
     assert not (CANONICAL_SKILL_ROOT / "references").exists()
     assert not (CANONICAL_SKILL_ROOT / "examples").exists()
@@ -382,3 +384,18 @@ def test_agents_documents_the_call_booking_invariants():
 
     assert "call_booking" in text
     assert "planfix" in text
+
+
+def test_skill_documents_the_name_rules():
+    text = Path("skills/gdstt-cli/SKILL.md").read_text(encoding="utf-8")
+
+    assert "call_booking.name_rules" in text
+    assert "task_id" in text
+
+
+def test_agents_documents_the_name_rule_precedence():
+    """The placement -- before the enabled check and the journal -- is the design."""
+    text = Path("AGENTS.md").read_text(encoding="utf-8")
+
+    assert "call_booking.name_rules" in text
+    assert "name-rule" in text

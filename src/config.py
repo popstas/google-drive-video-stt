@@ -73,6 +73,20 @@ class EmployeeFolder:
 
 
 @dataclass(frozen=True)
+class NameRule:
+    """A file-name override that forces processing and routes it to a fixed task.
+
+    Some recordings must always be transcribed and always land in one known Planfix
+    task -- a demo or test call that no booking will ever cover. The pattern is
+    compiled at load time so a broken regex is a startup error rather than a
+    surprise raised once per file inside the polling loop.
+    """
+
+    pattern: re.Pattern[str]
+    task_id: str
+
+
+@dataclass(frozen=True)
 class Config:
     folders: tuple[EmployeeFolder, ...]
     poll_interval: int
@@ -142,6 +156,9 @@ class Config:
     # When true, the polling loop refuses to transcribe a recording that matched no
     # booked call and marks it on Drive. Manual commands ignore this.
     call_booking_disable_recognition: bool = False
+    # File-name overrides, in priority order: a recording whose Drive name matches one
+    # is always processed and always commented into that rule's task. See NameRule.
+    call_booking_name_rules: tuple[NameRule, ...] = ()
     # Planfix comment target. A blank URL disables the comment; ``planfix_presets``
     # names the preset artifacts concatenated into the comment body, in order.
     planfix_create_comment_url: str = ""
@@ -258,6 +275,49 @@ def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
             )
         )
     return tuple(folders)
+
+
+def _parse_name_rules(raw: object) -> tuple[NameRule, ...]:
+    """Parse ``call_booking.name_rules`` into compiled ``NameRule`` entries.
+
+    Each entry is a mapping with a non-empty ``regex`` and ``task_id``. ``task_id`` is
+    required because the rule's whole point is a comment target: a rule without one
+    would force an expensive transcription and then have nowhere to post it.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(
+            "call_booking.name_rules must be a list of {regex, task_id} mappings, "
+            f"got: {raw!r}"
+        )
+    rules: list[NameRule] = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"call_booking.name_rules[{index}] must be a mapping with "
+                f"regex/task_id, got: {entry!r}"
+            )
+        regex = _yaml_str(entry.get("regex"))
+        if not regex:
+            raise ValueError(
+                f"call_booking.name_rules[{index}] must define a non-empty regex"
+            )
+        task_id = _yaml_str(entry.get("task_id"))
+        if not task_id:
+            raise ValueError(
+                f"call_booking.name_rules[{index}] must define a non-empty task_id; "
+                "the rule exists to route the recording to that task"
+            )
+        try:
+            pattern = re.compile(regex)
+        except re.error as exc:
+            raise ValueError(
+                f"call_booking.name_rules[{index}] has an invalid regex "
+                f"{regex!r}: {exc}"
+            ) from exc
+        rules.append(NameRule(pattern=pattern, task_id=task_id))
+    return tuple(rules)
 
 
 def _validate_call_booking(
@@ -785,6 +845,7 @@ def _config_from_yaml(
     call_booking_disable_recognition = _yaml_bool(
         call_booking.get("disable_recognition"), default=False
     )
+    call_booking_name_rules = _parse_name_rules(call_booking.get("name_rules"))
 
     planfix_create_comment_url = _yaml_str(planfix.get("create_comment_url"))
     planfix_token = _yaml_str(planfix.get("token"))
@@ -981,6 +1042,7 @@ def _config_from_yaml(
         call_booking_token=call_booking_token,
         call_booking_threshold_minutes=call_booking_threshold_minutes,
         call_booking_disable_recognition=call_booking_disable_recognition,
+        call_booking_name_rules=call_booking_name_rules,
         planfix_create_comment_url=planfix_create_comment_url,
         planfix_token=planfix_token,
         planfix_presets=planfix_presets,
@@ -1289,6 +1351,12 @@ def _default_config_dict(
             "authorization_token": "",
             "threshold_minutes": 15,
             "disable_recognition": False,
+            # File-name overrides, tried in order. A recording whose Drive name matches
+            # is always processed -- no booking needed -- and its Planfix comment goes
+            # to that task. Example:
+            #   - regex: "^Sale department B2B"
+            #     task_id: "861300"
+            "name_rules": [],
         },
         # Seeded empty: a blank url disables the Planfix comment.
         "planfix": {

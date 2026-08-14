@@ -1002,6 +1002,32 @@ Writing the mark counts as an edit in Drive, so it moves the recording's
 whose date was moved that way, and the same command without the flag puts each
 one back to its creation time.
 
+### File-name rules
+
+Some recordings must always be transcribed and always land in one known task —
+a demo or test call no booking will ever cover. `call_booking.name_rules` routes
+those by name:
+
+```yaml
+call_booking:
+  name_rules:
+    - regex: "^Sale department B2B"
+      task_id: "861300"
+```
+
+Each rule needs both keys. `regex` is a Python regular expression matched with
+`re.search` against the recording's Drive name (extension included), so anchor it
+with `^` for a prefix; matching is case-sensitive unless the pattern opts out with
+`(?i)`. An invalid pattern is a startup error, not a per-file surprise.
+
+Rules are tried in order and the first match wins. A matched rule outranks
+everything else: the recording is processed even with no booking (and even with
+`disable_recognition: true`), and its Planfix comment goes to that rule's
+`task_id` even if a real booking happened to line up with it. The rules also work
+with `enabled: false` — they are a routing mechanism of their own, not an add-on
+to the receiver — and apply to the manual commands (`process`, `latest`) as well
+as the polling loop.
+
 ## Project layout
 
 ```
