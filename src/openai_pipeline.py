@@ -23,7 +23,7 @@ __all__ = [
     "get_pipeline",
 ]
 
-DEFAULT_MODEL = "gpt-5.4-mini"
+DEFAULT_MODEL = "gpt-5.6-luna"
 RESPONSES_ENDPOINT = "/v1/responses"
 _USAGE_FIELDS = {
     "input_tokens": ("input_tokens",),

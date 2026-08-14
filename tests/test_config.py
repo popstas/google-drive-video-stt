@@ -113,7 +113,7 @@ def test_drive_mp3_artifact_can_be_enabled_for_deepgram_m4a(tmp_path):
 
 def test_openai_pipeline_defaults(tmp_path):
     cfg = _load_config(tmp_path, {"stt": {"provider": "disabled"}})
-    assert cfg.openai_model == "gpt-5.4-mini"
+    assert cfg.openai_model == "gpt-5.6-luna"
     assert cfg.openai_keypoints is False
     assert cfg.openai_batch is False
 

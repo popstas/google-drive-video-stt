@@ -82,7 +82,7 @@ def test_preset_dag_end_to_end_writes_each_artifact(tmp_path, monkeypatch):
         },
         "openai": {
             "api_key": openai_key,
-            "model": os.environ.get("OPENAI_MODEL", "gpt-5.4-mini"),
+            "model": os.environ.get("OPENAI_MODEL", "gpt-5.6-luna"),
             "max_parallel": 4,
         },
         "tags": {"allowed": _E2E_ALLOWED_TAGS},

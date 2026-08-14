@@ -100,7 +100,7 @@ class Config:
     # disabled without invalidating the config.
     stt_presets: tuple[str, ...] = ("keypoints",)
     openai_keypoints: bool = False
-    openai_model: str = "gpt-5.4-mini"
+    openai_model: str = "gpt-5.6-luna"
     # Global default reasoning effort for every preset (``low``/``medium``/``high``).
     # Empty is the default and means "omit the parameter", so the model applies its
     # own effort and a config written before this key keeps behaving identically.
@@ -839,7 +839,7 @@ def _config_from_yaml(
     stt_postprocess = _yaml_bool(stt.get("postprocess"), default=True)
 
     openai_api_key = _yaml_str(openai.get("api_key"))
-    openai_model = _yaml_str(openai.get("model"), "gpt-5.4-mini") or "gpt-5.4-mini"
+    openai_model = _yaml_str(openai.get("model"), "gpt-5.6-luna") or "gpt-5.6-luna"
     openai_reasoning_effort = (
         parse_reasoning_effort(openai.get("reasoning_effort"), source="openai.") or ""
     )
@@ -1151,7 +1151,12 @@ def _default_config_dict(
         },
         "openai": {
             "api_key": "",
-            "model": "gpt-5.4-mini",
+            "model": "gpt-5.6-luna",
+            # low, not the model default: at higher efforts the extraction quality
+            # of the `meta` fields did not measurably improve, while latency and
+            # reasoning tokens grew several-fold. See
+            # docs/reviews/2026-08-14-luna-vs-mini-reasoning-effort.md.
+            "reasoning_effort": "low",
             "batch": True,
             "max_parallel": 4,
         },
