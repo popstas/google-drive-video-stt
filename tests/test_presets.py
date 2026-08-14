@@ -342,3 +342,30 @@ def test_validate_dag_accepts_diamond():
         "join": _named("join", ["left", "right"]),
     }
     validate_dag(presets)  # diamond is a DAG, not a cycle
+
+
+def test_preset_reasoning_effort_is_parsed_and_overrides_builtin():
+    merged = merge_presets(
+        BUILTIN_PRESETS,
+        {
+            "keypoints": {"reasoning_effort": "High"},
+            "extra": {"instructions": "x", "reasoning_effort": "low"},
+        },
+    )
+
+    assert merged["keypoints"].reasoning_effort == "high"
+    assert merged["extra"].reasoning_effort == "low"
+
+
+def test_preset_reasoning_effort_defaults_to_none():
+    merged = merge_presets(BUILTIN_PRESETS, {"extra": {"instructions": "x"}})
+
+    assert merged["extra"].reasoning_effort is None
+
+
+def test_preset_reasoning_effort_rejects_unknown_value():
+    with pytest.raises(ValueError, match="reasoning_effort must be one of"):
+        merge_presets(
+            BUILTIN_PRESETS,
+            {"extra": {"instructions": "x", "reasoning_effort": "turbo"}},
+        )

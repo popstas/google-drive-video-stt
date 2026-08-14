@@ -253,6 +253,14 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   map). The file must
   exist — create it with `gdstt config init` (no dotenv, no migration, no
   auto-generation). Resolve a one-shot non-default file with `gdstt --config PATH ...`.
+- `openai.reasoning_effort` (`low`/`medium`/`high`) is the global reasoning effort;
+  a preset's own `reasoning_effort` overrides it, exactly like `model`
+  (`preset.reasoning_effort or config.openai_reasoning_effort`). Unset is the
+  default and a fourth state, not a synonym for `medium`: the request omits the
+  `reasoning` field entirely, so a config written before this key produces
+  byte-identical API calls. Both the global and the per-preset value go through
+  `presets.parse_reasoning_effort` — the vocabulary lives in the leaf module
+  because `config` imports `presets`, never the other way round.
 - Enabled presets run after the transcript is produced and require `openai.api_key`;
   each writes a `<base><artifact_suffix>` document tagged `artifact_type=<name>`.
   Having no enabled presets replaces the old `openai.keypoints=false` gate.

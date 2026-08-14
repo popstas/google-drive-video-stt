@@ -184,6 +184,7 @@ class OpenAIPipeline:
         use_batch: bool = False,
         poll_interval: float = 5.0,
         batch_timeout: float = 86400.0,
+        reasoning_effort: str = "",
     ) -> None:
         if not api_key:
             raise STTError(
@@ -195,6 +196,7 @@ class OpenAIPipeline:
         self._use_batch = use_batch
         self._poll_interval = poll_interval
         self._batch_timeout = batch_timeout
+        self._reasoning_effort = reasoning_effort
         self._client = None
         self.last_usage: dict[str, int] = {}
 
@@ -273,6 +275,17 @@ class OpenAIPipeline:
         text, _ = self.run(INSTRUCTIONS, prompt)
         return text
 
+    def _reasoning_params(self) -> dict:
+        """The ``reasoning`` request field, or nothing while the effort is unset.
+
+        Kept conditional on purpose: sending ``reasoning`` with a null/empty effort
+        is not the same as omitting it, and an unset config must keep producing the
+        exact request shape this pipeline sent before the option existed.
+        """
+        if not self._reasoning_effort:
+            return {}
+        return {"reasoning": {"effort": self._reasoning_effort}}
+
     def _generate_sync(self, instructions: str, prompt: str) -> str:
         client = self._get_client()
         try:
@@ -280,6 +293,7 @@ class OpenAIPipeline:
                 model=self._model,
                 instructions=instructions,
                 input=prompt,
+                **self._reasoning_params(),
             )
         except Exception as exc:
             raise STTError(f"OpenAI keypoints generation failed: {exc}") from exc
@@ -296,6 +310,7 @@ class OpenAIPipeline:
                 "model": self._model,
                 "instructions": instructions,
                 "input": prompt,
+                **self._reasoning_params(),
             },
         }
         payload = (json.dumps(request) + "\n").encode("utf-8")
@@ -346,6 +361,7 @@ def get_pipeline(config: Config) -> OpenAIPipeline:
         model=config.openai_model,
         proxy_url=config.proxy_url,
         use_batch=config.openai_batch,
+        reasoning_effort=config.openai_reasoning_effort,
     )
 
 
