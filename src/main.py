@@ -822,6 +822,63 @@ def _planfix_meta_lines(
     return lines
 
 
+_MARKDOWN_LINK_RE = re.compile(r"\[(?P<text>[^\]]+)\]\((?P<url>[^)\s]+)\)")
+_MARKDOWN_BOLD_RE = re.compile(r"\*\*(?P<text>.+?)\*\*")
+
+
+def _summary_sections(
+    artifacts: dict[str, str], preset_names: tuple[str, ...]
+) -> list[str]:
+    """The preset artifacts that carry text, in configured order.
+
+    Shared by both delivery channels so a call reads the same in Planfix and in
+    Telegram; only the rendering below them differs.
+    """
+    return [
+        artifacts[name].strip()
+        for name in preset_names
+        if artifacts.get(name, "").strip()
+    ]
+
+
+def _to_plain_text(markdown: str) -> str:
+    """Flatten the Markdown a preset emits into text Telegram can show as-is.
+
+    Telegram's parse modes are all-or-nothing: one unbalanced ``*`` or ``<`` anywhere
+    in a transcript-derived document fails the whole ``sendMessage`` call, so the
+    summary goes out unparsed and the markup has to come off here instead. Headings
+    keep their title, links become "text: url", bold loses its asterisks; list dashes
+    stay, because they read fine as plain text.
+    """
+    text = _MARKDOWN_LINK_RE.sub(
+        lambda m: f"{m.group('text')}: {m.group('url')}", markdown
+    )
+    text = _MARKDOWN_HEADING_RE.sub(lambda m: m.group("title"), text)
+    return _MARKDOWN_BOLD_RE.sub(lambda m: m.group("text"), text)
+
+
+def _telegram_summary(
+    artifacts: dict[str, str],
+    preset_names: tuple[str, ...],
+    meta_document: dict[str, object] | None = None,
+    meta_fields: tuple[str, ...] = (),
+    meta_entities: tuple[meta_entity.MetaEntity, ...] = (),
+) -> str:
+    """Render the same header + preset sections as the Planfix comment, as plain text.
+
+    Returns an empty string when no preset produced anything, matching
+    ``_planfix_description``: a header alone (a duration and a link) is not a summary
+    worth posting into someone's chat.
+    """
+    sections = _summary_sections(artifacts, preset_names)
+    if not sections:
+        return ""
+    header = "\n".join(_planfix_meta_lines(meta_document, meta_fields, meta_entities))
+    blocks = [header] if header else []
+    blocks.extend(sections)
+    return _to_plain_text("\n\n".join(blocks)).strip()
+
+
 def _planfix_description(
     artifacts: dict[str, str],
     preset_names: tuple[str, ...],
@@ -848,9 +905,8 @@ def _planfix_description(
     the body stays a single line, since Planfix rewrites every newline as ``<br>``).
     """
     sections = [
-        _mark_planfix_sections(artifacts[name].strip())
-        for name in preset_names
-        if artifacts.get(name, "").strip()
+        _mark_planfix_sections(section)
+        for section in _summary_sections(artifacts, preset_names)
     ]
     # The header alone is never enough: a document carrying only a duration and a
     # link but no preset section is not something worth commenting, and
@@ -938,6 +994,92 @@ def _send_planfix_comment(
         telegram_bot_token=config.telegram_bot_token,
         telegram_chat_id=config.telegram_chat_id,
         proxy_url=config.proxy_url,
+    )
+
+
+def folder_telegram_chat(config: Config, folder_id: str) -> str:
+    """The chat a folder's summaries go to, or "" when it has none.
+
+    Also the "recognize unconditionally" predicate: a folder with a chat is watched for
+    its own sake, so ``run_once`` must not skip its recordings for want of a booking.
+    """
+    folder = config.folder_by_id(folder_id)
+    return folder.telegram.strip() if folder else ""
+
+
+def _send_telegram_summary(
+    service: Any,
+    item: dict,
+    file_id: str,
+    folder_id: str,
+    config: Config,
+    artifacts: dict[str, str],
+    booking_decision: booking_gate.BookingDecision,
+    meta_document: dict[str, object] | None = None,
+) -> None:
+    """Post the meeting summary into the folder's Telegram chat, exactly once.
+
+    Independent of Planfix by default -- a folder that asked for a chat gets every
+    call in it, matched or not. ``planfix.ignore_telegram_when_planfix`` turns that
+    into a fallback: a call the CRM already recorded stays out of the chat.
+
+    Like the Planfix marker, ``telegram_sent_chat_id`` is written only after a
+    successful send, so a later cycle backfilling a newly configured preset does not
+    re-post the whole summary.
+    """
+    chat_id = folder_telegram_chat(config, folder_id)
+    if not chat_id:
+        return
+    if (
+        config.planfix_ignore_telegram_when_planfix
+        and booking_decision.is_matched
+        and config.planfix_create_comment_url
+    ):
+        logger.debug(
+            "Planfix covers %s and ignore_telegram_when_planfix is set; "
+            "skipping the Telegram summary",
+            file_id,
+        )
+        return
+    if item.get("telegram_sent_chat_id"):
+        logger.debug("Telegram summary already sent for %s, skipping", file_id)
+        return
+
+    text = _telegram_summary(
+        artifacts,
+        config.planfix_presets,
+        meta_document,
+        config.planfix_meta_fields,
+        meta_entities=config.meta_entities,
+    )
+    if not text:
+        logger.warning(
+            "No configured preset produced text for %s; nothing to send to Telegram",
+            file_id,
+        )
+        return
+
+    sent = notify.send_message(
+        text,
+        bot_token=config.telegram_bot_token,
+        chat_id=chat_id,
+        proxy_url=config.proxy_url,
+    )
+    if sent:
+        drive.set_file_app_properties(
+            service,
+            file_id,
+            {drive.TELEGRAM_SENT_CHAT_ID_PROPERTY: chat_id},
+        )
+        return
+
+    # No ``notify_error`` here: the error channel is the same Telegram API that just
+    # failed, so the escalation would most likely be lost too. No marker is written,
+    # so `gdstt reprocess` can resend it.
+    logger.warning(
+        "Failed to send the Telegram summary for %s to %s; rerun "
+        "`gdstt reprocess %s`",
+        item.get("file", {}).get("name"), chat_id, file_id,
     )
 
 
@@ -1185,6 +1327,14 @@ def process_item(
             # A file that transcribed and uploaded must count as processed even if the
             # CRM hand-off misbehaves.
             logger.warning("Planfix comment failed: %s", type(exc).__name__)
+
+        try:
+            _send_telegram_summary(
+                service, item, file_id, folder_id, config, artifacts,
+                booking_decision, meta_document=meta_document,
+            )
+        except Exception as exc:
+            logger.warning("Telegram summary failed: %s", type(exc).__name__)
 
     return _ProcessTelemetry(
         provider=provider,
@@ -1501,6 +1651,10 @@ def run_once(
             if (
                 decision.state == booking_gate.UNMATCHED
                 and config.call_booking_disable_recognition
+                # A folder with a Telegram chat is recognized unconditionally: the
+                # chat is the destination, so "no booking" is not a reason to skip --
+                # and marking the file unmatched would park it for good.
+                and not folder_telegram_chat(config, folder_id)
             ):
                 file_name = item.get("file", {}).get("name")
                 if booking_server.is_running():

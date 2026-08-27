@@ -239,6 +239,8 @@ folders:                 # one entry per employee folder
   - folder_id: abc
     name: Олег Иванов    # optional; sent in the completion webhook
     email: oleg@example.com   # optional
+    telegram: "-1001234567890"  # optional; chat for the call summary,
+                                # and "recognize even without a booking"
   - folder_id: def
 poll_interval: 600
 bitrate: 96k
@@ -294,6 +296,8 @@ google: {}               # inline-first auth; empty => data_dir fallback
 planfix:
   meta_fields: [subject, tags, referral, referral_note, case_deadline, deadlines, target_filing, duration, video_url]   # header fields on the Planfix comment
   task_url: ""           # e.g. https://<account>.planfix.com/task/<task-id>
+  ignore_telegram_when_planfix: false   # true => a call that reached Planfix is not
+                                        # also posted to the folder's telegram chat
 presets:
   transcript-cleanup:
     prompt_file: prompts/transcript-cleanup.md   # packaged asset, copied beside the config
@@ -312,7 +316,7 @@ variable is read at runtime:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `folders` | (required) | Google Drive folders to monitor, one entry per employee: `{folder_id, name, email}`. `name`/`email` are optional and default to empty; they identify the employee in the completion webhook |
+| `folders` | (required) | Google Drive folders to monitor, one entry per employee: `{folder_id, name, email, telegram}`. `name`/`email` are optional and default to empty; they identify the employee in the completion webhook. `telegram` is a chat id the call summary is posted to — see [Telegram summaries](#telegram-summaries) |
 | `poll_interval` | `600` | Seconds between poll cycles |
 | `bitrate` | `96k` | MP3 audio bitrate passed to ffmpeg |
 | `stt.drive_mp3_artifact` | auto | Upload an MP3 artifact to Drive. Defaults to `false` for `stt.deepgram.audio_source=m4a_copy`; `true` otherwise |
@@ -1027,6 +1031,45 @@ everything else: the recording is processed even with no booking (and even with
 with `enabled: false` — they are a routing mechanism of their own, not an add-on
 to the receiver — and apply to the manual commands (`process`, `latest`) as well
 as the polling loop.
+
+### Telegram summaries
+
+A folder can post every call's summary into a Telegram chat instead of (or alongside)
+Planfix. Give the folder a `telegram` chat id and set the bot token once:
+
+```yaml
+folders:
+  - folder_id: abc
+    name: Sales
+    telegram: "-1001234567890"   # numeric chat id, or @channelname
+notifications:
+  telegram:
+    bot_token: <bot token>       # the same bot the error notifications use
+```
+
+The bot must be a member of the chat (an admin, for a channel). A folder with a
+`telegram` value and no `bot_token` is a startup error: nothing could be delivered.
+
+Two things follow from setting it:
+
+- **The folder is recognized unconditionally.** Its recordings are transcribed even
+  with `call_booking.disable_recognition: true` and no matching booking, and they are
+  never marked `booking_match=none`. Recordings marked before the chat was configured
+  stay skipped — revive them with `gdstt bookings rematch <file-id>` if you want the
+  existing backlog delivered.
+- **The summary goes out on top of the Planfix comment, not instead of it.** The two
+  are independent channels. Set `planfix.ignore_telegram_when_planfix: true` to make
+  the chat a fallback instead: a call that reached a Planfix task then stays out of it.
+
+The message carries the same header and preset sections as the Planfix comment
+(`planfix.meta_fields` and `planfix.presets`), rendered as **plain text** — Telegram's
+parse modes reject much of what a transcript-derived document contains, and a rejected
+message is a lost summary. Anything longer than one Telegram message is split across
+several, never truncated.
+
+Delivery is recorded on the recording's Drive file as `telegram_sent_chat_id`, so a
+later cycle that backfills a newly configured preset does not re-post the summary. A
+failed send writes no marker — `gdstt reprocess <file-id>` resends it.
 
 ## Project layout
 
