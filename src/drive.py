@@ -22,6 +22,7 @@ ARTIFACT_TYPE_PROPERTY = "artifact_type"
 SPEAKER_NAMES_PROPERTY = "speaker_names"
 BOOKING_MATCH_PROPERTY = "booking_match"
 PLANFIX_COMMENT_TASK_ID_PROPERTY = "planfix_comment_task_id"
+TELEGRAM_SENT_CHAT_ID_PROPERTY = "telegram_sent_chat_id"
 # The single value ``booking_match`` ever takes: this recording matched no booked
 # call, so the polling loop must leave it alone.
 BOOKING_MATCH_NONE = "none"
@@ -259,6 +260,9 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
             "booking_match": mp4_props.get(BOOKING_MATCH_PROPERTY, ""),
             "planfix_comment_task_id": mp4_props.get(
                 PLANFIX_COMMENT_TASK_ID_PROPERTY, ""
+            ),
+            "telegram_sent_chat_id": mp4_props.get(
+                TELEGRAM_SENT_CHAT_ID_PROPERTY, ""
             ),
         })
     return items

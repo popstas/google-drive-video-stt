@@ -652,6 +652,7 @@ def test_list_folder_state_surfaces_booking_properties():
             "appProperties": {
                 "booking_match": "none",
                 "planfix_comment_task_id": "851030",
+                "telegram_sent_chat_id": "-1001234567890",
             },
         }
     ]
@@ -661,6 +662,7 @@ def test_list_folder_state_surfaces_booking_properties():
 
     assert items[0]["booking_match"] == "none"
     assert items[0]["planfix_comment_task_id"] == "851030"
+    assert items[0]["telegram_sent_chat_id"] == "-1001234567890"
 
 
 def test_list_folder_state_defaults_booking_properties_to_blank():
@@ -671,6 +673,7 @@ def test_list_folder_state_defaults_booking_properties_to_blank():
 
     assert items[0]["booking_match"] == ""
     assert items[0]["planfix_comment_task_id"] == ""
+    assert items[0]["telegram_sent_chat_id"] == ""
 
 
 def test_list_mp4_timestamps_requests_the_timestamp_fields_and_pages():

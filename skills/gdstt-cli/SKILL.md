@@ -2,8 +2,8 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.11.0
-last_updated: 2026-08-14
+version: 2.12.0
+last_updated: 2026-08-27
 ---
 
 # gdstt CLI
@@ -401,9 +401,14 @@ call_booking:
 ## Ключевые заметки
 
 - Deepgram - единственный STT-провайдер; `stt.provider=""` оставляет режим только-MP3.
-- Папки - `folders: [{folder_id, name, email}]`, по записи на сотрудника
-  (`name`/`email` необязательны). Старый `folder_ids` **удалён**: конфиг с этим
+- Папки - `folders: [{folder_id, name, email, telegram}]`, по записи на сотрудника
+  (всё кроме `folder_id` необязательно). Старый `folder_ids` **удалён**: конфиг с этим
   ключом падает на загрузке с подсказкой про `folders`; чинится только в `config.yml`.
+- `folders[].telegram` - chat id для саммари звонка (то же, что в комментарии
+  Planfix, но plain text; бот - `notifications.telegram.bot_token`). Такая папка
+  распознаётся всегда: booking не нужен, `booking_match=none` не пишется; повтор
+  отсекает appProperty `telegram_sent_chat_id`. `planfix.ignore_telegram_when_planfix:
+  true` делает чат запасным каналом.
 - `webhook.url` (+ опциональный `webhook.token` -> `Authorization: Bearer`) шлёт POST
   раз на файл и только при успехе: `{file, employee, transcript, artifacts}`, где
   `artifacts` - тексты пресетов по именам, а `meta` разобран в словарь «одна сущность - один ключ» (`config.meta_entities`).

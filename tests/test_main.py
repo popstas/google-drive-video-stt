@@ -2908,7 +2908,13 @@ def gate_config(tmp_path):
     )
 
 
-def gate_item(file_id="v1", *, booking_match="", planfix_comment_task_id=""):
+def gate_item(
+    file_id="v1",
+    *,
+    booking_match="",
+    planfix_comment_task_id="",
+    telegram_sent_chat_id="",
+):
     """One `list_folder_state` item for an mp4 that still needs a transcript."""
     return {
         "file": {"id": file_id, "name": f"{file_id}.mp4", "mimeType": "video/mp4"},
@@ -2920,6 +2926,7 @@ def gate_item(file_id="v1", *, booking_match="", planfix_comment_task_id=""):
         "artifact_ids": {},
         "booking_match": booking_match,
         "planfix_comment_task_id": planfix_comment_task_id,
+        "telegram_sent_chat_id": telegram_sent_chat_id,
     }
 
 
@@ -3991,3 +3998,210 @@ def test_apply_local_output_state_stt_and_meta_yml_do_not_block_a_processed_reco
 
     assert items[0]["has_txt"] is True
     assert main._pending_items(items, cfg) == []
+
+
+# --- Telegram summary -----------------------------------------------------------
+
+
+TELEGRAM_CHAT_ID = "-1001234567890"
+
+
+@pytest.fixture
+def telegram_config(gate_config):
+    """A gate config whose folder delivers summaries to a Telegram chat."""
+    return replace(
+        gate_config,
+        folders=(
+            EmployeeFolder(
+                folder_id=GATE_FOLDER_ID,
+                name="Kate",
+                email="kate@example.com",
+                telegram=TELEGRAM_CHAT_ID,
+            ),
+        ),
+        telegram_bot_token="bot-token",
+        planfix_presets=("keypoints",),
+    )
+
+
+def test_telegram_summary_strips_markdown_to_plain_text():
+    """Telegram is sent without a parse mode, so `##`/`**`/`[](...)` would show up
+    literally. The content must be the same as the Planfix comment's -- only the
+    markup comes off."""
+    text = main._telegram_summary(
+        {"keypoints": "## Задачи\n\n- Собрать документы"},
+        ("keypoints",),
+        {
+            "subject": "Виза O-1",
+            "duration": "00:31:42",
+            "video_url": "https://drive.google.com/file/d/X/view",
+            "source_name": "rec.mp4",
+        },
+        ("subject", "duration", "video_url"),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "**" not in text
+    assert "##" not in text
+    assert "](" not in text
+    assert "Задачи" in text
+    assert "- Собрать документы" in text
+    assert "rec.mp4: https://drive.google.com/file/d/X/view" in text
+    # Header before the preset sections, same order as the CRM comment.
+    assert text.index("Виза O-1") < text.index("Задачи")
+
+
+def test_telegram_summary_is_blank_when_only_the_header_would_render():
+    """Same guard as `_planfix_description`: a duration and a link are not a summary,
+    and sending one would write the `telegram_sent_chat_id` marker and permanently
+    block the real one."""
+    assert main._telegram_summary(
+        {},
+        ("keypoints",),
+        {"duration": "00:31:42"},
+        ("duration",),
+        meta_entities=meta_entity.default_entities(),
+    ) == ""
+
+
+def test_telegram_summary_is_sent_and_marked(monkeypatch, telegram_config):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    marked = MagicMock()
+    monkeypatch.setattr(main.drive, "set_file_app_properties", marked)
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, telegram_config,
+        {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+    )
+
+    send.assert_called_once()
+    assert send.call_args.kwargs["chat_id"] == TELEGRAM_CHAT_ID
+    assert send.call_args.kwargs["bot_token"] == "bot-token"
+    assert send.call_args[0][0] == "Задачи: раз"
+    marked.assert_called_once()
+    assert marked.call_args[0][2] == {"telegram_sent_chat_id": TELEGRAM_CHAT_ID}
+
+
+def test_telegram_summary_is_not_sent_for_a_folder_without_a_chat(
+    monkeypatch, gate_config
+):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, gate_config,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_not_called()
+
+
+def test_telegram_summary_is_not_sent_twice(monkeypatch, telegram_config):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+
+    main._send_telegram_summary(
+        MagicMock(),
+        gate_item("v1", telegram_sent_chat_id=TELEGRAM_CHAT_ID),
+        "v1", GATE_FOLDER_ID, telegram_config,
+        {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+    )
+
+    send.assert_not_called()
+
+
+def test_telegram_summary_also_goes_out_for_a_matched_recording(
+    monkeypatch, telegram_config
+):
+    """Default: the chat is an independent channel, so a call that reached Planfix
+    reaches the chat too."""
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    monkeypatch.setattr(main.drive, "set_file_app_properties", MagicMock())
+    configured = replace(
+        telegram_config,
+        planfix_create_comment_url="https://crm.example.com/planfix_create_comment",
+    )
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, configured,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_called_once()
+
+
+def test_ignore_telegram_when_planfix_keeps_a_matched_recording_out_of_the_chat(
+    monkeypatch, telegram_config
+):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    configured = replace(
+        telegram_config,
+        planfix_create_comment_url="https://crm.example.com/planfix_create_comment",
+        planfix_ignore_telegram_when_planfix=True,
+    )
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, configured,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_not_called()
+
+
+def test_ignore_telegram_when_planfix_still_sends_an_unmatched_recording(
+    monkeypatch, telegram_config
+):
+    """The option is a de-duplication rule, not an off switch: a call Planfix never
+    saw is exactly the one the chat exists for."""
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    monkeypatch.setattr(main.drive, "set_file_app_properties", MagicMock())
+    configured = replace(
+        telegram_config,
+        planfix_create_comment_url="https://crm.example.com/planfix_create_comment",
+        planfix_ignore_telegram_when_planfix=True,
+    )
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, configured,
+        {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+    )
+
+    send.assert_called_once()
+
+
+def test_a_failed_telegram_send_leaves_no_marker(monkeypatch, telegram_config):
+    """No marker means `gdstt reprocess` can resend it."""
+    monkeypatch.setattr(main.notify, "send_message", MagicMock(return_value=False))
+    marked = MagicMock()
+    monkeypatch.setattr(main.drive, "set_file_app_properties", marked)
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, telegram_config,
+        {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+    )
+
+    marked.assert_not_called()
+
+
+def test_run_once_processes_an_unmatched_recording_in_a_telegram_folder(
+    monkeypatch, telegram_config
+):
+    """`telegram` on a folder means "recognize always". Skipping here -- and worse,
+    writing the permanent `booking_match=none` mark -- would park every recording in a
+    folder that has no bookings by design."""
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_decision(monkeypatch, UNMATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    marked = MagicMock()
+    monkeypatch.setattr(main.booking_gate, "mark_unmatched", marked)
+    process_item = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), telegram_config)
+
+    process_item.assert_called_once()
+    marked.assert_not_called()

@@ -198,7 +198,8 @@ the meeting start time is parsed out of the Drive file name (not `createdTime`,
 which is the *upload* time — start plus the call's length), matched against the
 folder employee's email within `call_booking.threshold_minutes`, nearest booking
 wins. On the success path `process_item` posts the `planfix.presets` artifacts, each
-under its own heading, into the matched task via `planfix.create_comment_url`.
+under its own heading, into the matched task via `planfix.create_comment_url`, and
+posts the same summary into the folder's `telegram` chat when it has one.
 
 **Error handling is tiered**: `RefreshError`/`AuthError` propagate up to `main()` and
 cause `SystemExit(1)` so the container restarts (after re-running `src.auth`); all other
@@ -264,8 +265,8 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
 - Enabled presets run after the transcript is produced and require `openai.api_key`;
   each writes a `<base><artifact_suffix>` document tagged `artifact_type=<name>`.
   Having no enabled presets replaces the old `openai.keypoints=false` gate.
-- Drive folders are configured as `folders: [{folder_id, name, email}]` — one entry
-  per employee, `name`/`email` optional. The old `folder_ids: [str]` is **removed**:
+- Drive folders are configured as `folders: [{folder_id, name, email, telegram}]` —
+  one entry per employee, every field but `folder_id` optional. The old `folder_ids: [str]` is **removed**:
   a config still carrying that key raises a setup `ValueError` quoting the `folders`
   shape (the presence of the key is the trigger, so an empty `folder_ids: []` fails
   too). Iteration sites read `folder_id` off `config.folders` directly; there is no
@@ -331,8 +332,26 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   success path again whenever a later cycle backfills a newly configured preset, and
   without the marker that pass would post a duplicate comment.
 - `load_config` rejects `call_booking.enabled` without an `authorization_token`, and
-  `disable_recognition` while any `folders` entry lacks an `email` — that folder
-  could never match a booking, so it would never be transcribed again.
+  `disable_recognition` while any `folders` entry lacks both an `email` and a
+  `telegram` chat — that folder could never match a booking, so it would never be
+  transcribed again. A folder with a chat is exempt: it is recognized regardless.
+- `folders[].telegram` is a chat id, and setting it does two things. `run_once` never
+  skips (or marks) that folder's unmatched recordings — the chat, not a booking, is
+  what the folder is watched for — and `_send_telegram_summary` posts the same header
+  + `planfix.presets` sections the CRM comment carries, as **plain text**
+  (`_to_plain_text`), split into Telegram-sized chunks by `notify.split_message`.
+  Plain text is deliberate: a parse mode fails the whole `sendMessage` on one
+  unbalanced `*` or `<` in transcript-derived text, and a rejected message is a lost
+  summary. Both channels render from `_summary_sections`, so they never drift.
+  Idempotency is the `telegram_sent_chat_id` appProperty, written only after every
+  chunk was accepted. A failed send is logged, never escalated through
+  `notify.notify_error` — that is the same API that just failed.
+- `planfix.ignore_telegram_when_planfix` (default false) turns the chat into a
+  fallback: a `matched` recording with `planfix.create_comment_url` configured stays
+  out of it. Off by default because the two are independent channels.
+- `load_config` rejects a `folders[].telegram` while `notifications.telegram.bot_token`
+  is empty: `notify.send_message` returns quietly with no token, so the recordings
+  would be transcribed at full cost and the chat would stay empty.
 - `bookings list` / `bookings rematch` / `bookings restore-dates` use
   `load_config(validate_providers=False)`; `rematch` and `restore-dates` touch only
   Drive metadata and spend nothing.
