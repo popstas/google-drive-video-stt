@@ -113,15 +113,42 @@ sibling `.txt`) — so a file already having an MP3 can still get transcribed on
 cycle. Idempotency comes from `drive.list_folder_state` reporting sibling presence by
 basename. All work happens in a per-item `TemporaryDirectory`.
 
+**Finding work** (`_discover` in `src/main.py`): a cycle either reads Drive's changes
+feed from a saved cursor (`_discover_by_changes`) or sweeps every configured folder and
+its subfolders (`_discover_by_walk`). Both return the same `(configured_folder_id,
+items)` pairs, so everything downstream is unaware of which ran. The feed only says
+*where* to look; the folder listing still decides *what* needs doing, which is what
+keeps siblings, `source_video_id`, booking markers and preset backfill working
+unchanged.
+
+The cursor (`src/change_cursor.py`, `<data-dir>/changes_cursor.txt`) is the service's
+only durable state and is deliberately disposable: absent, unreadable, deleted, or
+rejected by Drive with 404/410 all lead to the same branch — sweep, take a fresh
+cursor, continue. Three orderings are load-bearing and each has a test: the cursor is
+taken *before* a sweep (so a file landing mid-sweep is not stepped over), saved *after*
+the work (so a failed cycle re-reads the same changes), and never moved by `--dry-run`.
+
+**Meeting subfolders** (`drive.list_folder_tree_state`): Google Meet files each meeting
+into its own subfolder, so a configured folder is read together with its direct
+subfolders — a union, not a mode, which is why a flat folder still behaves exactly as
+before. Each item carries `container_id`, the folder the video actually lives in.
+`folder_id` and `container_id` mean different things and must not be swapped: the
+configured folder identifies the employee (every `config.folder_by_id`, and the
+completion webhook's `file.folder_id`), the container is where artifacts are written.
+`drive.find_configured_ancestor` translates a container back to its configured folder
+for entry points that start from a file — `process_target` and the changes feed — and
+returns `None` for folders nobody configured, which is a skip rather than an error.
+
 `process_target` (`src/main.py`) is the on-demand entry the CLI's `process` command uses:
 it auto-detects file vs folder by `mimeType` (override with `is_folder`), then runs the same
 `process_item` over a single file or every pending file in a folder. The `gdstt` CLI
 (`src/cli.py`) wraps the same `load_config()`/Drive/STT layers behind argparse subcommands
 without duplicating business logic.
 
-**`latest` command** (`src/cli.py` + `drive.find_newest_mp4`): resolves a folder
-(arg or first configured `folders` entry), finds the newest mp4 by `createdTime desc`, and
-dispatches it through `process_target` (honoring `--dry-run`).
+**`latest` command** (`src/cli.py` + `drive.find_newest_mp4_in_tree`): resolves a folder
+(arg or first configured `folders` entry), finds the newest mp4 across it and its
+subfolders by `createdTime desc`, and dispatches it through `process_target` (honoring
+`--dry-run`).
 
 **Post-processing** runs in `process_item` after `transcribe_file` and before the
 artifact is written, gated by `stt_postprocess` (local path, `src/postprocess.py`):
@@ -233,7 +260,13 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   `deepgram`; set `stt.provider: disabled` (or empty) to skip transcription and only
   manage MP3 artifacts.
 - Bootstrap and Drive-only commands use `load_config(validate_providers=False)`:
-  `auth`, `doctor`, `list` / `status`, and `speakers set`.
+  `auth`, `doctor`, `list` / `status`, `changes`, `cursor`, and `speakers set`.
+- `gdstt changes` is read-only and must stay that way: consuming the feed there would
+  leave the next cycle with nothing to find. `gdstt cursor reset` is the supported way
+  to force a full sweep, and `run-once --mode walk` sweeps without moving the cursor.
+- A video with no `videoMediaMetadata` is left for a later cycle, but only within
+  `_MEDIA_SETTLING_GRACE`. The bound is the point: a video that never gets metadata
+  must still be transcribed rather than waited on forever.
 - Processing commands validate provider configuration and can spend credits:
   `run`, `run-once`, `process`, `reprocess`, `latest`, and `transcribe`.
 - `relabel` is a local file transform that touches no Drive and spends nothing.

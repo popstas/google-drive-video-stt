@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import logging
 import json
@@ -1804,13 +1804,35 @@ def _discover_by_changes(service: Any, config: Config, cursor: str) -> _Discover
     return _Discovery(listings, new_cursor, retry_state.retry_count, folder_errors)
 
 
-def _discover(service: Any, config: Config) -> _Discovery:
-    """Take the cheap path when a cursor says where to resume, the full one otherwise."""
+def _discover(service: Any, config: Config, *, mode: str = "auto") -> _Discovery:
+    """Take the cheap path when a cursor says where to resume, the full one otherwise.
+
+    ``walk`` forces the sweep and leaves the cursor where it is, which is what makes
+    it a safe "check everything now" for an operator: the feed picks up afterwards
+    exactly where it was, and anything the sweep already handled is simply found
+    done. ``changes`` refuses to fall back, so it can answer whether the feed itself
+    works without waiting for a cycle.
+    """
+    if mode == "walk":
+        found = _discover_by_walk(service, config)
+        # Leave the saved cursor alone: this was a look, not a new starting point.
+        return replace(found, cursor=None)
+
     saved = change_cursor.read(change_cursor.path_for(config.data_dir))
+    if mode == "changes" and saved is None:
+        raise SystemExit(
+            "No changes cursor saved yet; run `gdstt run-once --mode walk` or a "
+            "normal cycle first."
+        )
     if saved is not None:
         found = _discover_by_changes(service, config, saved)
         if found is not None:
             return found
+        if mode == "changes":
+            raise SystemExit(
+                "The saved changes cursor is no longer valid; a normal cycle would "
+                "sweep and take a fresh one."
+            )
     return _discover_by_walk(service, config)
 
 
@@ -1821,6 +1843,7 @@ def run_once(
     dry_run: bool = False,
     max_size_bytes: int | None = None,
     confirm_large: bool = False,
+    mode: str = "auto",
 ) -> None:
     cycle_started_at = time.monotonic()
     cycle_pending = 0
@@ -1831,7 +1854,7 @@ def run_once(
     cycle_skipped_unmatched = 0
     cycle_folder_errors = 0
 
-    discovery = _discover(service, config)
+    discovery = _discover(service, config, mode=mode)
     cycle_retry_total += discovery.retries
     cycle_folder_errors += discovery.folder_errors
 

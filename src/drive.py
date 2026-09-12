@@ -209,6 +209,26 @@ def find_newest_mp4_in_tree(service: Any, folder_id: str) -> dict | None:
     return newest
 
 
+def describe_folder(service: Any, folder_id: str) -> dict:
+    """Return ``{id, name, parents, trashed}`` for a folder.
+
+    What the diagnostics were missing. Counting files in a configured folder answered
+    "can I reach it", and the answer stayed yes for two months after Google moved the
+    recordings elsewhere: the old folder was still there, still readable, and simply
+    never got anything new again. The name is what gives that away at a glance --
+    a folder that now reads `Legacy Meet Recordings` is the whole diagnosis.
+    """
+    return (
+        service.files()
+        .get(
+            fileId=folder_id,
+            fields="id, name, parents, trashed",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
+
+
 def get_start_page_token(service: Any) -> str:
     """Return a cursor marking "everything up to now has been seen"."""
     response = (

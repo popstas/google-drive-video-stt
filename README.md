@@ -225,6 +225,37 @@ Copy the returned `id` into `config.yml` as an entry under `folders:` (see
 the last path segment in the browser URL:
 `https://drive.google.com/drive/folders/<folder-id>`.
 
+### Meeting subfolders
+
+Google Meet files each meeting into its own subfolder of a `Google Meet` folder in the
+organiser's Drive, rather than dropping every recording into one flat
+`Meet Recordings`. Point `folders:` at the `Google Meet` folder itself: each entry is
+read together with its direct subfolders, and artifacts are written next to the video
+they belong to, inside the meeting's own subfolder.
+
+A flat folder keeps working unchanged -- it simply has no subfolders -- so
+`Legacy Meet Recordings` and any hand-made folder need no special configuration.
+
+Two things this changes for an operator:
+
+- The folder in `folders:` still identifies the employee. A meeting subfolder never
+  appears there, and nothing has to be added when a new meeting creates one.
+- `gdstt doctor --drive` prints each folder's **name**. That is the fastest way to
+  notice a configured id now pointing at `Legacy Meet Recordings`: it stays readable
+  and reports zero errors while every new recording lands somewhere else.
+
+### How new recordings are found
+
+A cycle asks Drive's changes feed what has happened since the last cycle, and lists
+only the folders that feed names. The position is kept in
+`<data-dir>/changes_cursor.txt`.
+
+The cursor is a shortcut, never a record of what has been done -- that is still
+derived from what sits next to each video. So it is safe to lose: with no cursor, or
+one Drive no longer recognises, a cycle reads every configured folder and takes a
+fresh one. `gdstt cursor reset` forces exactly that, and `gdstt changes` shows what
+the feed holds without consuming it.
+
 ## Configuration
 
 All configuration lives in the active `config.yml` (`<GDSTT_HOME>/config.yml`, or
@@ -719,7 +750,10 @@ gdstt latest [--folder ID] [--dry-run] [--max-size SIZE] [--confirm-large]   # p
 gdstt run                   # continuous polling; can spend STT credits across all pending configured folders
 gdstt stop                  # pause the loop (sets run.enabled=false; stays paused across restarts, no auto-resume)
 gdstt start                 # resume a paused loop (sets run.enabled=true)
-gdstt run-once [--dry-run] [--max-size SIZE] [--confirm-large]   # single cycle; use --dry-run first
+gdstt run-once [--mode auto|walk|changes] [--dry-run] [--max-size SIZE] [--confirm-large]   # single cycle; use --dry-run first
+gdstt changes [--raw]       # show what Drive's changes feed reports, without consuming it
+gdstt cursor show           # print the changes cursor and where it is kept
+gdstt cursor reset          # forget the cursor so the next cycle sweeps every folder
 gdstt process <id> [--folder] [--reprocess-txt] [--dry-run] [--max-size SIZE] [--confirm-large]   # single target or folder; use --dry-run first
 gdstt reprocess <id> [STAGES] [--folder] [--dry-run] [--max-size SIZE] [--confirm-large]   # force-rerun chain stages by number (0=transcript, 1..N=presets; see doctor)
 gdstt speakers set <file-id> "Alice" "Bob"   # store explicit speaker names on an MP4
