@@ -24,6 +24,20 @@ from src.stt.base import STTError
 _KEYPOINTS_BUILTIN = next(p for p in BUILTIN_PRESETS if p.name == "keypoints")
 
 
+@pytest.fixture(autouse=True)
+def _no_subfolders(mocker):
+    """Every folder in this module is flat unless the test says otherwise.
+
+    `run_once` and `process <folder>` now read a folder together with its meeting
+    subfolders. These tests describe the flat shape and patch `list_folder_state`
+    to say so, which leaves the real `list_subfolders` running against a MagicMock
+    service -- where `response.get("nextPageToken")` is a truthy Mock and the paging
+    loop never ends. Saying "no subfolders" out loud is both the honest description
+    of these fixtures and what keeps that loop from hanging the suite.
+    """
+    return mocker.patch("src.drive.list_subfolders", return_value=[])
+
+
 def test_the_suite_never_resolves_the_repos_real_config():
     """No test may read the operator's live data/config.yml.
 
@@ -2438,6 +2452,7 @@ def test_run_preset_stage_forces_only_selected(mocker):
         "Alice and Bob.mp4",
         "Speaker 1: hi",
         "folderA",
+        "folderA",
         Path("/tmp"),
         cfg,
         speaker_names=None,
@@ -3867,12 +3882,15 @@ def _stt_config(tmp_path, **overrides):
     )
 
 
-def _write_documents(cfg, tmp_path, artifacts, transcript=_STT_TRANSCRIPT):
+def _write_documents(
+    cfg, tmp_path, artifacts, transcript=_STT_TRANSCRIPT, container_id="folderA"
+):
     return main._write_call_documents(
         MagicMock(),
         "fid1",
         _STT_NAME,
         "folderA",
+        container_id,
         transcript,
         artifacts,
         cfg,
@@ -4205,3 +4223,173 @@ def test_run_once_processes_an_unmatched_recording_in_a_telegram_folder(
 
     process_item.assert_called_once()
     marked.assert_not_called()
+
+
+# --- Meeting subfolders -----------------------------------------------------------
+#
+# Google Meet files every call into its own subfolder, so the folder a video lives in
+# is no longer the folder the configuration names. Both ids matter, and they must not
+# be swapped: the configured one says whose recording this is, the container says
+# where the artifacts go.
+
+
+def _subfolder_item(file_id, name, container_id, **kwargs):
+    item = _item(file_id, name, **kwargs)
+    item["container_id"] = container_id
+    return item
+
+
+def test_run_once_reads_a_folder_together_with_its_meeting_subfolders(mocker):
+    """Pointed at a Google Meet root, the old single-level listing found subfolders and
+    zero videos -- the silent shape of this whole outage."""
+    cfg = make_config(folders=["root"], stt_provider="")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_called_once_with(mocker.ANY, "root")
+
+
+def test_run_once_still_names_the_employee_from_the_configured_folder(mocker):
+    """The video sits in a subfolder nobody configured; the employee is the folder
+    above it. Passing the subfolder here is what would silently blank the employee,
+    the Planfix routing and the folder's Telegram chat."""
+    cfg = make_config(folders=["root"])
+    item = _subfolder_item("v1", "a.mp4", "meeting-1")
+    mocker.patch("src.main.drive.list_folder_tree_state", return_value=[item])
+    mocker.patch("src.main.booking_gate.resolve", return_value=MATCHED_DECISION)
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert process_mock.call_args.args[2] == "root"
+
+
+def test_process_item_writes_the_transcript_into_the_meeting_subfolder(mocker, tmp_path):
+    """The .txt belongs beside its video, not in the employee's root."""
+    cfg = make_config(folders=["root"], stt_provider="deepgram", output_dir=tmp_path)
+    upload_mock = mocker.patch("src.main._save_and_upload_txt")
+    mocker.patch("src.main._run_preset_stage", return_value={})
+    mocker.patch("src.main._try_write_call_documents", return_value=None)
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mp4_path = tmp_path / "a.mp4"
+    mp4_path.write_bytes(b"video")
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "a.mp3")
+    mocker.patch("src.main.extract_m4a_copy", return_value=tmp_path / "a.m4a")
+    mocker.patch("src.main.drive.upload")
+
+    main.process_item(
+        MagicMock(),
+        _subfolder_item("v1", "a.mp4", "meeting-1"),
+        "root",
+        cfg,
+        booking_decision=MATCHED_DECISION,
+    )
+
+    assert upload_mock.call_args.args[4] == "meeting-1"
+
+
+def test_process_item_falls_back_to_the_configured_folder_for_a_flat_item(mocker, tmp_path):
+    """An item with no container -- a flat folder, or one a caller built by hand --
+    keeps writing where it always did."""
+    cfg = make_config(folders=["root"], stt_provider="deepgram", output_dir=tmp_path)
+    upload_mock = mocker.patch("src.main._save_and_upload_txt")
+    mocker.patch("src.main._run_preset_stage", return_value={})
+    mocker.patch("src.main._try_write_call_documents", return_value=None)
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mp4_path = tmp_path / "a.mp4"
+    mp4_path.write_bytes(b"video")
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "a.mp3")
+    mocker.patch("src.main.extract_m4a_copy", return_value=tmp_path / "a.m4a")
+    mocker.patch("src.main.drive.upload")
+
+    main.process_item(
+        MagicMock(), _item("v1", "a.mp4"), "root", cfg,
+        booking_decision=MATCHED_DECISION,
+    )
+
+    assert upload_mock.call_args.args[4] == "root"
+
+
+def test_webhook_payload_reports_the_configured_folder_not_the_subfolder():
+    """The payload's folder_id is documented to consumers, who key it to the employee.
+    Sending the meeting subfolder would change that contract to a value that means
+    nothing outside this service."""
+    cfg = make_config(folders=[EmployeeFolder("root", name="Анжелика", email="a@b.c")])
+
+    payload = main._webhook_payload(
+        "v1", "a.mp4", "root", cfg, "transcript", {},
+    )
+
+    assert payload["file"]["folder_id"] == "root"
+    assert payload["employee"]["name"] == "Анжелика"
+
+
+def test_process_one_file_in_a_subfolder_resolves_the_employee_above_it(mocker):
+    service = MagicMock()
+    cfg = make_config(folders=["root"])
+    mocker.patch(
+        "src.main.drive.get_file_metadata",
+        return_value={
+            "id": "v1", "name": "a.mp4", "mimeType": "video/mp4",
+            "parents": ["meeting-1"],
+        },
+    )
+    ancestor_mock = mocker.patch(
+        "src.main.drive.find_configured_ancestor", return_value="root"
+    )
+    list_mock = mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.process_target(service, "v1", cfg)
+
+    # Listed where the file is, attributed to the folder above it.
+    list_mock.assert_called_once_with(service, "meeting-1")
+    ancestor_mock.assert_called_once_with(service, "meeting-1", {"root"})
+    assert process_mock.call_args.args[2] == "root"
+
+
+def test_process_one_file_keeps_its_own_folder_when_nothing_is_configured_above(mocker):
+    """A hand-made folder outside the configuration is still processed, just without
+    an employee -- the behaviour that existed before subfolders."""
+    service = MagicMock()
+    cfg = make_config(folders=["root"])
+    mocker.patch(
+        "src.main.drive.get_file_metadata",
+        return_value={
+            "id": "v1", "name": "a.mp4", "mimeType": "video/mp4",
+            "parents": ["stt-test"],
+        },
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value=None)
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "stt-test")],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.process_target(service, "v1", cfg)
+
+    assert process_mock.call_args.args[2] == "stt-test"
+
+
+def test_process_a_folder_walks_its_subfolders(mocker):
+    service = MagicMock()
+    cfg = make_config(folders=["root"], stt_provider="")
+    mocker.patch(
+        "src.main.drive.get_file_metadata",
+        return_value={"id": "root", "name": "Google Meet",
+                      "mimeType": "application/vnd.google-apps.folder"},
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+
+    main.process_target(service, "root", cfg, is_folder=True)
+
+    tree_mock.assert_called_once_with(service, "root")

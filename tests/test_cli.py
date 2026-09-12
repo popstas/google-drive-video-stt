@@ -21,6 +21,20 @@ class _Telemetry:
     usage: dict = field(default_factory=dict)
 
 
+@pytest.fixture(autouse=True)
+def _no_subfolders(mocker):
+    """Every folder in this module is flat unless the test says otherwise.
+
+    `run_once` and `process <folder>` now read a folder together with its meeting
+    subfolders. These tests describe the flat shape and patch `list_folder_state`
+    to say so, which leaves the real `list_subfolders` running against a MagicMock
+    service -- where `response.get("nextPageToken")` is a truthy Mock and the paging
+    loop never ends. Saying "no subfolders" out loud is both the honest description
+    of these fixtures and what keeps that loop from hanging the suite.
+    """
+    return mocker.patch("src.drive.list_subfolders", return_value=[])
+
+
 def _normalized_help(text: str) -> str:
     return " ".join(text.split())
 

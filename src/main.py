@@ -123,7 +123,7 @@ def _save_and_upload_txt(
     source_file_id: str,
     mp4_name: str,
     text: str,
-    folder_id: str,
+    container_id: str,
     tmp_dir: Path,
     config: Config,
     *,
@@ -139,7 +139,7 @@ def _save_and_upload_txt(
         base_name=stem,
         suffix=".txt",
         text=text,
-        folder_id=folder_id,
+        folder_id=container_id,
         config=config,
         tmp_dir=tmp_dir,
         existing_id=txt_id,
@@ -154,7 +154,7 @@ def _save_and_upload_preset(
     mp4_name: str,
     preset: Preset,
     text: str,
-    folder_id: str,
+    container_id: str,
     tmp_dir: Path,
     config: Config,
     *,
@@ -170,7 +170,7 @@ def _save_and_upload_preset(
         base_name=stem,
         suffix=preset.artifact_suffix,
         text=text,
-        folder_id=folder_id,
+        folder_id=container_id,
         config=config,
         tmp_dir=tmp_dir,
         existing_id=existing_id,
@@ -185,6 +185,7 @@ def _run_preset_stage(
     mp4_name: str,
     transcript: str,
     folder_id: str,
+    container_id: str,
     tmp_dir: Path,
     config: Config,
     *,
@@ -337,7 +338,7 @@ def _run_preset_stage(
             mp4_name,
             preset_by_name[name],
             result.text,
-            folder_id,
+            container_id,
             tmp_dir,
             config,
             existing_id=artifact_ids.get(name),
@@ -405,6 +406,7 @@ def _write_call_documents(
     file_id: str,
     file_name: str,
     folder_id: str,
+    container_id: str,
     transcript: str,
     artifacts: dict[str, str],
     config: Config,
@@ -451,11 +453,11 @@ def _write_call_documents(
 
     output.write_artifact(
         service, base_name=stem, suffix=".meta.yml", text=meta_yaml,
-        folder_id=folder_id, config=config, tmp_dir=tmp_dir,
+        folder_id=container_id, config=config, tmp_dir=tmp_dir,
         existing_id=item.get("meta_yml_id"),
     )
     output.write_artifact(
-        service, base_name=stem, suffix=".stt", text=text, folder_id=folder_id,
+        service, base_name=stem, suffix=".stt", text=text, folder_id=container_id,
         config=config, tmp_dir=tmp_dir,
         existing_id=item.get("stt_id"),
         # No source_video_id: the transcript (`.txt`) is looked up on Drive by that
@@ -474,6 +476,7 @@ def _try_write_call_documents(
     file_id: str,
     file_name: str,
     folder_id: str,
+    container_id: str,
     transcript: str,
     artifacts: dict[str, str],
     config: Config,
@@ -495,7 +498,7 @@ def _try_write_call_documents(
     """
     try:
         return _write_call_documents(
-            service, file_id, file_name, folder_id, transcript, artifacts,
+            service, file_id, file_name, folder_id, container_id, transcript, artifacts,
             config, tmp_dir, item=item, booking_decision=booking_decision,
         )
     except Exception as exc:
@@ -1099,6 +1102,10 @@ def process_item(
     file_size = _coerce_size_bytes(file_info.get("size"))
     has_mp3 = item.get("has_mp3", False)
     has_txt = item.get("has_txt", False)
+    # Artifacts belong beside the video, which with a subfolder per meeting is no
+    # longer the configured folder. Falling back to ``folder_id`` keeps a caller that
+    # built an item by hand working, and is exactly right for a flat folder.
+    container_id = item.get("container_id") or folder_id
 
     stt_enabled = bool(config.stt_provider)
     preset_only_reprocess = reprocess_presets is not None and not reprocess_txt
@@ -1207,7 +1214,7 @@ def process_item(
                         speaker_names=speaker_names,
                     )
                 _save_and_upload_txt(
-                    service, file_id, file_name, text, folder_id, tmp_dir, config,
+                    service, file_id, file_name, text, container_id, tmp_dir, config,
                     txt_id=item.get("txt_id"),
                 )
                 txt_uploaded = True
@@ -1219,6 +1226,7 @@ def process_item(
                     file_name,
                     text,
                     folder_id,
+                    container_id,
                     tmp_dir,
                     config,
                     speaker_names=speaker_names,
@@ -1230,7 +1238,7 @@ def process_item(
                     only_presets=reprocess_presets,
                 )
                 meta_document = _try_write_call_documents(
-                    service, file_id, file_name, folder_id, text, artifacts,
+                    service, file_id, file_name, folder_id, container_id, text, artifacts,
                     config, tmp_dir, item=item, booking_decision=booking_decision,
                 )
             elif needs_presets:
@@ -1253,6 +1261,7 @@ def process_item(
                     file_name,
                     text,
                     folder_id,
+                    container_id,
                     tmp_dir,
                     config,
                     speaker_names=speaker_names,
@@ -1264,7 +1273,7 @@ def process_item(
                     only_presets=reprocess_presets,
                 )
                 meta_document = _try_write_call_documents(
-                    service, file_id, file_name, folder_id, text, artifacts,
+                    service, file_id, file_name, folder_id, container_id, text, artifacts,
                     config, tmp_dir, item=item, booking_decision=booking_decision,
                 )
     except Exception as exc:
@@ -1478,6 +1487,30 @@ def _log_dry_run(
     )
 
 
+def _configured_folder_for(service: Any, container_id: str, config: Config) -> str:
+    """Which configured folder a container belongs to, falling back to itself.
+
+    `process` and `reprocess` start from an id an operator typed, which may be a
+    per-meeting subfolder the configuration has never named. Without this the
+    employee, the Planfix routing and the folder's Telegram chat all resolve to
+    nothing -- silently, because `folder_by_id` returns None rather than raising.
+
+    The fallback keeps the old behaviour for an id that belongs to no configured
+    folder at all: it is still processed, just without an employee, exactly as a
+    hand-made folder was before subfolders existed.
+    """
+    configured = drive.find_configured_ancestor(
+        service, container_id, {folder.folder_id for folder in config.folders}
+    )
+    if configured is None:
+        return container_id
+    if configured != container_id:
+        logger.info(
+            "Folder %s belongs to configured folder %s", container_id, configured
+        )
+    return configured
+
+
 def process_target(
     service: Any,
     target_id: str,
@@ -1501,9 +1534,10 @@ def process_target(
     if treat_as_folder:
         telemetry: list[_ProcessTelemetry] = []
         items = _call_with_transient_retries(
-            lambda: drive.list_folder_state(service, target_id),
+            lambda: drive.list_folder_tree_state(service, target_id),
             description=f"list folder state for {target_id}",
         )
+        configured_id = _configured_folder_for(service, target_id, config)
         _apply_local_output_state(items, config)
         if reprocess_txt:
             pending = items
@@ -1520,7 +1554,7 @@ def process_target(
         if dry_run:
             for item in pending:
                 _log_dry_run(
-                    target_id, item, config,
+                    configured_id, item, config,
                     reprocess_txt=reprocess_txt,
                     reprocess_presets=reprocess_presets,
                 )
@@ -1529,7 +1563,7 @@ def process_target(
             result = process_item(
                 service,
                 item,
-                target_id,
+                configured_id,
                 config,
                 reprocess_txt=reprocess_txt,
                 reprocess_presets=reprocess_presets,
@@ -1541,10 +1575,11 @@ def process_target(
     parents = meta.get("parents") or []
     if not parents:
         raise RuntimeError(f"File {target_id} has no parent folder")
-    folder_id = parents[0]
+    container_id = parents[0]
+    folder_id = _configured_folder_for(service, container_id, config)
     items = _call_with_transient_retries(
-        lambda: drive.list_folder_state(service, folder_id),
-        description=f"list folder state for {folder_id}",
+        lambda: drive.list_folder_state(service, container_id),
+        description=f"list folder state for {container_id}",
     )
     _apply_local_output_state(items, config)
     match = next(
@@ -1552,7 +1587,7 @@ def process_target(
     )
     if match is None:
         raise RuntimeError(
-            f"File {target_id} is not an MP4 in folder {folder_id}"
+            f"File {target_id} is not an MP4 in folder {container_id}"
         )
     allowed = _items_allowed_by_size(
         [match],
@@ -1598,7 +1633,7 @@ def run_once(
         listing_retry_state = _RetryState()
         try:
             items = _call_with_transient_retries(
-                lambda: drive.list_folder_state(service, folder_id),
+                lambda: drive.list_folder_tree_state(service, folder_id),
                 description=f"list folder state for {folder_id}",
                 retry_state=listing_retry_state,
             )
