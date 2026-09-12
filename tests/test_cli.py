@@ -1894,3 +1894,46 @@ def test_list_marks_recordings_a_cutoff_leaves_out(mocker, capsys, tmp_path):
     new_line = next(line for line in out.splitlines() if "2026-11-20" in line)
     assert "before since, not processed" in old_line
     assert "before since" not in new_line
+
+
+def test_doctor_says_how_many_attended_calls_this_folder_cannot_process(
+    mocker, capsys, tmp_path
+):
+    """Found on a real employee folder: two calls they attended existed only as
+    shortcuts to recordings the account could not open. Every other line of the
+    diagnosis read as healthy, so without this those calls were missing without a
+    trace."""
+    _doctor_config(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.cli.drive.describe_folder", return_value=_folder_meta())
+    mocker.patch("src.cli.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.cli.drive.list_subfolders", return_value=[])
+    mocker.patch(
+        "src.cli.drive.list_recording_shortcuts",
+        return_value=[
+            {"id": "s1", "name": "a.mp4", "container_id": "m1", "target_id": "t1"},
+            {"id": "s2", "name": "b.mp4", "container_id": "m2", "target_id": "t2"},
+        ],
+    )
+    mocker.patch("src.cli.drive.is_readable", side_effect=[False, True])
+
+    cli.main(["doctor", "--drive"])
+
+    out = capsys.readouterr().out
+    assert "2 shortcut(s) to recordings, not processed from this folder" in out
+    assert "1 not readable by this account" in out
+
+
+def test_doctor_stays_quiet_about_shortcuts_when_there_are_none(
+    mocker, capsys, tmp_path
+):
+    _doctor_config(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.cli.drive.describe_folder", return_value=_folder_meta())
+    mocker.patch("src.cli.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.cli.drive.list_subfolders", return_value=[])
+    mocker.patch("src.cli.drive.list_recording_shortcuts", return_value=[])
+
+    cli.main(["doctor", "--drive"])
+
+    assert "shortcut" not in capsys.readouterr().out

@@ -1330,3 +1330,124 @@ def test_mp4_timestamps_in_tree_on_a_flat_folder_is_unchanged():
     ])
 
     assert [f["id"] for f in drive.list_mp4_timestamps_in_tree(service, "flat")] == ["v1"]
+
+
+# --- Shortcuts and depth: the shape of a real employee folder ----------------------
+#
+# Checked read-only against a real employee's Google Meet folder: eleven meeting
+# subfolders, eight recordings, and five shortcuts -- three meetings the employee only
+# attended held nothing but shortcuts to the organizer's recording and transcript,
+# none of which that account could open.
+
+
+def _attended_meeting_service():
+    return _make_drive_service([
+        {"id": "own", "name": "exf-wxzm-uzk - 2026/09/09 17:42 CEST",
+         "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+        {"id": "v1", "name": "exf-wxzm-uzk (2026-09-09 17:42 GMT+2).mp4",
+         "mimeType": drive.MP4_MIME, "parents": ["own"]},
+        {"id": "attended", "name": "someone-elses-call - 2026/09/04 17:57 CEST",
+         "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+        {"id": "sc-video", "name": "someone-elses-call (2026-09-04 17:57 GMT+2).mp4",
+         "mimeType": drive.SHORTCUT_MIME, "parents": ["attended"],
+         "shortcutDetails": {"targetId": "organizers-video",
+                             "targetMimeType": drive.MP4_MIME}},
+        {"id": "sc-doc", "name": "someone-elses-call - Transcript",
+         "mimeType": drive.SHORTCUT_MIME, "parents": ["attended"],
+         "shortcutDetails": {"targetId": "organizers-doc",
+                             "targetMimeType": drive.GOOGLE_DOC_MIME}},
+    ])
+
+
+def test_a_shortcut_to_a_recording_is_not_a_recording():
+    """Drive reports the shortcut's own mime type; the real one is only in
+    `shortcutDetails`. That is what keeps an attended meeting from being processed
+    twice -- once from each participant's folder."""
+    items = drive.list_folder_tree_state(_attended_meeting_service(), "root")
+
+    assert [it["file"]["id"] for it in items] == ["v1"]
+
+
+def test_a_shortcut_to_a_folder_is_not_a_subfolder():
+    """What Drive creates when a shared folder is added to someone's own Drive. The
+    walk does not step into it, and cannot usefully: a shortcut is not a parent, so
+    nothing inside would ever resolve back to the configured folder either."""
+    service = _make_drive_service([
+        {"id": "real", "name": "meeting", "mimeType": drive.FOLDER_MIME,
+         "parents": ["root"]},
+        {"id": "link", "name": "a colleague's folder", "mimeType": drive.SHORTCUT_MIME,
+         "parents": ["root"],
+         "shortcutDetails": {"targetId": "elsewhere", "targetMimeType": drive.FOLDER_MIME}},
+    ])
+
+    assert [f["id"] for f in drive.list_subfolders(service, "root")] == ["real"]
+
+
+def test_the_walk_goes_exactly_one_level_into_meeting_folders():
+    """A boundary, pinned so that moving it is a decision rather than an accident.
+    Meet never nests deeper, and every real folder checked agreed; a project folder
+    holding people's folders holding meetings would be one level too deep, which is
+    why each person is configured separately."""
+    service = _make_drive_service([
+        {"id": "person", "name": "employee", "mimeType": drive.FOLDER_MIME,
+         "parents": ["project"]},
+        {"id": "meeting", "name": "a call", "mimeType": drive.FOLDER_MIME,
+         "parents": ["person"]},
+        {"id": "v1", "name": "a call.mp4", "mimeType": drive.MP4_MIME,
+         "parents": ["meeting"]},
+    ])
+
+    assert drive.list_folder_tree_state(service, "project") == []
+    assert [it["file"]["id"] for it in drive.list_folder_tree_state(service, "person")] == ["v1"]
+
+
+def test_recording_shortcuts_are_listed_with_the_meeting_they_sit_in():
+    shortcuts = drive.list_recording_shortcuts(_attended_meeting_service(), "root")
+
+    assert shortcuts == [{
+        "id": "sc-video",
+        "name": "someone-elses-call (2026-09-04 17:57 GMT+2).mp4",
+        "container_id": "attended",
+        "target_id": "organizers-video",
+    }]
+
+
+def test_a_shortcut_to_a_transcript_is_not_reported_as_a_recording():
+    shortcuts = drive.list_recording_shortcuts(_attended_meeting_service(), "root")
+
+    assert all(s["id"] != "sc-doc" for s in shortcuts)
+
+
+def test_a_folder_without_shortcuts_reports_none():
+    assert drive.list_recording_shortcuts(_meet_root_service(), "root") == []
+
+
+def test_is_readable_says_no_for_a_file_this_account_cannot_open():
+    """Drive answers "you may not see this" with 404, the same as "no such file"."""
+    from googleapiclient.errors import HttpError
+
+    service = MagicMock()
+    service.files.return_value.get.return_value.execute.side_effect = HttpError(
+        MagicMock(status=404), b""
+    )
+
+    assert drive.is_readable(service, "organizers-video") is False
+
+
+def test_is_readable_says_yes_when_the_file_opens():
+    service = MagicMock()
+    service.files.return_value.get.return_value.execute.return_value = {"id": "v1"}
+
+    assert drive.is_readable(service, "v1") is True
+
+
+def test_is_readable_does_not_hide_a_drive_outage_as_a_permission_answer():
+    from googleapiclient.errors import HttpError
+
+    service = MagicMock()
+    service.files.return_value.get.return_value.execute.side_effect = HttpError(
+        MagicMock(status=503), b""
+    )
+
+    with pytest.raises(HttpError):
+        drive.is_readable(service, "v1")

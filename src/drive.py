@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 logger = logging.getLogger(__name__)
@@ -415,6 +416,73 @@ def find_configured_ancestor(
     if cache is not None:
         cache[container_id] = found
     return found
+
+
+SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
+
+
+def list_recording_shortcuts(service: Any, folder_id: str) -> list[dict]:
+    """Shortcuts to recordings in a folder and its meeting subfolders.
+
+    Meet files a call into every participant's folder, but only the organizer gets
+    the recording itself -- everyone else gets a shortcut to it. Neither discovery
+    path follows shortcuts, and on the first real employee folder checked the targets
+    were not readable by the account the folder was shared with at all: sharing a
+    folder does not share what its shortcuts point at. So these are calls this folder
+    will never process, and the only place that fact can be surfaced is a diagnostic.
+
+    Returns ``[{id, name, container_id, target_id}]``; nothing is resolved here.
+    """
+    found: list[dict] = []
+    for container_id in [folder_id, *(f["id"] for f in list_subfolders(service, folder_id))]:
+        page_token: str | None = None
+        while True:
+            response = (
+                service.files()
+                .list(
+                    q=(
+                        f"'{container_id}' in parents and mimeType = '{SHORTCUT_MIME}' "
+                        "and trashed = false"
+                    ),
+                    fields="nextPageToken, files(id, name, shortcutDetails)",
+                    pageSize=PAGE_SIZE,
+                    pageToken=page_token,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                )
+                .execute()
+            )
+            for shortcut in response.get("files", []):
+                details = shortcut.get("shortcutDetails") or {}
+                if details.get("targetMimeType") != MP4_MIME:
+                    continue
+                found.append({
+                    "id": shortcut.get("id"),
+                    "name": shortcut.get("name", ""),
+                    "container_id": container_id,
+                    "target_id": details.get("targetId"),
+                })
+            page_token = _next_page_token(response)
+            if not page_token:
+                break
+    return found
+
+
+def is_readable(service: Any, file_id: str) -> bool:
+    """Whether this account can open ``file_id`` at all.
+
+    Drive answers a file you may not see with 404, exactly as it answers one that
+    does not exist; for a shortcut's target those mean the same thing here.
+    """
+    try:
+        service.files().get(
+            fileId=file_id, fields="id", supportsAllDrives=True
+        ).execute()
+    except HttpError as exc:
+        if getattr(exc.resp, "status", None) in (403, 404):
+            return False
+        raise
+    return True
 
 
 def list_subfolders(service: Any, folder_id: str) -> list[dict]:

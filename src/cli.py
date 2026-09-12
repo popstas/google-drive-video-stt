@@ -441,6 +441,26 @@ def _print_folder_diagnosis(service, folder_id: str) -> None:
         f"newest {newest or 'never'}"
     )
 
+    # The calls this folder will never process, said out loud. Without it a manager's
+    # folder reports every recording it holds as handled while the meetings they
+    # only attended -- a shortcut each -- go missing without a trace.
+    try:
+        shortcuts = drive.list_recording_shortcuts(service, folder_id)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  shortcuts to recordings: could not list ({exc})")
+        return
+    if not shortcuts:
+        return
+    unreadable = sum(
+        1 for shortcut in shortcuts
+        if not shortcut["target_id"] or not drive.is_readable(service, shortcut["target_id"])
+    )
+    print(
+        f"  {len(shortcuts)} shortcut(s) to recordings, not processed from this folder "
+        f"({unreadable} not readable by this account): calls organized by someone "
+        "else -- configure the organizer's folder to capture them"
+    )
+
 
 def cmd_doctor(args: argparse.Namespace) -> None:
     config_path = resolve_config_file_path(args.config)

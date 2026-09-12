@@ -339,9 +339,21 @@ the shortcut's own `application/vnd.google-apps.shortcut` and puts the real type
 `shortcutDetails.targetMimeType`, so a `video/mp4` filter drops it in a folder listing
 and in the changes feed alike.
 
-This is deliberate rather than unnoticed. Meet gives the organizer the real file, and
-the organizer is whose folder gets configured; a participant who receives only a
-shortcut would otherwise have the same call transcribed twice, once from each side.
+This is deliberate rather than unnoticed, and it is not rare. Meet gives the
+organizer the real file and every other participant a shortcut to it, so an
+employee's folder holds a shortcut for each call they only attended. The first real
+employee folder checked had eleven meetings: eight with the recording itself, three
+holding nothing but shortcuts -- and none of those shortcuts' targets could be opened
+by the account the folder was shared with. Sharing a folder does not share what its
+shortcuts point at, so following them would not help either.
+
+Those calls are processed from the organizer's folder, if that folder is configured.
+`gdstt doctor --drive` says how many a folder cannot process and how many of their
+targets this account cannot even open:
+
+```
+  2 shortcut(s) to recordings, not processed from this folder (2 not readable by this account): calls organized by someone else -- configure the organizer's folder to capture them
+```
 
 **The cursor waits for the work.** It only moves after a cycle that processed
 everything it found. A recording that failed, a folder that could not be listed, or a
