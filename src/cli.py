@@ -831,16 +831,23 @@ def cmd_list(args: argparse.Namespace) -> None:
     service = auth.build_drive_service(config=config)
     for folder_id in folder_ids:
         items = drive.list_folder_tree_state(service, folder_id)
+        # Without this the report and the service disagree: `list` would show eight
+        # recordings with no transcript while every cycle skipped all eight, and the
+        # operator would be left wondering which one was lying.
+        cutoff = parse_since(config.since_for(folder_id), source="since")
         print(f"Folder {folder_id}: {len(items)} mp4 file(s)")
         for item in items:
             name = item["file"]["name"]
+            when = main_module._recording_datetime(item)
+            out_of_scope = cutoff is not None and when is not None and when < cutoff
             mp3 = "mp3" if item.get("has_mp3") else "---"
             txt = "txt" if item.get("has_txt") else "---"
             # The container is worth showing even when it equals the folder asked
             # about: it is where the artifacts went, and with meeting subfolders the
             # operator can no longer assume which folder that was.
             where = item.get("container_id") or folder_id
-            print(f"  [{mp3}] [{txt}] {name}  ({where})")
+            scope = "  before since, not processed" if out_of_scope else ""
+            print(f"  [{mp3}] [{txt}] {name}  ({where}){scope}")
 
 
 def _add_processing_safety_args(parser: argparse.ArgumentParser) -> None:
@@ -1315,7 +1322,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Show each folder's recordings and whether their MP3/TXT siblings exist, "
             "without doing any work. Reads the folder together with its meeting "
-            "subfolders, and prints the folder each recording actually lives in."
+            "subfolders, prints the folder each recording actually lives in, and "
+            "marks the ones a since cutoff puts out of scope."
         ),
     )
     p_list.add_argument(

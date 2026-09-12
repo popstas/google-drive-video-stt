@@ -1862,3 +1862,35 @@ def test_an_unreadable_since_fails_before_drive_is_touched(mocker, tmp_path):
         cli.main(["run-once", "--since", "last tuesday"])
 
     build_mock.assert_not_called()
+
+
+def test_list_marks_recordings_a_cutoff_leaves_out(mocker, capsys, tmp_path):
+    """Otherwise the report and the service disagree: `list` would show a folder
+    full of recordings with no transcript while every cycle skipped all of them, and
+    the operator would have no way to tell which one was lying."""
+    cfg = dataclasses.replace(
+        make_config(data_dir=tmp_path, folders=["root"]), run_since="2026-10-01"
+    )
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch(
+        "src.cli.drive.list_folder_tree_state",
+        return_value=[
+            {
+                "file": {"id": "v1", "name": "exf-wxzm-uzk (2026-09-09 17_42 GMT+2).mp4"},
+                "container_id": "meeting-1",
+            },
+            {
+                "file": {"id": "v2", "name": "exf-wxzm-uzk (2026-11-20 17_42 GMT+2).mp4"},
+                "container_id": "meeting-2",
+            },
+        ],
+    )
+
+    cli.main(["list"])
+
+    out = capsys.readouterr().out
+    old_line = next(line for line in out.splitlines() if "2026-09-09" in line)
+    new_line = next(line for line in out.splitlines() if "2026-11-20" in line)
+    assert "before since, not processed" in old_line
+    assert "before since" not in new_line
