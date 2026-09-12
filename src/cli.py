@@ -990,7 +990,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _set_parser_safety_description(
         p_latest,
-        summary="Process the most recently created mp4 in a folder.",
+        summary=(
+            "Process the most recently created mp4 in a folder or any of its meeting "
+            "subfolders."
+        ),
         safety_note=(
             "this command spends STT credits on the newest mp4. Use --dry-run first to "
             "confirm which file would be processed."
@@ -1027,7 +1030,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument(
         "--drive",
         action="store_true",
-        help="Also authenticate and list configured Drive folders",
+        help=(
+            "Also authenticate and report each configured folder: its name, its "
+            "parent, how many subfolders and recordings it holds, when it last "
+            "received one, and the state of the changes cursor"
+        ),
     )
     p_doctor.set_defaults(func=cmd_doctor)
 
@@ -1195,6 +1202,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_changes = sub.add_parser(
         "changes",
         help="Show what the changes feed reports, without consuming it",
+        description=(
+            "Show what Drive's changes feed reports since the saved cursor. Read-only: "
+            "the cursor is not moved, so the next cycle still sees these changes. "
+            "Without a cursor there is nothing to read and the next cycle sweeps."
+        ),
     )
     p_changes.add_argument(
         "--raw",
@@ -1206,6 +1218,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_cursor = sub.add_parser(
         "cursor",
         help="Inspect or forget the changes-feed cursor",
+        description=(
+            "The cursor is where the changes feed resumes from, and the only state "
+            "this service keeps. It is safe to forget: without one a cycle reads "
+            "every configured folder and takes a fresh cursor, so the worst a reset "
+            "costs is one slower cycle."
+        ),
     )
     cursor_sub = p_cursor.add_subparsers(dest="cursor_command", required=True)
     p_cursor_show = cursor_sub.add_parser("show", help="Print the cursor and its path")
@@ -1219,6 +1237,11 @@ def build_parser() -> argparse.ArgumentParser:
         "list",
         aliases=["status"],
         help="Show folder state (sibling MP3/TXT presence) without doing work",
+        description=(
+            "Show each folder's recordings and whether their MP3/TXT siblings exist, "
+            "without doing any work. Reads the folder together with its meeting "
+            "subfolders, and prints the folder each recording actually lives in."
+        ),
     )
     p_list.add_argument(
         "--folder",

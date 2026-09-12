@@ -83,7 +83,7 @@ def test_skill_is_a_single_compact_file():
     assert skill_files == [SKILL_PATH]
     # A compactness guard, not a budget to spend: raise it only when a real feature
     # adds operator surface, and pay for the raise by keeping the new section tight.
-    assert len(SKILL_PATH.read_text(encoding="utf-8").splitlines()) <= 446
+    assert len(SKILL_PATH.read_text(encoding="utf-8").splitlines()) <= 458
 
     assert not (CANONICAL_SKILL_ROOT / "references").exists()
     assert not (CANONICAL_SKILL_ROOT / "examples").exists()

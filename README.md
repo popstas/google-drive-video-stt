@@ -256,6 +256,47 @@ one Drive no longer recognises, a cycle reads every configured folder and takes 
 fresh one. `gdstt cursor reset` forces exactly that, and `gdstt changes` shows what
 the feed holds without consuming it.
 
+`run-once --mode` picks the path explicitly rather than by whether a cursor exists:
+
+| mode | what it does |
+| --- | --- |
+| `auto` (default) | reads the feed when a cursor is saved, sweeps otherwise |
+| `walk` | always sweeps, and leaves the cursor untouched -- a "check everything now" that does not become a new starting point |
+| `changes` | only reads the feed, and fails rather than falling back, so the feed itself can be exercised on demand |
+
+`--dry-run` never moves the cursor in any mode.
+
+**The cursor waits for the work.** It only moves after a cycle that processed
+everything it found. A recording that failed, a folder that could not be listed, or a
+video left to settle all hold it where it is, and the log says so:
+
+```
+Holding the changes cursor [failed=1, folder_errors=0, deferred=0]; the next cycle reads the same changes again
+```
+
+That is deliberate. The feed names a folder once, when something happens in it, and a
+recording that failed writes no artifact -- so nothing there would ever change again
+and the feed would never name it twice. Re-reading the same changes costs nothing,
+because the folder listing decides what still needs doing. Permanent skips by design
+(no booking, larger than `--max-size`) are not counted, or the cursor would freeze for
+good.
+
+### Waiting for a recording Drive is still processing
+
+Meet uploads a recording well after the meeting folder appears -- the activity log on
+a one-hour call shows the video and its transcript arriving together, 52 minutes
+later. Drive fills `videoMediaMetadata` once it has processed an upload, so a video
+without it is left for a later cycle rather than downloaded:
+
+```
+Drive has not finished processing <name> yet; leaving it for a later cycle
+```
+
+The wait is bounded. A video that never gets metadata is still transcribed once it is
+old enough, and one whose age cannot be read is processed rather than held -- waiting
+without a limit would lose a recording quietly, which is the failure this whole
+behaviour exists to avoid.
+
 ## Configuration
 
 All configuration lives in the active `config.yml` (`<GDSTT_HOME>/config.yml`, or
@@ -887,7 +928,8 @@ The runtime treats incomplete output as failure instead of silently uploading it
 
 `run-once` logs one process summary per worked file, one folder summary per folder,
 and one cycle summary. The cycle summary includes pending, processed, failed,
-`retry_total`, skipped-by-size, folder-error, and duration fields. Each process
+`retry_total`, skipped-by-size, skipped-unmatched, folder-error, `deferred` (videos
+Drive has not finished processing), `cursor_moved`, and duration fields. Each process
 summary also records the Deepgram request cost (USD, when the usage API has
 recorded it) and the OpenAI keypoints token usage.
 
