@@ -832,3 +832,108 @@ def test_fake_drive_paginates():
         found = drive._list_files_by_mime(service, "root", drive.MP4_MIME)
 
     assert [f["id"] for f in found] == ["v0", "v1", "v2", "v3", "v4"]
+
+
+def _meet_root_service() -> MagicMock:
+    """A Google Meet root: no mp4 of its own, one subfolder per meeting."""
+    return _make_drive_service([
+        {"id": "d1", "name": "may-doqs-end - 2026/09/09 18:53 CEST",
+         "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+        {"id": "d2", "name": "Планёрка продаж (recurring)",
+         "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+        {"id": "v1", "name": "may-doqs-end (2026-09-09 18:53 GMT+2).mp4",
+         "mimeType": drive.MP4_MIME, "parents": ["d1"]},
+        {"id": "t1", "name": "may-doqs-end (2026-09-09 18:53 GMT+2).txt",
+         "mimeType": drive.TXT_MIME, "parents": ["d1"]},
+        {"id": "v2", "name": "Планёрка продаж - 2026/09/01 17:00 GMT+04:00.mp4",
+         "mimeType": drive.MP4_MIME, "parents": ["d2"]},
+    ])
+
+
+def test_list_subfolders_returns_direct_children_only():
+    service = _make_drive_service([
+        {"id": "d1", "name": "sub", "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+        {"id": "d2", "name": "deeper", "mimeType": drive.FOLDER_MIME, "parents": ["d1"]},
+        {"id": "v1", "name": "a.mp4", "mimeType": drive.MP4_MIME, "parents": ["root"]},
+    ])
+
+    assert [f["id"] for f in drive.list_subfolders(service, "root")] == ["d1"]
+
+
+def test_list_subfolders_skips_trashed():
+    service = _make_drive_service([
+        {"id": "d1", "name": "live", "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+        {"id": "d2", "name": "gone", "mimeType": drive.FOLDER_MIME, "parents": ["root"],
+         "trashed": True},
+    ])
+
+    assert [f["id"] for f in drive.list_subfolders(service, "root")] == ["d1"]
+
+
+def test_list_subfolders_of_a_flat_folder_is_empty():
+    service = _make_drive_service([
+        {"id": "v1", "name": "a.mp4", "mimeType": drive.MP4_MIME, "parents": ["flat"]},
+    ])
+
+    assert drive.list_subfolders(service, "flat") == []
+
+
+def test_tree_state_finds_videos_in_subfolders():
+    items = drive.list_folder_tree_state(_meet_root_service(), "root")
+
+    assert sorted(it["file"]["id"] for it in items) == ["v1", "v2"]
+
+
+def test_tree_state_carries_the_container_each_file_lives_in():
+    """The caller can no longer assume the container is the folder it asked about:
+    artifacts must be written next to the video, in its own meeting subfolder."""
+    items = drive.list_folder_tree_state(_meet_root_service(), "root")
+
+    by_id = {it["file"]["id"]: it for it in items}
+    assert by_id["v1"]["container_id"] == "d1"
+    assert by_id["v2"]["container_id"] == "d2"
+
+
+def test_tree_state_keeps_sibling_state_scoped_to_its_own_subfolder():
+    """A .txt in one meeting folder must not mark another meeting's video as done."""
+    items = drive.list_folder_tree_state(_meet_root_service(), "root")
+
+    by_id = {it["file"]["id"]: it for it in items}
+    assert by_id["v1"]["has_txt"] is True
+    assert by_id["v2"]["has_txt"] is False
+
+
+def test_tree_state_still_reads_a_flat_folder_the_old_way():
+    """Legacy Meet Recordings and hand-made folders keep working: no subfolders, and
+    the container is the configured folder itself."""
+    service = _make_drive_service([
+        {"id": "v1", "name": "a.mp4", "mimeType": drive.MP4_MIME, "parents": ["flat"]},
+        {"id": "t1", "name": "a.txt", "mimeType": drive.TXT_MIME, "parents": ["flat"]},
+    ])
+
+    items = drive.list_folder_tree_state(service, "flat")
+
+    assert len(items) == 1
+    assert items[0]["container_id"] == "flat"
+    assert items[0]["has_txt"] is True
+
+
+def test_tree_state_reads_a_folder_holding_both_videos_and_subfolders():
+    service = _make_drive_service([
+        {"id": "v0", "name": "loose.mp4", "mimeType": drive.MP4_MIME, "parents": ["root"]},
+        {"id": "d1", "name": "sub", "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+        {"id": "v1", "name": "nested.mp4", "mimeType": drive.MP4_MIME, "parents": ["d1"]},
+    ])
+
+    items = drive.list_folder_tree_state(service, "root")
+
+    containers = {it["file"]["id"]: it["container_id"] for it in items}
+    assert containers == {"v0": "root", "v1": "d1"}
+
+
+def test_list_folder_state_reports_its_own_folder_as_the_container():
+    service = _make_drive_service([
+        {"id": "v1", "name": "a.mp4", "mimeType": drive.MP4_MIME, "parents": ["f1"]},
+    ])
+
+    assert drive.list_folder_state(service, "f1")[0]["container_id"] == "f1"

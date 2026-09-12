@@ -165,6 +165,53 @@ def find_newest_mp4(service: Any, folder_id: str) -> dict | None:
     return files[0] if files else None
 
 
+def list_subfolders(service: Any, folder_id: str) -> list[dict]:
+    """Return the direct subfolders of ``folder_id`` as ``[{id, name}]``.
+
+    One level only, not a tree walk: Google Meet files every meeting into its own
+    subfolder directly under the account's ``Google Meet`` folder, so there is no
+    deeper nesting to chase and recursing would only invite cycles through shortcuts.
+    """
+    folders: list[dict] = []
+    page_token: str | None = None
+    query = (
+        f"'{folder_id}' in parents and mimeType = '{FOLDER_MIME}' and trashed = false"
+    )
+    while True:
+        response = (
+            service.files()
+            .list(
+                q=query,
+                fields="nextPageToken, files(id, name)",
+                pageSize=PAGE_SIZE,
+                pageToken=page_token,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            )
+            .execute()
+        )
+        folders.extend(response.get("files", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    return folders
+
+
+def list_folder_tree_state(service: Any, folder_id: str) -> list[dict]:
+    """Return ``list_folder_state`` for ``folder_id`` and for each of its subfolders.
+
+    A union, not a mode. A flat folder has no subfolders and yields exactly what it
+    did before; a Google Meet root holds no mp4 of its own and yields only its
+    per-meeting subfolders; a folder holding both yields both. Because the two shapes
+    share one path, nothing in the configuration has to declare which kind a folder
+    is, and the existing flat-folder tests stay honest as the regression guard.
+    """
+    items = list_folder_state(service, folder_id)
+    for subfolder in list_subfolders(service, folder_id):
+        items.extend(list_folder_state(service, subfolder["id"]))
+    return items
+
+
 def list_folder_state(service: Any, folder_id: str) -> list[dict]:
     """Return mp4 files with sibling flags.
 
@@ -245,6 +292,12 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
         mp4_props = mp4.get("appProperties", {}) or {}
         items.append({
             "file": mp4,
+            # The folder this file actually lives in, and therefore the folder its
+            # artifacts must be written back to. Once subfolders are walked this is
+            # no longer the configured folder the caller started from, and the two
+            # must not be confused: the configured one identifies the employee,
+            # this one addresses the files.
+            "container_id": folder_id,
             "has_mp3": mp3 is not None,
             "has_txt": txt is not None,
             "mp3_id": mp3["id"] if mp3 else None,
