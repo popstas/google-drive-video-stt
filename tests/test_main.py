@@ -3123,10 +3123,18 @@ def test_run_once_matches_a_real_booking_through_the_real_gate(monkeypatch, gate
     a real ``booking_gate.resolve`` run against a journal seeded with
     ``call_booking.append``.
     """
-    # "2026/08/08 09:00 GMT+04:00" is one of the formats parse_meeting_start
-    # accepts (see src/meeting_time.py); it resolves to 2026-08-08T05:00:00Z.
-    file_name = "Call with Kate - 2026/08/08 09:00 GMT+04:00 – Recording.mp4"
-    video_start_utc = datetime(2026, 8, 8, 5, 0, tzinfo=timezone.utc)
+    # "YYYY/MM/DD HH:MM GMT+04:00" is one of the formats parse_meeting_start accepts
+    # (see src/meeting_time.py). The date is yesterday's rather than a fixed one: the
+    # journal drops bookings older than call_booking.RETENTION_DAYS, so a pinned date
+    # makes this test start failing on its own once that many days have passed.
+    video_start_utc = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+        hour=5, minute=0, second=0, microsecond=0
+    )
+    file_name = (
+        "Call with Kate - "
+        + (video_start_utc + timedelta(hours=4)).strftime("%Y/%m/%d %H:%M")
+        + " GMT+04:00 – Recording.mp4"
+    )
 
     append_booking(
         gate_config.call_bookings_file,

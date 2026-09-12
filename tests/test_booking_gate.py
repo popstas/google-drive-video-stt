@@ -1,6 +1,6 @@
 import re
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,7 +16,18 @@ from src.booking_gate import (
 from src.call_booking import CallBooking, append
 from src.config import Config, EmployeeFolder, NameRule
 
-MATCHED_NAME = "Call with Dmitrii - 2026/08/08 09:00 GMT+04:00 – Recording.mp4"
+# The journal keeps bookings for ``call_booking.RETENTION_DAYS``, so a booking pinned
+# to an absolute date stops matching once that many days have passed -- these tests
+# began failing on their own, without a code change. Anchoring to yesterday keeps them
+# deterministic in every way that matters while staying inside the window.
+MATCHED_START = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+    hour=5, minute=0, second=0, microsecond=0
+)
+MATCHED_NAME = (
+    "Call with Dmitrii - "
+    + (MATCHED_START + timedelta(hours=4)).strftime("%Y/%m/%d %H:%M")
+    + " GMT+04:00 – Recording.mp4"
+)
 
 
 @pytest.fixture
@@ -40,7 +51,7 @@ def config(tmp_path):
 
 
 def _seed(config, *, minutes_offset=0, email="kate@example.com", task_id="851030"):
-    start = datetime(2026, 8, 8, 5, minutes_offset, tzinfo=timezone.utc)
+    start = MATCHED_START + timedelta(minutes=minutes_offset)
     append(
         config.call_bookings_file,
         CallBooking(task_id=task_id, manager_email=email, start_time=start),
