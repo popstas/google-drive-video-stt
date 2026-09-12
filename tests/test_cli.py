@@ -397,6 +397,7 @@ def test_run_once_dispatch(mocker, tmp_path):
         dry_run=False,
         max_size_bytes=None,
         confirm_large=False,
+        since="",
     )
 
 
@@ -416,6 +417,7 @@ def test_run_once_dispatches_safety_flags(mocker, tmp_path):
         dry_run=True,
         max_size_bytes=50_000_000,
         confirm_large=True,
+            since="",
     )
 
 
@@ -1824,3 +1826,39 @@ def test_cursor_reset_forgets_the_folder_set_too(mocker, tmp_path):
         change_cursor.read_folders(change_cursor.folders_path_for(cfg.data_dir))
         is None
     )
+
+
+# --- run-once --since ---------------------------------------------------------
+
+
+def test_run_once_passes_the_since_flag_through(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    run_once_mock = mocker.patch("src.cli.main_module.run_once")
+
+    cli.main(["run-once", "--since", "2026-09-12"])
+
+    assert run_once_mock.call_args.kwargs["since"] == "2026-09-12T00:00:00+00:00"
+
+
+def test_run_once_without_since_leaves_the_config_in_charge(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    run_once_mock = mocker.patch("src.cli.main_module.run_once")
+
+    cli.main(["run-once"])
+
+    assert run_once_mock.call_args.kwargs["since"] == ""
+
+
+def test_an_unreadable_since_fails_before_drive_is_touched(mocker, tmp_path):
+    """Parse-time, not cycle-time: a typo must not cost an authentication round trip
+    and then a confusing traceback halfway through a folder."""
+    build_mock = mocker.patch("src.cli.auth.build_drive_service")
+
+    with pytest.raises(SystemExit):
+        cli.main(["run-once", "--since", "last tuesday"])
+
+    build_mock.assert_not_called()

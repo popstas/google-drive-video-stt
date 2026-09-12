@@ -148,6 +148,20 @@ account *owns*, and production watches folders shared *to* the service. Walking 
 a request per folder per cycle and stays inside quota at a thousand subfolders, so
 `walk` is a real fallback, not a degraded mode.
 
+`since` (`run.since`, `folders[].since`, `run-once --since`) puts older recordings out
+of scope. Three things about it are load-bearing. It is compared against
+`parse_meeting_start` of the recording's name, falling back to Drive's `createdTime`,
+because the operator means the call and `createdTime` answers a different question.
+Meet's own lag measured 0-2 hours across eight real recordings -- enough to carry a
+late call past midnight -- and a copy or re-upload resets `createdTime` entirely. A recording neither
+can date stays in scope -- fail open. And `cycle_skipped_old` is deliberately absent
+from `cycle_drained`: an out-of-scope recording is a permanent skip like one over
+`--max-size`, and counting it would hold the cursor on a backlog that is never going
+to be processed. The filter runs before the settling check for the same reason -- an
+old video Drive never finished processing would otherwise count as `deferred`, which
+holds the cursor too. Absolute dates only; a rolling `max_age_days` would drop a
+still-pending recording out of scope overnight with nothing having happened.
+
 Neither path sees a **shortcut** to a recording: Drive reports the shortcut's own
 `application/vnd.google-apps.shortcut`, with the real type only in
 `shortcutDetails.targetMimeType`, so the `video/mp4` filter drops it in the listing and

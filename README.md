@@ -298,6 +298,40 @@ subfolders, comfortably inside quota -- so this is a real fallback, not a degrad
 mode. Start on `walk` if the feed has not proven itself on your Drive, and switch to
 `auto` once it has.
 
+### Leaving a backlog alone
+
+A folder shared with the service arrives with everything the person ever recorded.
+`since` keeps the old ones out of scope:
+
+```yaml
+run:
+  since: 2026-09-12          # default for every folder
+folders:
+  - folder_id: ...
+    since: 2026-12-01        # this person joined later
+```
+
+Per folder because onboarding is an event about a person: a date that is right for
+today's employees is wrong for whoever joins in three months with a backlog of their
+own. `run-once --since DATE` overrides both for one run, and `gdstt process <file-id>`
+ignores the cutoff entirely -- asking for a file by id means that file.
+
+**The date is the call's, not the upload's.** It is read from the recording's name,
+where Meet writes the meeting time, and only falls back to when Drive received the
+file. `createdTime` answers a different question -- when this file appeared -- and the
+two come apart both ways. Meet's own lag measured 0-2 hours across eight real
+recordings, which is still enough to push a late-evening call into the next day; and
+copying or re-uploading a recording resets `createdTime` outright, which is how a set
+of test files ended up three days adrift from the calls they recorded. A recording
+neither can date is processed rather than skipped.
+
+An out-of-scope recording is a permanent skip by design, like one over `--max-size`:
+it is counted as `skipped_old`, it never holds the changes cursor, and nothing is
+written to Drive about it. Move the date back and the backlog is in scope again --
+which is also how to undo a cutoff set wrong. `--dry-run` names each recording a
+cutoff excludes; a real cycle only counts them, because a folder with a year of
+history would otherwise print itself every ten minutes.
+
 ### What neither path sees: shortcuts
 
 A Drive *shortcut* to a recording is invisible to both discovery paths. Drive reports
@@ -971,8 +1005,9 @@ The runtime treats incomplete output as failure instead of silently uploading it
 
 `run-once` logs one process summary per worked file, one folder summary per folder,
 and one cycle summary. The cycle summary includes pending, processed, failed,
-`retry_total`, skipped-by-size, skipped-unmatched, folder-error, `deferred` (videos
-Drive has not finished processing), `cursor_moved`, and duration fields. Each process
+`retry_total`, skipped-by-size, skipped-unmatched, `skipped_old` (recordings before
+`since`), folder-error, `deferred` (videos Drive has not finished processing),
+`cursor_moved`, and duration fields. Each process
 summary also records the Deepgram request cost (USD, when the usage API has
 recorded it) and the OpenAI keypoints token usage.
 

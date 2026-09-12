@@ -36,7 +36,8 @@ from src import (
     webhook,
 )
 from src.auth import AuthError, build_drive_service
-from src.config import Config, is_run_enabled, load_config
+from src.config import Config, is_run_enabled, load_config, parse_since
+from src.meeting_time import parse_meeting_start
 from src.extractor import extract_m4a_copy, extract_mp3
 from src.openai_pipeline import OpenAIPipeline
 from src.presets import Preset
@@ -1452,6 +1453,70 @@ def _is_still_settling(item: dict, now: datetime) -> bool:
     return now - created < _MEDIA_SETTLING_GRACE
 
 
+def _recording_datetime(item: dict) -> datetime | None:
+    """When the call happened, as well as it can be known.
+
+    The name first: Meet writes the meeting time into it, and that is what an
+    operator means by "calls from the 12th". Drive's ``createdTime`` is the fallback
+    rather than the source because it answers a different question -- when this file
+    appeared -- and the two come apart in both small ways and large. Measured across
+    eight real recordings, Meet's own lag ran 0-2 hours, enough to push a late call
+    past midnight into the next day. Copying or re-uploading a recording resets
+    ``createdTime`` outright: the examples this was built against were three days
+    adrift for exactly that reason.
+
+    ``None`` when neither is readable, which the caller treats as in scope. Dropping
+    a recording nobody can date would be a silent loss, and silent loss is the
+    failure this whole area exists to remove.
+    """
+    file_info = item.get("file", {})
+    meeting = parse_meeting_start(file_info.get("name", ""))
+    if meeting is not None:
+        return meeting
+    created_raw = file_info.get("createdTime")
+    if not created_raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+    except ValueError:
+        logger.info("Unreadable createdTime %r; treating it as in scope", created_raw)
+        return None
+
+
+def _items_in_date_scope(
+    items: list[dict], cutoff: datetime | None, *, dry_run: bool
+) -> tuple[list[dict], int]:
+    """Split off recordings of calls older than ``cutoff``.
+
+    Applied before everything else in the cycle, and deliberately so: an old
+    recording that Drive never finished processing would otherwise be counted as
+    deferred, and deferred holds the changes cursor -- the backlog an operator asked
+    to ignore would freeze the feed instead.
+
+    Counted per folder rather than logged per file: a folder with a year of history
+    would print its whole backlog every ten minutes. ``--dry-run`` names them, which
+    is where an operator goes to see what a cutoff will actually do.
+    """
+    if cutoff is None:
+        return items, 0
+    kept: list[dict] = []
+    skipped = 0
+    for item in items:
+        when = _recording_datetime(item)
+        if when is not None and when < cutoff:
+            skipped += 1
+            if dry_run:
+                logger.info(
+                    "DRY RUN: %s is from %s, before %s; not in scope",
+                    item.get("file", {}).get("name"),
+                    when.isoformat(),
+                    cutoff.isoformat(),
+                )
+            continue
+        kept.append(item)
+    return kept, skipped
+
+
 def _pending_items(items: list[dict], config: Config) -> list[dict]:
     stt_enabled = bool(config.stt_provider)
     now = _utcnow()
@@ -1948,6 +2013,7 @@ def run_once(
     max_size_bytes: int | None = None,
     confirm_large: bool = False,
     mode: str = "auto",
+    since: str = "",
 ) -> None:
     cycle_started_at = time.monotonic()
     cycle_pending = 0
@@ -1958,6 +2024,7 @@ def run_once(
     cycle_skipped_unmatched = 0
     cycle_folder_errors = 0
     cycle_deferred = 0
+    cycle_skipped_old = 0
     settle_check_time = _utcnow()
 
     discovery = _discover(service, config, mode=mode)
@@ -1966,6 +2033,13 @@ def run_once(
 
     for folder_id, items in discovery.listings:
         _apply_local_output_state(items, config)
+        total_seen = len(items)
+        items, skipped_old = _items_in_date_scope(
+            items,
+            parse_since(since or config.since_for(folder_id), source="since"),
+            dry_run=dry_run,
+        )
+        cycle_skipped_old += skipped_old
         cycle_deferred += sum(
             1 for item in items if _is_still_settling(item, settle_check_time)
         )
@@ -1986,11 +2060,13 @@ def run_once(
         cycle_pending += len(pending)
         cycle_skipped_size += skipped_size
         logger.info(
-            "Folder %s summary [total=%d, pending=%d, skipped_size=%d, dry_run=%s]",
+            "Folder %s summary [total=%d, pending=%d, skipped_size=%d, "
+            "skipped_old=%d, dry_run=%s]",
             folder_id,
-            len(items),
+            total_seen,
             len(pending),
             skipped_size,
+            skipped_old,
             dry_run,
         )
         if dry_run:
@@ -2067,6 +2143,9 @@ def run_once(
     # produce no second change of its own. Stepping over it would lose it for good --
     # the very failure this whole change exists to remove. Re-reading changes instead
     # is free, because the folder listing decides what still needs doing.
+    # `cycle_skipped_old` is deliberately absent: a recording left out by `since` is
+    # a permanent skip by design, like one over `--max-size`. Counting it would hold
+    # the cursor on a backlog that is never going to be processed.
     cycle_drained = not (cycle_failed or cycle_folder_errors or cycle_deferred)
     if not dry_run and discovery.cursor and cycle_drained:
         change_cursor.write(change_cursor.path_for(config.data_dir), discovery.cursor)
@@ -2090,8 +2169,9 @@ def run_once(
 
     logger.info(
         "Cycle summary [provider=%s, outcome=%s, folders=%d, pending=%d, processed=%d, failed=%d, "
-        "retry_total=%d, skipped_size=%d, skipped_unmatched=%d, folder_errors=%d, "
-        "deferred=%d, cursor_moved=%s, dry_run=%s, duration_s=%.3f]",
+        "retry_total=%d, skipped_size=%d, skipped_unmatched=%d, skipped_old=%d, "
+        "folder_errors=%d, deferred=%d, cursor_moved=%s, dry_run=%s, "
+        "duration_s=%.3f]",
         config.stt_provider or "artifact-only",
         _cycle_outcome(
             dry_run=dry_run,
@@ -2105,6 +2185,7 @@ def run_once(
         cycle_retry_total,
         cycle_skipped_size,
         cycle_skipped_unmatched,
+        cycle_skipped_old,
         cycle_folder_errors,
         cycle_deferred,
         bool(discovery.cursor) and cycle_drained and not dry_run,

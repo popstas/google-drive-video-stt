@@ -1313,11 +1313,14 @@ def test_run_once_logs_folder_and_cycle_summary(mocker, caplog):
     with caplog.at_level("INFO"):
         main.run_once(service, cfg)
 
-    assert "Folder f1 summary [total=2, pending=1, skipped_size=0, dry_run=False]" in caplog.text
+    assert (
+        "Folder f1 summary [total=2, pending=1, skipped_size=0, skipped_old=0, "
+        "dry_run=False]" in caplog.text
+    )
     assert (
         "Cycle summary [provider=deepgram, outcome=success, folders=1, pending=1, "
         "processed=1, failed=0, retry_total=0, skipped_size=0, skipped_unmatched=0, "
-        "folder_errors=0, deferred=0, cursor_moved=True, dry_run=False, "
+        "skipped_old=0, folder_errors=0, deferred=0, cursor_moved=True, dry_run=False, "
         "duration_s=1.250]"
     ) in caplog.text
 
@@ -5305,3 +5308,187 @@ def test_the_service_loop_takes_the_configured_discovery_path(mocker):
         main.main()
 
     assert modes == ["walk"]
+
+
+# --- `since`: leaving a backlog alone without leaving it half-remembered ----------
+#
+# A folder shared to the service arrives with everything the person ever recorded.
+# The cutoff is a scope rule, not a record of work: nothing is written to Drive, so
+# moving the date back brings the backlog straight back into scope.
+
+
+def _dated_item(file_id, name, *, created=None, media_metadata=True):
+    item = _item(file_id, name)
+    if created is not None:
+        item["file"]["createdTime"] = created
+    item["has_media_metadata"] = media_metadata
+    return item
+
+
+# A room-code recording: Meet puts the meeting time in the name.
+OLD_CALL = "exf-wxzm-uzk (2026-09-09 17_42 GMT+2).mp4"
+NEW_CALL = "exf-wxzm-uzk (2026-11-20 17_42 GMT+2).mp4"
+
+
+def test_a_recording_older_than_since_is_left_alone(mocker, tmp_path):
+    cfg = replace(
+        make_config(folders=["root"], data_dir=tmp_path, stt_provider=""),
+        run_since="2026-10-01",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_dated_item("v1", OLD_CALL), _dated_item("v2", NEW_CALL)],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert process_mock.call_count == 1
+    assert process_mock.call_args.args[1]["file"]["name"] == NEW_CALL
+
+
+def test_the_meeting_time_in_the_name_beats_when_drive_received_it(mocker, tmp_path):
+    """The two answer different questions. These examples were recorded on the 9th
+    and re-uploaded on the 12th, which reset `createdTime` by three days; real Meet
+    lag is a couple of hours, which still carries a late-evening call into the next
+    day. Either way "calls from the 10th" has to mean the call."""
+    cfg = replace(
+        make_config(folders=["root"], data_dir=tmp_path, stt_provider=""),
+        run_since="2026-09-10",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[
+            _dated_item("v1", OLD_CALL, created="2026-09-12T05:54:48.536Z")
+        ],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    process_mock.assert_not_called()
+
+
+def test_a_name_without_a_time_falls_back_to_when_drive_received_it(mocker, tmp_path):
+    cfg = replace(
+        make_config(folders=["root"], data_dir=tmp_path, stt_provider=""),
+        run_since="2026-10-01",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[
+            _dated_item("v1", "hand-renamed.mp4", created="2026-08-01T10:00:00Z")
+        ],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    process_mock.assert_not_called()
+
+
+def test_a_recording_nobody_can_date_stays_in_scope(mocker, tmp_path):
+    """Fail open. Dropping a recording because its date is unreadable would be a
+    silent loss, which is the failure this whole area exists to remove."""
+    cfg = replace(
+        make_config(folders=["root"], data_dir=tmp_path, stt_provider=""),
+        run_since="2026-10-01",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_dated_item("v1", "hand-renamed.mp4")],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    process_mock.assert_called_once()
+
+
+def test_an_out_of_scope_recording_does_not_hold_the_changes_cursor(mocker, tmp_path):
+    """The one that makes this safe. An old recording Drive never finished
+    processing would otherwise count as deferred, and deferred holds the cursor -- so
+    the backlog an operator asked to ignore would freeze the feed instead of being
+    ignored. It is a permanent skip by design, like one over `--max-size`."""
+    cfg = replace(
+        make_config(folders=["root"], data_dir=tmp_path, stt_provider=""),
+        run_since="2026-10-01",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_dated_item("v1", OLD_CALL, media_metadata=False)],
+    )
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-1")
+    mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-1"
+
+
+def test_a_folders_own_since_overrides_the_global_one(mocker, tmp_path):
+    """Onboarding is an event about a person: whoever joins in three months brings a
+    backlog of their own, and one global date cannot be right for both."""
+    cfg = replace(
+        make_config(
+            folders=[
+                EmployeeFolder("early", since=""),
+                EmployeeFolder("late", since="2026-12-01"),
+            ],
+            data_dir=tmp_path,
+            stt_provider="",
+        ),
+        run_since="2026-09-01",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_dated_item("v1", NEW_CALL)],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    # The November call is in scope for the folder on the September default and out
+    # of scope for the one that only starts in December.
+    assert [c.args[2] for c in process_mock.call_args_list] == ["early"]
+
+
+def test_the_since_flag_overrides_every_configured_cutoff(mocker, tmp_path):
+    cfg = replace(
+        make_config(
+            folders=[EmployeeFolder("root", since="2026-12-01")],
+            data_dir=tmp_path,
+            stt_provider="",
+        ),
+        run_since="2026-12-01",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_dated_item("v1", OLD_CALL)],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg, since="2026-01-01")
+
+    process_mock.assert_called_once()
+
+
+def test_a_dry_run_names_what_the_cutoff_leaves_out(mocker, tmp_path, caplog):
+    """Counted per folder in a real cycle -- a year of history would print itself
+    every ten minutes -- but named here, because this is where an operator looks to
+    find out what a date is about to do."""
+    cfg = replace(
+        make_config(folders=["root"], data_dir=tmp_path, stt_provider=""),
+        run_since="2026-10-01",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_dated_item("v1", OLD_CALL)],
+    )
+
+    with caplog.at_level(logging.INFO):
+        main.run_once(MagicMock(), cfg, dry_run=True)
+
+    assert "not in scope" in caplog.text
+    assert OLD_CALL in caplog.text
+    assert "skipped_old=1" in caplog.text

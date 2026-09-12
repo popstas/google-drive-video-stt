@@ -18,6 +18,7 @@ from src.config import (
     import_google_credentials,
     init_config,
     load_config,
+    parse_since,
     resolve_config_file_path,
     set_run_enabled,
     use_google_files,
@@ -193,6 +194,15 @@ def cmd_start(args: argparse.Namespace) -> None:
     )
 
 
+def _since_argument(value: str) -> str:
+    """Validate `--since` at parse time so a typo fails before Drive is touched."""
+    try:
+        parsed = parse_since(value, source="--since")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return parsed.isoformat() if parsed is not None else ""
+
+
 def cmd_run_once(args: argparse.Namespace) -> None:
     config = load_config(config_path=args.config)
     service = auth.build_drive_service(config=config)
@@ -205,6 +215,7 @@ def cmd_run_once(args: argparse.Namespace) -> None:
         # No --mode means "do what the service would do", so a deployment pinned to
         # `run.discovery: walk` is not silently exercised on the other path.
         mode=args.mode or config.run_discovery,
+        since=args.since or "",
     )
 
 
@@ -492,6 +503,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         state = "set, but the configured folders changed -- next cycle sweeps once"
     print(f"changes cursor: {cursor_path} ({state})")
     print(f"discovery: run.discovery={config.run_discovery}")
+    print(f"since: run.since={config.run_since or 'unset, every recording in scope'}")
     for folder in config.folders:
         _print_folder_diagnosis(service, folder.folder_id)
 
@@ -962,6 +974,18 @@ def build_parser() -> argparse.ArgumentParser:
             "sweeps otherwise; 'walk' sweeps every folder without touching the cursor; "
             "'changes' only reads the feed and fails when there is no cursor. "
             "Defaults to run.discovery from the config, which the service itself uses"
+        ),
+    )
+    p_run_once.add_argument(
+        "--since",
+        type=_since_argument,
+        default=None,
+        metavar="DATE",
+        help=(
+            "Ignore recordings of calls before this date (2026-09-12 or an ISO "
+            "timestamp), overriding run.since and any folder's own since for this "
+            "run. The date is read from the recording's name, falling back to when "
+            "Drive received it"
         ),
     )
     _add_processing_safety_args(p_run_once)

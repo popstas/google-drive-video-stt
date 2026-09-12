@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime
 from importlib.resources import files
 from pathlib import Path
 from urllib.parse import urlparse
@@ -54,6 +55,46 @@ DEEPGRAM_MAX_KEYTERMS = 100
 ENTITIES_PLACEHOLDER = "{{entities}}"
 
 
+def parse_since(value: object, *, source: str) -> datetime | None:
+    """Read a ``since`` cutoff, or ``None`` when unset.
+
+    Accepts what an operator writes and what YAML hands back for it: bare
+    ``2026-09-12`` comes through as a ``date``, a timestamp as a ``datetime``, and a
+    quoted value as a string. A date means midnight UTC that day; a naive timestamp
+    is read as UTC, because every time this is compared against -- the meeting time
+    parsed out of a recording's name, and Drive's ``createdTime`` -- is UTC already.
+
+    Unparseable raises rather than being ignored. A cutoff that silently did nothing
+    would be discovered as a Deepgram bill for someone's entire backlog.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, date):
+        parsed = datetime(value.year, value.month, value.day)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(
+                f"{source} must be a date (2026-09-12) or an ISO timestamp, "
+                f"got: {value!r}"
+            ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _since_text(value: object, *, source: str) -> str:
+    """Normalize a ``since`` value to the string kept in the config object."""
+    parsed = parse_since(value, source=source)
+    return parsed.isoformat() if parsed is not None else ""
+
+
 FOLDER_IDS_MIGRATION_ERROR = (
     "folder_ids is no longer supported; use\n"
     "  folders:\n"
@@ -80,6 +121,11 @@ class EmployeeFolder:
     name: str = ""
     email: str = ""
     telegram: str = ""
+    # Recordings of calls before this are out of scope for the polling loop. Set per
+    # folder because onboarding is an event about a person: a cutoff that is right
+    # for today's employees is wrong for the one who joins in three months with a
+    # backlog of their own. Empty means "whatever ``run.since`` says".
+    since: str = ""
 
 
 @dataclass(frozen=True)
@@ -119,6 +165,11 @@ class Config:
     # reach for if the feed ever turns out not to report what a deployment needs --
     # notably folders shared *to* the service rather than owned by it.
     run_discovery: str = "auto"
+    # Default cutoff for folders that do not set their own. Absolute rather than a
+    # rolling window on purpose: with ``max_age_days`` a recording still pending
+    # today would drop out of scope overnight with nothing having happened, and a
+    # service stopped for a month would skip everything on restart.
+    run_since: str = ""
     output_target: str = "drive"
     output_dir: Path | None = None
     # Publish artifacts to Drive as well while keeping the local folder authoritative.
@@ -219,6 +270,13 @@ class Config:
                 return folder
         return None
 
+    def since_for(self, folder_id: str) -> str:
+        """The cutoff that applies to one folder: its own, else the global default."""
+        folder = self.folder_by_id(folder_id)
+        if folder is not None and folder.since:
+            return folder.since
+        return self.run_since
+
     @property
     def call_bookings_file(self) -> Path:
         """Where the booking journal lives: alongside the active config file.
@@ -295,6 +353,9 @@ def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
                 name=_yaml_str(entry.get("name")),
                 email=_yaml_str(entry.get("email")),
                 telegram=_yaml_str(entry.get("telegram")),
+                since=_since_text(
+                    entry.get("since"), source=f"folders[{index}].since"
+                ),
             )
         )
     return tuple(folders)
@@ -854,6 +915,7 @@ def _config_from_yaml(
 
     run_enabled = _yaml_bool(run.get("enabled"), default=True)
     run_discovery = (_yaml_str(run.get("discovery"), "auto") or "auto").lower()
+    run_since = _since_text(run.get("since"), source="run.since")
 
     telegram_bot_token = _yaml_str(telegram.get("bot_token"))
     telegram_chat_id = _yaml_str(telegram.get("chat_id"))
@@ -1070,6 +1132,7 @@ def _config_from_yaml(
         drive_mp3_artifact=drive_mp3_artifact,
         run_enabled=run_enabled,
         run_discovery=run_discovery,
+        run_since=run_since,
         output_target=output_target,
         output_dir=output_dir,
         output_also_drive=output_also_drive,
@@ -1281,7 +1344,7 @@ def _default_config_dict(
             "batch": True,
             "max_parallel": 4,
         },
-        "run": {"enabled": True, "discovery": "auto"},
+        "run": {"enabled": True, "discovery": "auto", "since": ""},
         "notifications": {
             "telegram": {
                 "bot_token": "",
@@ -1542,6 +1605,7 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
                 "name": folder.name,
                 "email": folder.email,
                 "telegram": folder.telegram,
+                "since": folder.since,
             }
             for folder in config.folders
         ],
@@ -1592,7 +1656,11 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "max_parallel": config.openai_max_parallel,
             "keypoints": config.openai_keypoints,
         },
-        "run": {"enabled": config.run_enabled, "discovery": config.run_discovery},
+        "run": {
+            "enabled": config.run_enabled,
+            "discovery": config.run_discovery,
+            "since": config.run_since,
+        },
         "notifications": {
             "telegram": {
                 "bot_token": config.telegram_bot_token,
