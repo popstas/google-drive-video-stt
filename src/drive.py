@@ -66,11 +66,24 @@ def get_file_metadata(service: Any, file_id: str) -> dict:
 
 
 def _list_files_by_mime(service: Any, folder_id: str, mime_type: str) -> list[dict]:
+    return _list_files_by_mimes(service, folder_id, (mime_type,))
+
+
+def _list_files_by_mimes(
+    service: Any, folder_id: str, mime_types: tuple[str, ...]
+) -> list[dict]:
+    """List a folder's files of any of ``mime_types`` in a single query.
+
+    Drive charges a round trip per request, not per mime type, and with a subfolder
+    per meeting the old one-request-per-mime shape multiplied by the number of
+    meetings on every cycle. Asking for all four at once and splitting the answer by
+    ``mimeType`` -- which the response already carries -- costs one round trip per
+    folder regardless of how many types the caller wants.
+    """
     files: list[dict] = []
     page_token: str | None = None
-    query = (
-        f"'{folder_id}' in parents and mimeType = '{mime_type}' and trashed = false"
-    )
+    mime_clause = " or ".join(f"mimeType = '{mime}'" for mime in mime_types)
+    query = f"'{folder_id}' in parents and ({mime_clause}) and trashed = false"
     while True:
         response = (
             service.files()
@@ -222,10 +235,13 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
     Legacy ``<video-stem>.keypoints.md`` files uploaded before the appProperty
     existed are folded onto the ``keypoints`` preset by stem.
     """
-    mp4_files = _list_files_by_mime(service, folder_id, MP4_MIME)
-    mp3_files = _list_files_by_mime(service, folder_id, MP3_MIME)
-    text_files = _list_files_by_mime(service, folder_id, TXT_MIME)
-    md_files = _list_files_by_mime(service, folder_id, MD_MIME)
+    found = _list_files_by_mimes(
+        service, folder_id, (MP4_MIME, MP3_MIME, TXT_MIME, MD_MIME)
+    )
+    mp4_files = [f for f in found if f.get("mimeType") == MP4_MIME]
+    mp3_files = [f for f in found if f.get("mimeType") == MP3_MIME]
+    text_files = [f for f in found if f.get("mimeType") == TXT_MIME]
+    md_files = [f for f in found if f.get("mimeType") == MD_MIME]
 
     # ``text/plain`` is shared by the transcript (``.txt``), the assembled call
     # document (``.stt``), and the merged meta document (``.meta.yml``). Splitting

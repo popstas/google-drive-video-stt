@@ -937,3 +937,44 @@ def test_list_folder_state_reports_its_own_folder_as_the_container():
     ])
 
     assert drive.list_folder_state(service, "f1")[0]["container_id"] == "f1"
+
+
+def test_list_folder_state_asks_drive_once_per_folder():
+    """Four listings per folder was fine flat; with a subfolder per meeting it becomes
+    four per meeting, every cycle, forever. One query carrying all four mime types
+    costs the same round trip as one of them."""
+    service = _meet_root_service()
+
+    drive.list_folder_state(service, "d1")
+
+    assert service.files.return_value.list.call_count == 1
+
+
+def test_list_folder_state_still_separates_the_mime_types_it_asked_for_together():
+    service = _make_drive_service([
+        {"id": "v1", "name": "a.mp4", "mimeType": drive.MP4_MIME, "parents": ["f1"]},
+        {"id": "m1", "name": "a.mp3", "mimeType": drive.MP3_MIME, "parents": ["f1"]},
+        {"id": "t1", "name": "a.txt", "mimeType": drive.TXT_MIME, "parents": ["f1"]},
+        {"id": "k1", "name": "a.keypoints.md", "mimeType": drive.MD_MIME, "parents": ["f1"]},
+    ])
+
+    item = drive.list_folder_state(service, "f1")[0]
+
+    assert item["has_mp3"] is True
+    assert item["has_txt"] is True
+    assert item["txt_id"] == "t1"
+    assert item["artifact_ids"] == {"keypoints": "k1"}
+
+
+def test_list_folder_state_ignores_mime_types_it_did_not_ask_for():
+    """The Google-made transcript sits in the same subfolder as a Google Doc; it must
+    not be mistaken for our own text/plain transcript."""
+    service = _make_drive_service([
+        {"id": "v1", "name": "a.mp4", "mimeType": drive.MP4_MIME, "parents": ["f1"]},
+        {"id": "g1", "name": "a - Transcript",
+         "mimeType": "application/vnd.google-apps.document", "parents": ["f1"]},
+    ])
+
+    item = drive.list_folder_state(service, "f1")[0]
+
+    assert item["has_txt"] is False
