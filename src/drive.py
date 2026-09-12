@@ -163,6 +163,19 @@ def list_mp4_timestamps(service: Any, folder_id: str) -> list[dict]:
     return files
 
 
+def list_mp4_timestamps_in_tree(service: Any, folder_id: str) -> list[dict]:
+    """``list_mp4_timestamps`` for a folder and each of its subfolders.
+
+    The operator-facing reports run over this. Asking only the configured folder
+    answers "no recordings at all" on a Google Meet root, which reads as "nothing was
+    ever sent to Planfix" or "nothing to restore" -- confidently, and wrongly.
+    """
+    files = list_mp4_timestamps(service, folder_id)
+    for subfolder in list_subfolders(service, folder_id):
+        files.extend(list_mp4_timestamps(service, subfolder["id"]))
+    return files
+
+
 def set_file_modified_time(service: Any, file_id: str, modified_time: str) -> dict:
     """Set a file's modifiedTime, leaving appProperties and content untouched.
 

@@ -4986,3 +4986,129 @@ def test_the_mp3_of_a_flat_folder_still_goes_where_it_always_did(mocker, tmp_pat
     )
 
     assert upload_mock.call_args.args[2] == "root"
+
+
+
+# --- Everything that keys off the configured folder must survive a subfolder -------
+#
+# Telegram, Planfix routing, the employee name and the meta document all resolve
+# through `config.folder_by_id`. Hand any of them a meeting subfolder and they get
+# None back -- no chat, no forced recognition, no manager -- without raising.
+
+
+def _telegram_config(tmp_path, chat="-1001234567890"):
+    return make_config(
+        folders=[EmployeeFolder("root", name="Анжелика", email="a@b.c", telegram=chat)],
+        data_dir=tmp_path,
+        stt_provider="",
+    )
+
+
+def test_a_folders_telegram_chat_is_found_for_a_video_in_a_subfolder(tmp_path):
+    """The chat lives on the configured folder. Looking it up by the meeting
+    subfolder returns "" -- which also silently turns off the unconditional
+    recognition that having a chat is supposed to mean."""
+    cfg = _telegram_config(tmp_path)
+
+    assert main.folder_telegram_chat(cfg, "root") == "-1001234567890"
+    assert main.folder_telegram_chat(cfg, "meeting-1") == ""
+
+
+def test_a_telegram_folder_still_recognises_a_subfolder_recording_without_a_booking(
+    mocker, tmp_path
+):
+    """A folder with a chat is watched for its own sake, so "no booking" must not
+    skip it -- and must not mark it unmatched, which would park it for good."""
+    cfg = replace(_telegram_config(tmp_path), call_booking_disable_recognition=True)
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    mocker.patch(
+        "src.main.booking_gate.resolve",
+        return_value=BookingDecision(state="unmatched", reason="no-booking"),
+    )
+    mark_mock = mocker.patch("src.main.booking_gate.mark_unmatched")
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    process_mock.assert_called_once()
+    mark_mock.assert_not_called()
+
+
+def test_the_telegram_summary_is_sent_for_a_video_in_a_subfolder(mocker, tmp_path):
+    cfg = _telegram_config(tmp_path)
+    send_mock = mocker.patch("src.main.notify.send_message", return_value=True)
+    mocker.patch("src.main.drive.set_file_app_properties")
+
+    main._send_telegram_summary(
+        MagicMock(),
+        _subfolder_item("v1", "a.mp4", "meeting-1"),
+        "v1",
+        "root",
+        replace(cfg, telegram_bot_token="bot-token"),
+        {"keypoints": "## Задачи"},
+        MATCHED_DECISION,
+    )
+
+    assert send_mock.call_args.kwargs["chat_id"] == "-1001234567890"
+
+
+def test_the_planfix_comment_is_sent_for_a_video_in_a_subfolder(mocker, tmp_path):
+    """Planfix is addressed by the booking's task id, not by a folder -- this pins
+    that the subfolder did not disturb the path to it."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path)
+    cfg = replace(cfg, planfix_create_comment_url="https://planfix.example/api",
+                  planfix_token="t", planfix_presets=("keypoints",))
+    send_mock = mocker.patch("src.main.planfix.send_comment", return_value=True)
+    mocker.patch("src.main.drive.set_file_app_properties")
+
+    main._send_planfix_comment(
+        MagicMock(),
+        _subfolder_item("v1", "a.mp4", "meeting-1"),
+        "v1",
+        cfg,
+        {"keypoints": "## Задачи"},
+        MATCHED_DECISION,
+    )
+
+    assert send_mock.call_args.kwargs["task_id"] == "851030"
+
+
+def test_name_rules_still_route_a_subfolder_recording(mocker, tmp_path):
+    """`name_rules` resolve through `folder_by_id` in the gate. A subfolder id there
+    would drop the rule and send the comment to the wrong task -- or to none."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    resolve_mock = mocker.patch(
+        "src.main.booking_gate.resolve", return_value=MATCHED_DECISION
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert resolve_mock.call_args.args[1] == "root"
+
+
+def test_the_meta_document_names_the_employee_for_a_subfolder_recording(
+    mocker, tmp_path
+):
+    cfg = make_config(
+        folders=[EmployeeFolder("root", name="Анжелика", email="a@b.c")],
+        data_dir=tmp_path,
+    )
+    build_mock = mocker.patch("src.main.meta_doc.build", return_value={})
+    mocker.patch("src.main.meta_doc.to_yaml", return_value="")
+    mocker.patch("src.main.stt_document.assemble", return_value="")
+    mocker.patch("src.main.output.write_artifact")
+
+    main._write_call_documents(
+        MagicMock(), "v1", "a.mp4", "root", "meeting-1", "transcript", {},
+        cfg, tmp_path, item={}, booking_decision=MATCHED_DECISION,
+    )
+
+    assert build_mock.call_args.kwargs["folder_id"] == "root"

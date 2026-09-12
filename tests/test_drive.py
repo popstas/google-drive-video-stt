@@ -1305,3 +1305,28 @@ def test_start_page_token_is_asked_for_with_arguments_drive_accepts():
 
     kwargs = service.changes.return_value.getStartPageToken.call_args.kwargs
     assert kwargs == {"supportsAllDrives": True}
+
+
+def test_mp4_timestamps_in_tree_sees_meeting_subfolders():
+    """`planfix sent` and `bookings restore-dates` read through this. One level would
+    answer "no recordings" on a Meet root -- a confident, wrong report."""
+    service = _make_drive_service([
+        {"id": "d1", "name": "meeting", "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+        {"id": "v1", "name": "nested.mp4", "mimeType": drive.MP4_MIME, "parents": ["d1"],
+         "createdTime": "2026-09-09T18:53:00Z"},
+        {"id": "v0", "name": "loose.mp4", "mimeType": drive.MP4_MIME, "parents": ["root"],
+         "createdTime": "2026-09-08T10:00:00Z"},
+    ])
+
+    found = drive.list_mp4_timestamps_in_tree(service, "root")
+
+    assert sorted(f["id"] for f in found) == ["v0", "v1"]
+
+
+def test_mp4_timestamps_in_tree_on_a_flat_folder_is_unchanged():
+    service = _make_drive_service([
+        {"id": "v1", "name": "a.mp4", "mimeType": drive.MP4_MIME, "parents": ["flat"],
+         "createdTime": "2026-09-08T10:00:00Z"},
+    ])
+
+    assert [f["id"] for f in drive.list_mp4_timestamps_in_tree(service, "flat")] == ["v1"]

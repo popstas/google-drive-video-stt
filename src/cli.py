@@ -592,7 +592,7 @@ def cmd_planfix_sent(args: argparse.Namespace) -> None:
     service = auth.build_drive_service(config=config)
     rows: list[tuple[str, str, str, str, str]] = []
     for folder in config.folders:
-        for item in drive.list_mp4_timestamps(service, folder.folder_id):
+        for item in drive.list_mp4_timestamps_in_tree(service, folder.folder_id):
             task_id = (item.get("appProperties") or {}).get(
                 drive.PLANFIX_COMMENT_TASK_ID_PROPERTY, ""
             )
@@ -644,7 +644,7 @@ def cmd_bookings_restore_dates(args: argparse.Namespace) -> None:
     service = auth.build_drive_service(config=config)
     total = 0
     for folder in config.folders:
-        files = drive.list_mp4_timestamps(service, folder.folder_id)
+        files = drive.list_mp4_timestamps_in_tree(service, folder.folder_id)
         for file_id, name, created in booking_gate.select_stale_marks(files):
             total += 1
             if args.dry_run:
