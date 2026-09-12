@@ -4944,3 +4944,45 @@ def test_an_auth_failure_during_the_ancestor_lookup_still_stops_the_cycle(
 
     with pytest.raises(RefreshError):
         main.run_once(MagicMock(), cfg)
+
+
+def test_the_mp3_is_written_into_the_meeting_subfolder(mocker, tmp_path):
+    """The requirement the whole migration started from: an artifact belongs beside
+    its video. The mp3 upload is its own call site and was the one left pointing at
+    the configured folder -- so every artifact landed a level above the recording."""
+    cfg = make_config(folders=["root"], output_dir=tmp_path)
+    upload_mock = mocker.patch("src.main.drive.upload")
+    mp4_path = tmp_path / "a.mp4"
+    mp4_path.write_bytes(b"video")
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "a.mp3")
+    mocker.patch("src.main._run_preset_stage", return_value={})
+    mocker.patch("src.main._try_write_call_documents", return_value=None)
+
+    main.process_item(
+        MagicMock(),
+        _subfolder_item("v1", "a.mp4", "meeting-1"),
+        "root",
+        cfg,
+        booking_decision=MATCHED_DECISION,
+    )
+
+    assert upload_mock.call_args.args[2] == "meeting-1"
+
+
+def test_the_mp3_of_a_flat_folder_still_goes_where_it_always_did(mocker, tmp_path):
+    cfg = make_config(folders=["root"], output_dir=tmp_path)
+    upload_mock = mocker.patch("src.main.drive.upload")
+    mp4_path = tmp_path / "a.mp4"
+    mp4_path.write_bytes(b"video")
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "a.mp3")
+    mocker.patch("src.main._run_preset_stage", return_value={})
+    mocker.patch("src.main._try_write_call_documents", return_value=None)
+
+    main.process_item(
+        MagicMock(), _item("v1", "a.mp4"), "root", cfg,
+        booking_decision=MATCHED_DECISION,
+    )
+
+    assert upload_mock.call_args.args[2] == "root"

@@ -298,9 +298,14 @@ def describe_folder(service: Any, folder_id: str) -> dict:
 
 def get_start_page_token(service: Any) -> str:
     """Return a cursor marking "everything up to now has been seen"."""
+    # Only `supportsAllDrives` here: `getStartPageToken` does not take
+    # `includeItemsFromAllDrives`, and passing it is a TypeError from the client
+    # rather than an API error -- which a mock accepts happily and a real Drive does
+    # not. Without the token the service silently falls back to sweeping every folder
+    # on every cycle, for good.
     response = (
         service.changes()
-        .getStartPageToken(supportsAllDrives=True, includeItemsFromAllDrives=True)
+        .getStartPageToken(supportsAllDrives=True)
         .execute()
     )
     return response.get("startPageToken", "")

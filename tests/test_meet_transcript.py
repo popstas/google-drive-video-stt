@@ -156,3 +156,12 @@ Alice: two
 Bob: three
 """
     assert meet_transcript.speakers(text) == ["Alice", "Bob"]
+
+
+def test_the_export_byte_order_mark_is_ignored():
+    """Drive's text/plain export opens with a BOM. It happens to land on the title
+    line today, but a header carrying an invisible prefix would match nothing."""
+    text = "﻿Attendees\nAlice, Bob\nTranscript\nBob: one\nAlice: two\n"
+
+    assert meet_transcript.attendees(text) == ["Alice", "Bob"]
+    assert meet_transcript.participants(text) == ["Bob", "Alice"]

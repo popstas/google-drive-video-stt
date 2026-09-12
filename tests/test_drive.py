@@ -1292,3 +1292,16 @@ def test_listings_ask_only_whether_the_video_metadata_exists():
 
     fields = service.files.return_value.list.call_args.kwargs["fields"]
     assert "videoMediaMetadata(durationMillis)" in fields
+
+
+def test_start_page_token_is_asked_for_with_arguments_drive_accepts():
+    """`getStartPageToken` takes `supportsAllDrives` but not
+    `includeItemsFromAllDrives`; the client raises TypeError on the latter, which a
+    MagicMock accepts without complaint. Losing the token is not loud -- the service
+    just sweeps every folder forever."""
+    service = _make_drive_service([])
+
+    drive.get_start_page_token(service)
+
+    kwargs = service.changes.return_value.getStartPageToken.call_args.kwargs
+    assert kwargs == {"supportsAllDrives": True}

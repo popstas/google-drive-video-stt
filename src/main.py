@@ -1225,7 +1225,7 @@ def process_item(
                 drive.upload(
                     service,
                     mp3_path,
-                    folder_id,
+                    container_id,
                     mime_type=drive.MP3_MIME,
                     name=mp3_drive_name,
                     app_properties={
@@ -1234,7 +1234,7 @@ def process_item(
                     },
                 )
                 mp3_uploaded = True
-                logger.info("Uploaded %s to folder %s", mp3_drive_name, folder_id)
+                logger.info("Uploaded %s to folder %s", mp3_drive_name, container_id)
 
             if needs_txt:
                 if mp4_path is None:

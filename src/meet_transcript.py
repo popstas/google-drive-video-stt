@@ -54,6 +54,16 @@ def _is_person(name: str) -> bool:
     return True
 
 
+def _lines(text: str) -> list[str]:
+    """The document's lines, stripped, with the export's byte-order mark removed.
+
+    Drive's ``text/plain`` export opens with a BOM. It lands on the title line, which
+    nothing parses -- but only by luck of the layout, and a header carrying an
+    invisible prefix would silently match nothing.
+    """
+    return [line.strip() for line in (text or "").lstrip("﻿").splitlines()]
+
+
 def _dedupe(names: list[str]) -> list[str]:
     seen: list[str] = []
     for name in names:
@@ -64,7 +74,7 @@ def _dedupe(names: list[str]) -> list[str]:
 
 def attendees(text: str) -> list[str]:
     """The names listed under the ``Attendees`` header, minus shared screens."""
-    lines = [line.strip() for line in (text or "").splitlines()]
+    lines = _lines(text)
     for index, line in enumerate(lines):
         if line.lower().rstrip(":") not in _ATTENDEES_HEADERS:
             continue
@@ -86,8 +96,7 @@ def speakers(text: str) -> list[str]:
     appearance -- so this is the sequence that lines the two up.
     """
     found: list[str] = []
-    for raw in (text or "").splitlines():
-        line = raw.strip()
+    for line in _lines(text):
         if not line or _TIMESTAMP_RE.match(line) or _CLOSING_RE.match(line):
             continue
         match = _TURN_RE.match(line)
