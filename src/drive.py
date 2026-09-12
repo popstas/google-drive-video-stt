@@ -109,7 +109,10 @@ def _list_files_by_mimes(
                 q=query,
                 fields=(
                     "nextPageToken, files(id, name, mimeType, size, createdTime, "
-                    "videoMediaMetadata, appProperties)"
+                    # Only whether Drive has finished with the video is read, so one
+                    # cheap sub-field stands in for the whole object on a listing the
+                    # polling loop makes for every folder, every cycle.
+                    "videoMediaMetadata(durationMillis), appProperties)"
                 ),
                 pageSize=PAGE_SIZE,
                 pageToken=page_token,
@@ -232,7 +235,11 @@ def meet_transcript_name(video_name: str) -> str:
     started outside it gets ``<room> (<when>)`` and ``<room> (<when>) - Transcript``.
     Dropping a trailing ``- Recording`` covers both.
     """
-    base = drive_stem(video_name)
+    base = video_name
+    for extension in (".mp4", ".MP4"):
+        if base.endswith(extension):
+            base = base[: -len(extension)]
+            break
     if base.endswith(" - Recording"):
         base = base[: -len(" - Recording")]
     return f"{base} - Transcript"
@@ -360,6 +367,10 @@ def find_configured_ancestor(
     ``None`` means "not ours" and must be treated as a skip, not as an error: the
     account sees folders nobody configured.
 
+    Drive failures are raised, never folded into that ``None``. An expired token or a
+    502 would otherwise be indistinguishable from "belongs to nobody", and the caller
+    would skip a real recording believing it had decided something.
+
     Walks at most ``MAX_ANCESTOR_DEPTH`` levels. Meet nests meeting folders one level
     under the root, so the bound is slack rather than a limit, and it keeps a
     malformed or circular parent chain from costing unbounded requests.
@@ -373,15 +384,11 @@ def find_configured_ancestor(
         if current in configured_ids:
             found = current
             break
-        try:
-            metadata = (
-                service.files()
-                .get(fileId=current, fields="id, parents", supportsAllDrives=True)
-                .execute()
-            )
-        except Exception:
-            logger.exception("Failed to resolve the parent of %s", current)
-            break
+        metadata = (
+            service.files()
+            .get(fileId=current, fields="id, parents", supportsAllDrives=True)
+            .execute()
+        )
         parents = metadata.get("parents") or []
         if not parents:
             break

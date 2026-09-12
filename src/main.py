@@ -1806,6 +1806,7 @@ def _discover_by_changes(service: Any, config: Config, cursor: str) -> _Discover
     configured_ids = {folder.folder_id for folder in config.folders}
     ancestors: dict[str, str | None] = {}
     containers: dict[str, str] = {}
+    unresolved = 0
     for entry in entries:
         if entry.get("removed"):
             continue
@@ -1823,9 +1824,18 @@ def _discover_by_changes(service: Any, config: Config, cursor: str) -> _Discover
         container_id = parents[0]
         if container_id in containers:
             continue
-        owner = drive.find_configured_ancestor(
-            service, container_id, configured_ids, cache=ancestors
-        )
+        try:
+            owner = drive.find_configured_ancestor(
+                service, container_id, configured_ids, cache=ancestors
+            )
+        except (RefreshError, AuthError):
+            raise
+        except Exception as exc:
+            # Not knowing whose folder this is must not read as "nobody's". Counting
+            # it holds the cursor, so the same change is read again next cycle.
+            unresolved += 1
+            _notify_listing_failure(f"the folder above {container_id}", exc, config)
+            continue
         if owner is None:
             # The account can see folders nobody configured, and the feed reports
             # those too.
@@ -1855,7 +1865,9 @@ def _discover_by_changes(service: Any, config: Config, cursor: str) -> _Discover
     logger.info(
         "Changes feed [entries=%d, folders_touched=%d]", len(entries), len(listings)
     )
-    return _Discovery(listings, new_cursor, retry_state.retry_count, folder_errors)
+    return _Discovery(
+        listings, new_cursor, retry_state.retry_count, folder_errors + unresolved
+    )
 
 
 def _discover(service: Any, config: Config, *, mode: str = "auto") -> _Discovery:
@@ -1907,6 +1919,8 @@ def run_once(
     cycle_skipped_size = 0
     cycle_skipped_unmatched = 0
     cycle_folder_errors = 0
+    cycle_deferred = 0
+    settle_check_time = _utcnow()
 
     discovery = _discover(service, config, mode=mode)
     cycle_retry_total += discovery.retries
@@ -1914,6 +1928,9 @@ def run_once(
 
     for folder_id, items in discovery.listings:
         _apply_local_output_state(items, config)
+        cycle_deferred += sum(
+            1 for item in items if _is_still_settling(item, settle_check_time)
+        )
         pending = _pending_items(items, config)
         # A marked recording is settled: reconsidering it every cycle would re-log and
         # re-decide forever. `gdstt bookings rematch` or any manual command revives it.
@@ -2006,16 +2023,26 @@ def run_once(
                     proxy_url=config.proxy_url,
                 )
 
-    if not dry_run and discovery.cursor:
-        # After the work, not before: a cycle that died half way through must see the
-        # same changes again rather than step over them. Re-reading is free, because
-        # the folder listing -- not the journal -- decides what still needs doing.
+    # Only a cycle that actually drained what it found may move the cursor, and only
+    # after the work. The changes feed reports a folder once, when something happens
+    # in it; a recording this cycle failed on, or deliberately left for later, will
+    # produce no second change of its own. Stepping over it would lose it for good --
+    # the very failure this whole change exists to remove. Re-reading changes instead
+    # is free, because the folder listing decides what still needs doing.
+    cycle_drained = not (cycle_failed or cycle_folder_errors or cycle_deferred)
+    if not dry_run and discovery.cursor and cycle_drained:
         change_cursor.write(change_cursor.path_for(config.data_dir), discovery.cursor)
+    elif not dry_run and discovery.cursor:
+        logger.info(
+            "Holding the changes cursor [failed=%d, folder_errors=%d, deferred=%d]; "
+            "the next cycle reads the same changes again",
+            cycle_failed, cycle_folder_errors, cycle_deferred,
+        )
 
     logger.info(
         "Cycle summary [provider=%s, outcome=%s, folders=%d, pending=%d, processed=%d, failed=%d, "
-        "retry_total=%d, skipped_size=%d, skipped_unmatched=%d, folder_errors=%d, dry_run=%s, "
-        "duration_s=%.3f]",
+        "retry_total=%d, skipped_size=%d, skipped_unmatched=%d, folder_errors=%d, "
+        "deferred=%d, cursor_moved=%s, dry_run=%s, duration_s=%.3f]",
         config.stt_provider or "artifact-only",
         _cycle_outcome(
             dry_run=dry_run,
@@ -2030,6 +2057,8 @@ def run_once(
         cycle_skipped_size,
         cycle_skipped_unmatched,
         cycle_folder_errors,
+        cycle_deferred,
+        bool(discovery.cursor) and cycle_drained and not dry_run,
         dry_run,
         time.monotonic() - cycle_started_at,
     )

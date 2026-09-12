@@ -1255,3 +1255,40 @@ def test_a_google_doc_is_exported_rather_than_downloaded():
     assert text == "Attendees\n"
     kwargs = service.files.return_value.export.call_args.kwargs
     assert kwargs["mimeType"] == "text/plain"
+
+
+
+def test_configured_ancestor_raises_a_drive_failure_instead_of_saying_not_ours():
+    """A failed lookup and "belongs to nobody" are different answers. Folding one into
+    the other makes an expired token look like a decision, and the caller skips a real
+    recording believing it decided something."""
+    service = MagicMock()
+    service.files.return_value.get.side_effect = RuntimeError("token expired")
+
+    with pytest.raises(RuntimeError):
+        drive.find_configured_ancestor(service, "sub", {"root"})
+
+
+def test_transcript_name_survives_a_dot_in_the_meeting_title():
+    """Drive stores a Meet recording under its meeting title with no extension, so
+    splitting at the last dot truncates the title rather than an extension."""
+    assert drive.meet_transcript_name(
+        "Sync re: v2.0 - 2026/09/09 10:00 CEST - Recording"
+    ) == "Sync re: v2.0 - 2026/09/09 10:00 CEST - Transcript"
+
+
+def test_transcript_name_still_drops_a_real_mp4_extension():
+    assert drive.meet_transcript_name(
+        "may-doqs-end (2026-09-09 18_53 GMT+2).mp4"
+    ) == "may-doqs-end (2026-09-09 18_53 GMT+2) - Transcript"
+
+
+def test_listings_ask_only_whether_the_video_metadata_exists():
+    """Its presence is all that is read, and this listing runs for every folder on
+    every cycle."""
+    service = _make_drive_service([])
+
+    drive.list_folder_state(service, "f1")
+
+    fields = service.files.return_value.list.call_args.kwargs["fields"]
+    assert "videoMediaMetadata(durationMillis)" in fields

@@ -1313,7 +1313,8 @@ def test_run_once_logs_folder_and_cycle_summary(mocker, caplog):
     assert (
         "Cycle summary [provider=deepgram, outcome=success, folders=1, pending=1, "
         "processed=1, failed=0, retry_total=0, skipped_size=0, skipped_unmatched=0, "
-        "folder_errors=0, dry_run=False, duration_s=1.250]"
+        "folder_errors=0, deferred=0, cursor_moved=True, dry_run=False, "
+        "duration_s=1.250]"
     ) in caplog.text
 
 
@@ -4819,3 +4820,119 @@ def test_without_candidates_the_file_name_is_still_the_source(mocker):
     )
 
     assert resolve_mock.call_args.kwargs["candidates"] == ["Alice", "Bob"]
+
+
+
+# --- The cursor may only move past work that is actually finished -----------------
+
+
+def _one_change_cycle(mocker, tmp_path, **overrides):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, **overrides)
+    change_cursor.write(change_cursor.path_for(cfg.data_dir), "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "meeting-1")], "tok-2"),
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    return cfg
+
+
+def test_a_failed_recording_holds_the_cursor_so_it_is_seen_again(mocker, tmp_path):
+    """The feed names a folder once, when something happens in it. A recording that
+    failed writes no artifact, so nothing there will ever change again -- stepping
+    over it loses it for good."""
+    cfg = _one_change_cycle(mocker, tmp_path)
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    mocker.patch("src.main.booking_gate.resolve", return_value=MATCHED_DECISION)
+    mocker.patch("src.main.process_item", side_effect=RuntimeError("stt timed out"))
+    mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) == "tok-1"
+
+
+def test_a_folder_that_could_not_be_listed_holds_the_cursor(mocker, tmp_path):
+    cfg = _one_change_cycle(mocker, tmp_path, stt_provider="")
+    mocker.patch(
+        "src.main.drive.list_folder_state", side_effect=RuntimeError("drive 500")
+    )
+    mocker.patch("src.main.time.sleep")
+    mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) == "tok-1"
+
+
+def test_a_video_left_to_settle_holds_the_cursor(mocker, tmp_path):
+    """Otherwise the change that revealed the video is consumed while the video is
+    deliberately skipped, and it depends on Drive emitting a second one later."""
+    cfg = _one_change_cycle(mocker, tmp_path, stt_provider="deepgram")
+    item = _subfolder_item("v1", "a.mp4", "meeting-1")
+    item["file"]["createdTime"] = "2026-09-09T19:58:00Z"
+    item["has_media_metadata"] = False
+    mocker.patch("src.main.drive.list_folder_state", return_value=[item])
+    mocker.patch("src.main._utcnow", return_value=_now())
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) == "tok-1"
+
+
+def test_a_clean_cycle_still_moves_the_cursor(mocker, tmp_path):
+    cfg = _one_change_cycle(mocker, tmp_path)
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    mocker.patch("src.main.booking_gate.resolve", return_value=MATCHED_DECISION)
+    mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) == "tok-2"
+
+
+def test_an_unresolvable_folder_is_not_treated_as_someone_elses(mocker, tmp_path):
+    """An expired token during the ancestor lookup used to read as "belongs to
+    nobody", and the change was consumed on the strength of that."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    change_cursor.write(change_cursor.path_for(cfg.data_dir), "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "meeting-1")], "tok-2"),
+    )
+    mocker.patch(
+        "src.main.drive.find_configured_ancestor",
+        side_effect=RuntimeError("drive 502"),
+    )
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) == "tok-1"
+    notify_mock.assert_called_once()
+
+
+def test_an_auth_failure_during_the_ancestor_lookup_still_stops_the_cycle(
+    mocker, tmp_path
+):
+    """Auth errors are re-raised everywhere else so the container restarts after
+    re-auth; being swallowed here would let a whole cycle report success."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    change_cursor.write(change_cursor.path_for(cfg.data_dir), "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "meeting-1")], "tok-2"),
+    )
+    mocker.patch(
+        "src.main.drive.find_configured_ancestor",
+        side_effect=RefreshError("token expired"),
+    )
+
+    with pytest.raises(RefreshError):
+        main.run_once(MagicMock(), cfg)
