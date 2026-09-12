@@ -92,11 +92,21 @@ def _make_drive_service(
     }
 
     def changes_list_side_effect(**kwargs):
+        # `changes` may be a flat list (one page) or a list of pages.
+        pages = changes or []
+        if pages and not isinstance(pages[0], list):
+            pages = [pages]
+        # The first cursor is an opaque token from Drive; only the fake's own
+        # continuation tokens are page indexes.
+        raw = str(kwargs.get("pageToken") or "")
+        index = int(raw) if raw.isdigit() else 0
+        body: dict = {"changes": list(pages[index]) if index < len(pages) else []}
+        if index + 1 < len(pages):
+            body["nextPageToken"] = str(index + 1)
+        else:
+            body["newStartPageToken"] = new_start_page_token
         request = MagicMock()
-        request.execute.return_value = {
-            "changes": list(changes or []),
-            "newStartPageToken": new_start_page_token,
-        }
+        request.execute.return_value = body
         return request
 
     changes_resource.list.side_effect = changes_list_side_effect
@@ -1145,3 +1155,52 @@ def test_folder_state_keeps_created_time_for_the_readiness_decision():
     item = drive.list_folder_state(service, "f1")[0]
 
     assert item["file"]["createdTime"] == "2026-09-09T18:53:00Z"
+
+
+def test_start_page_token_is_asked_for_before_a_sweep():
+    service = _make_drive_service([], start_page_token="tok-42")
+
+    assert drive.get_start_page_token(service) == "tok-42"
+
+
+def test_list_changes_returns_the_entries_and_the_next_cursor():
+    service = _make_drive_service(
+        [],
+        changes=[{"fileId": "v1", "file": {"id": "v1", "mimeType": drive.MP4_MIME}}],
+        new_start_page_token="tok-99",
+    )
+
+    entries, cursor = drive.list_changes(service, "tok-1")
+
+    assert [e["fileId"] for e in entries] == ["v1"]
+    assert cursor == "tok-99"
+
+
+def test_list_changes_follows_every_page_before_reporting_the_cursor():
+    """Saving the cursor after a partial read would skip whatever was on the pages we
+    never asked for, and nothing would ever come back for them."""
+    service = _make_drive_service(
+        [],
+        changes=[
+            [{"fileId": "v1"}, {"fileId": "v2"}],
+            [{"fileId": "v3"}],
+        ],
+        new_start_page_token="tok-end",
+    )
+
+    entries, cursor = drive.list_changes(service, "tok-1")
+
+    assert [e["fileId"] for e in entries] == ["v1", "v2", "v3"]
+    assert cursor == "tok-end"
+
+
+def test_list_changes_asks_for_the_fields_the_caller_decides_on():
+    """Deciding from the change entry alone is what keeps the feed cheap: without
+    mimeType and parents every entry would cost a files.get."""
+    service = _make_drive_service([], changes=[])
+
+    drive.list_changes(service, "tok-1")
+
+    fields = service.changes.return_value.list.call_args.kwargs["fields"]
+    for needed in ("fileId", "removed", "mimeType", "parents", "trashed"):
+        assert needed in fields

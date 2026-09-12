@@ -209,6 +209,58 @@ def find_newest_mp4_in_tree(service: Any, folder_id: str) -> dict | None:
     return newest
 
 
+def get_start_page_token(service: Any) -> str:
+    """Return a cursor marking "everything up to now has been seen"."""
+    response = (
+        service.changes()
+        .getStartPageToken(supportsAllDrives=True, includeItemsFromAllDrives=True)
+        .execute()
+    )
+    return response.get("startPageToken", "")
+
+
+def list_changes(service: Any, page_token: str) -> tuple[list[dict], str]:
+    """Return everything that changed since ``page_token``, and the next cursor.
+
+    Drive keeps this journal itself -- it is what the Activity panel shows -- so one
+    request answers "has anything happened" regardless of how many folders are
+    watched or how many meeting subfolders have accumulated in them. Walking folders
+    costs a request per folder per cycle; this costs one.
+
+    Every page is read before the new cursor is returned. Reporting a cursor from a
+    partial read would skip whatever sat on the pages never asked for, and nothing
+    would bring those files back.
+
+    The field list is what makes the feed cheap: with ``mimeType``, ``parents`` and
+    ``trashed`` on the entry itself, the caller can discard everything that is not a
+    live video of ours without a single ``files.get``.
+    """
+    entries: list[dict] = []
+    cursor = page_token
+    while True:
+        response = (
+            service.changes()
+            .list(
+                pageToken=cursor,
+                fields=(
+                    "nextPageToken, newStartPageToken, "
+                    "changes(fileId, removed, "
+                    "file(id, name, mimeType, parents, trashed))"
+                ),
+                pageSize=PAGE_SIZE,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+                includeRemoved=True,
+            )
+            .execute()
+        )
+        entries.extend(response.get("changes", []))
+        next_page = response.get("nextPageToken")
+        if not next_page:
+            return entries, response.get("newStartPageToken", cursor)
+        cursor = next_page
+
+
 def find_configured_ancestor(
     service: Any,
     container_id: str,

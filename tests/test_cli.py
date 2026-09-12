@@ -22,17 +22,27 @@ class _Telemetry:
 
 
 @pytest.fixture(autouse=True)
-def _no_subfolders(mocker):
-    """Every folder in this module is flat unless the test says otherwise.
+def _flat_folders_and_a_scratch_cursor(mocker, tmp_path):
+    """Every folder here is flat, and the changes cursor lives in a scratch file.
 
     `run_once` and `process <folder>` now read a folder together with its meeting
-    subfolders. These tests describe the flat shape and patch `list_folder_state`
-    to say so, which leaves the real `list_subfolders` running against a MagicMock
-    service -- where `response.get("nextPageToken")` is a truthy Mock and the paging
-    loop never ends. Saying "no subfolders" out loud is both the honest description
-    of these fixtures and what keeps that loop from hanging the suite.
+    subfolders, and a cycle now saves where the changes feed got to. These tests
+    describe neither: they patch `list_folder_state` to say the folder is flat, and
+    they do not care about the cursor.
+
+    Both halves have teeth. Left alone, the real `list_subfolders` runs against a
+    MagicMock whose `nextPageToken` is truthy and the paging loop never ends; and the
+    cursor would be written under the default `data/` directory, inside the checkout.
+    Redirecting `path_for` keeps production code and these tests agreeing on one
+    throwaway path, so a test that does care about the cursor still reads what the
+    cycle wrote.
     """
-    return mocker.patch("src.drive.list_subfolders", return_value=[])
+    mocker.patch("src.drive.list_subfolders", return_value=[])
+    mocker.patch("src.drive.get_start_page_token", return_value="tok-sweep")
+    mocker.patch(
+        "src.change_cursor.path_for",
+        return_value=tmp_path / "cursor" / "changes_cursor.txt",
+    )
 
 
 def _normalized_help(text: str) -> str:

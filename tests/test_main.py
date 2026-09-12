@@ -11,7 +11,7 @@ import pytest
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
-from src import main, meta_entity
+from src import change_cursor, main, meta_entity
 from src.auth import AuthError
 from src.booking_gate import BookingDecision
 from src.call_booking import CallBooking
@@ -25,17 +25,27 @@ _KEYPOINTS_BUILTIN = next(p for p in BUILTIN_PRESETS if p.name == "keypoints")
 
 
 @pytest.fixture(autouse=True)
-def _no_subfolders(mocker):
-    """Every folder in this module is flat unless the test says otherwise.
+def _flat_folders_and_a_scratch_cursor(mocker, tmp_path):
+    """Every folder here is flat, and the changes cursor lives in a scratch file.
 
     `run_once` and `process <folder>` now read a folder together with its meeting
-    subfolders. These tests describe the flat shape and patch `list_folder_state`
-    to say so, which leaves the real `list_subfolders` running against a MagicMock
-    service -- where `response.get("nextPageToken")` is a truthy Mock and the paging
-    loop never ends. Saying "no subfolders" out loud is both the honest description
-    of these fixtures and what keeps that loop from hanging the suite.
+    subfolders, and a cycle now saves where the changes feed got to. These tests
+    describe neither: they patch `list_folder_state` to say the folder is flat, and
+    they do not care about the cursor.
+
+    Both halves have teeth. Left alone, the real `list_subfolders` runs against a
+    MagicMock whose `nextPageToken` is truthy and the paging loop never ends; and the
+    cursor would be written under the default `data/` directory, inside the checkout.
+    Redirecting `path_for` keeps production code and these tests agreeing on one
+    throwaway path, so a test that does care about the cursor still reads what the
+    cycle wrote.
     """
-    return mocker.patch("src.drive.list_subfolders", return_value=[])
+    mocker.patch("src.drive.list_subfolders", return_value=[])
+    mocker.patch("src.drive.get_start_page_token", return_value="tok-sweep")
+    mocker.patch(
+        "src.change_cursor.path_for",
+        return_value=tmp_path / "cursor" / "changes_cursor.txt",
+    )
 
 
 def test_the_suite_never_resolves_the_repos_real_config():
@@ -4453,3 +4463,271 @@ def test_items_from_before_this_change_are_not_held_back(mocker):
     mocker.patch("src.main._utcnow", return_value=_now())
 
     assert len(main._pending_items([_item("v1", "a.mp4")], cfg)) == 1
+
+
+# --- The changes feed -------------------------------------------------------------
+#
+# Drive keeps a journal of what changed; one request reads it, whatever the number of
+# folders. Walking every folder stays as the fallback, which is what makes the cursor
+# safe to lose.
+
+
+def _http_error(status):
+    return HttpError(MagicMock(status=status), b"")
+
+
+def _change(file_id, container, *, mime="video/mp4", removed=False, trashed=False):
+    return {
+        "fileId": file_id,
+        "removed": removed,
+        "file": {
+            "id": file_id,
+            "name": f"{file_id}.mp4",
+            "mimeType": mime,
+            "parents": [container],
+            "trashed": trashed,
+        },
+    }
+
+
+def _cursor_file(cfg):
+    return change_cursor.path_for(cfg.data_dir)
+
+
+def test_the_first_cycle_sweeps_and_remembers_where_it_got_to(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-1")
+    changes_mock = mocker.patch("src.main.drive.list_changes")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_called_once()
+    changes_mock.assert_not_called()
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-1"
+
+
+def test_the_cursor_is_taken_before_the_sweep_not_after(mocker, tmp_path):
+    """A recording that lands while the sweep is running has to turn up in the next
+    feed read. A cursor taken afterwards would step straight over it."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    order = []
+    mocker.patch(
+        "src.main.drive.get_start_page_token",
+        side_effect=lambda *a, **k: (order.append("cursor"), "tok-1")[1],
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        side_effect=lambda *a, **k: (order.append("sweep"), [])[1],
+    )
+
+    main.run_once(MagicMock(), cfg)
+
+    assert order == ["cursor", "sweep"]
+
+
+def test_a_later_cycle_reads_the_feed_instead_of_sweeping(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    change_cursor.write(_cursor_file(cfg), "tok-1")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    changes_mock = mocker.patch("src.main.drive.list_changes", return_value=([], "tok-2"))
+
+    main.run_once(MagicMock(), cfg)
+
+    changes_mock.assert_called_once_with(mocker.ANY, "tok-1")
+    tree_mock.assert_not_called()
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-2"
+
+
+def test_a_changed_video_has_only_its_own_folder_listed(mocker, tmp_path):
+    """The point of the feed: look where something happened, not everywhere."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    change_cursor.write(_cursor_file(cfg), "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "meeting-1")], "tok-2"),
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    list_mock = mocker.patch("src.main.drive.list_folder_state", return_value=[])
+
+    main.run_once(MagicMock(), cfg)
+
+    list_mock.assert_called_once_with(mocker.ANY, "meeting-1")
+
+
+def test_two_videos_in_one_meeting_folder_cost_one_listing(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    change_cursor.write(_cursor_file(cfg), "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "meeting-1"), _change("v2", "meeting-1")], "tok-2"),
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    list_mock = mocker.patch("src.main.drive.list_folder_state", return_value=[])
+
+    main.run_once(MagicMock(), cfg)
+
+    assert list_mock.call_count == 1
+
+
+def test_a_video_found_through_the_feed_is_attributed_to_its_configured_folder(
+    mocker, tmp_path
+):
+    cfg = make_config(folders=["root"], data_dir=tmp_path)
+    change_cursor.write(_cursor_file(cfg), "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "meeting-1")], "tok-2"),
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    mocker.patch("src.main.booking_gate.resolve", return_value=MATCHED_DECISION)
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert process_mock.call_args.args[2] == "root"
+
+
+def test_our_own_uploads_in_the_feed_are_ignored(mocker, tmp_path):
+    """Every artifact this service writes comes back through the feed. Deciding from
+    the entry alone is what keeps that free."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    change_cursor.write(_cursor_file(cfg), "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("t1", "meeting-1", mime="text/plain")], "tok-2"),
+    )
+    list_mock = mocker.patch("src.main.drive.list_folder_state", return_value=[])
+
+    main.run_once(MagicMock(), cfg)
+
+    list_mock.assert_not_called()
+
+
+def test_deleted_and_trashed_entries_are_ignored(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    change_cursor.write(_cursor_file(cfg), "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=(
+            [
+                _change("v1", "meeting-1", removed=True),
+                _change("v2", "meeting-2", trashed=True),
+            ],
+            "tok-2",
+        ),
+    )
+    list_mock = mocker.patch("src.main.drive.list_folder_state", return_value=[])
+
+    main.run_once(MagicMock(), cfg)
+
+    list_mock.assert_not_called()
+
+
+def test_a_video_in_a_folder_nobody_configured_is_ignored(mocker, tmp_path):
+    """The feed reports everything the account can see, not only what we watch."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    change_cursor.write(_cursor_file(cfg), "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "someone-elses")], "tok-2"),
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value=None)
+    list_mock = mocker.patch("src.main.drive.list_folder_state", return_value=[])
+
+    main.run_once(MagicMock(), cfg)
+
+    list_mock.assert_not_called()
+
+
+def test_a_cursor_drive_no_longer_knows_falls_back_to_a_sweep(mocker, tmp_path):
+    """Aging out of the journal is documented, not exceptional: sweep, take a fresh
+    cursor, carry on."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    change_cursor.write(_cursor_file(cfg), "tok-stale")
+    mocker.patch("src.main.drive.list_changes", side_effect=_http_error(410))
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-fresh")
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_called_once()
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-fresh"
+    notify_mock.assert_not_called()
+
+
+def test_a_deleted_cursor_file_makes_the_next_cycle_sweep(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    change_cursor.write(_cursor_file(cfg), "tok-1")
+    change_cursor.clear(_cursor_file(cfg))
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-2")
+    mocker.patch("src.main.drive.list_changes")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_called_once()
+
+
+def test_a_feed_that_fails_for_another_reason_keeps_the_cursor(mocker, tmp_path):
+    """A network blip must not throw away the cursor: that would turn a retry into a
+    full sweep of every folder."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    change_cursor.write(_cursor_file(cfg), "tok-1")
+    mocker.patch("src.main.drive.list_changes", side_effect=_http_error(500))
+    mocker.patch("src.main.time.sleep")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_not_called()
+    notify_mock.assert_called_once()
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-1"
+
+
+def test_a_dry_run_never_moves_the_cursor(mocker, tmp_path):
+    """Otherwise a real run after a dry one starts past everything the dry run saw,
+    and those recordings are never processed."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    change_cursor.write(_cursor_file(cfg), "tok-1")
+    mocker.patch("src.main.drive.list_changes", return_value=([], "tok-2"))
+
+    main.run_once(MagicMock(), cfg, dry_run=True)
+
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-1"
+
+
+def test_the_cursor_moves_only_after_the_work_is_done(mocker, tmp_path):
+    """A cycle that dies half way through must see the same changes again. Re-reading
+    them is free, because the folder listing decides what still needs doing."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path)
+    change_cursor.write(_cursor_file(cfg), "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "meeting-1")], "tok-2"),
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    mocker.patch("src.main.booking_gate.resolve", return_value=MATCHED_DECISION)
+
+    seen = {}
+
+    def explode(*args, **kwargs):
+        seen["cursor_during_work"] = change_cursor.read(_cursor_file(cfg))
+        raise RuntimeError("processing blew up")
+
+    mocker.patch("src.main.process_item", side_effect=explode)
+    mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert seen["cursor_during_work"] == "tok-1"

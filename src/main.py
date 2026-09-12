@@ -19,6 +19,7 @@ import requests
 from src import (
     booking_gate,
     booking_server,
+    change_cursor,
     drive,
     meta as meta_module,
     meta_doc,
@@ -43,6 +44,9 @@ from src.stt.transcribe import transcribe_file
 logger = logging.getLogger(__name__)
 
 _TRANSIENT_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
+# Drive's answer when a saved cursor has aged out of its journal. Not a failure to
+# report: it is the documented way of being told to start over.
+_STALE_CURSOR_HTTP_STATUS_CODES = {404, 410}
 # How long a video with no videoMediaMetadata is assumed to be still uploading rather
 # than simply never getting any. Generous on purpose: the cost of waiting is one more
 # cycle, the cost of giving up too early is a download of a half-written file.
@@ -1652,6 +1656,164 @@ def process_target(
     return [result] if result is not None else []
 
 
+@dataclass
+class _Discovery:
+    """What one cycle found, and what to remember for the next one."""
+
+    listings: list[tuple[str, list[dict]]]
+    cursor: str | None
+    retries: int = 0
+    folder_errors: int = 0
+
+
+def _notify_listing_failure(what: str, exc: Exception, config: Config) -> None:
+    logger.exception("Failed to list %s", what)
+    notify.notify_error(
+        f"Failed to list {what}: {exc}\n{traceback.format_exc()}",
+        telegram_bot_token=config.telegram_bot_token,
+        telegram_chat_id=config.telegram_chat_id,
+        proxy_url=config.proxy_url,
+    )
+
+
+def _discover_by_walk(service: Any, config: Config) -> _Discovery:
+    """Read every configured folder and its meeting subfolders.
+
+    The complete answer, and the expensive one: a request per folder per cycle. It
+    runs on the first cycle and whenever the cursor is gone, which is what makes
+    losing the cursor a cost rather than a loss.
+
+    The cursor is taken *before* the sweep. Anything that lands while the sweep is
+    running then shows up in the next feed read; taking it afterwards would open a
+    window whose files no cycle ever looks at again.
+    """
+    cursor: str | None = None
+    retries = 0
+    try:
+        cursor = drive.get_start_page_token(service)
+    except (RefreshError, AuthError):
+        raise
+    except Exception:
+        # A sweep with no cursor still processes everything; it just has to sweep
+        # again next time. Refusing to sweep would be the worse trade.
+        logger.exception("Could not take a changes cursor; this cycle will sweep again")
+
+    listings: list[tuple[str, list[dict]]] = []
+    folder_errors = 0
+    for folder in config.folders:
+        folder_id = folder.folder_id
+        listing_retry_state = _RetryState()
+        try:
+            items = _call_with_transient_retries(
+                lambda: drive.list_folder_tree_state(service, folder_id),
+                description=f"list folder state for {folder_id}",
+                retry_state=listing_retry_state,
+            )
+        except (RefreshError, AuthError):
+            raise
+        except Exception as exc:
+            folder_errors += 1
+            _notify_listing_failure(f"folder {folder_id}", exc, config)
+            continue
+        finally:
+            retries += listing_retry_state.retry_count
+        listings.append((folder_id, items))
+    return _Discovery(listings, cursor, retries, folder_errors)
+
+
+def _discover_by_changes(service: Any, config: Config, cursor: str) -> _Discovery | None:
+    """Read Drive's own journal and look only where something happened.
+
+    One request answers "has anything changed", however many folders are watched and
+    however many meeting subfolders have piled up in them. Only the folders the
+    journal names are then listed, and the listing -- not the journal -- still decides
+    what needs doing, so every existing rule about siblings, markers and reprocessing
+    keeps working untouched.
+
+    Returns ``None`` when the cursor is no longer usable, which is the caller's signal
+    to sweep and take a fresh one.
+    """
+    retry_state = _RetryState()
+    try:
+        entries, new_cursor = _call_with_transient_retries(
+            lambda: drive.list_changes(service, cursor),
+            description="read the changes feed",
+            retry_state=retry_state,
+        )
+    except (RefreshError, AuthError):
+        raise
+    except Exception as exc:
+        if _http_status_code(exc) in _STALE_CURSOR_HTTP_STATUS_CODES:
+            logger.info("The changes cursor is no longer valid; sweeping instead")
+            return None
+        _notify_listing_failure("the changes feed", exc, config)
+        return _Discovery([], cursor, retry_state.retry_count, folder_errors=1)
+
+    configured_ids = {folder.folder_id for folder in config.folders}
+    ancestors: dict[str, str | None] = {}
+    containers: dict[str, str] = {}
+    for entry in entries:
+        if entry.get("removed"):
+            continue
+        file_info = entry.get("file") or {}
+        if file_info.get("trashed"):
+            continue
+        # Our own uploads come through here too. Judging by the entry alone is what
+        # keeps the feed to a single request: no files.get to find out what something
+        # is.
+        if file_info.get("mimeType") != drive.MP4_MIME:
+            continue
+        parents = file_info.get("parents") or []
+        if not parents:
+            continue
+        container_id = parents[0]
+        if container_id in containers:
+            continue
+        owner = drive.find_configured_ancestor(
+            service, container_id, configured_ids, cache=ancestors
+        )
+        if owner is None:
+            # The account can see folders nobody configured, and the feed reports
+            # those too.
+            continue
+        containers[container_id] = owner
+
+    listings: list[tuple[str, list[dict]]] = []
+    folder_errors = 0
+    for container_id, owner in containers.items():
+        listing_retry_state = _RetryState()
+        try:
+            items = _call_with_transient_retries(
+                lambda: drive.list_folder_state(service, container_id),
+                description=f"list folder state for {container_id}",
+                retry_state=listing_retry_state,
+            )
+        except (RefreshError, AuthError):
+            raise
+        except Exception as exc:
+            folder_errors += 1
+            _notify_listing_failure(f"folder {container_id}", exc, config)
+            continue
+        finally:
+            retry_state.retry_count += listing_retry_state.retry_count
+        listings.append((owner, items))
+
+    logger.info(
+        "Changes feed [entries=%d, folders_touched=%d]", len(entries), len(listings)
+    )
+    return _Discovery(listings, new_cursor, retry_state.retry_count, folder_errors)
+
+
+def _discover(service: Any, config: Config) -> _Discovery:
+    """Take the cheap path when a cursor says where to resume, the full one otherwise."""
+    saved = change_cursor.read(change_cursor.path_for(config.data_dir))
+    if saved is not None:
+        found = _discover_by_changes(service, config, saved)
+        if found is not None:
+            return found
+    return _discover_by_walk(service, config)
+
+
 def run_once(
     service: Any,
     config: Config,
@@ -1669,30 +1831,11 @@ def run_once(
     cycle_skipped_unmatched = 0
     cycle_folder_errors = 0
 
-    for folder in config.folders:
-        folder_id = folder.folder_id
-        listing_retry_state = _RetryState()
-        try:
-            items = _call_with_transient_retries(
-                lambda: drive.list_folder_tree_state(service, folder_id),
-                description=f"list folder state for {folder_id}",
-                retry_state=listing_retry_state,
-            )
-        except (RefreshError, AuthError):
-            raise
-        except Exception as exc:
-            cycle_folder_errors += 1
-            logger.exception("Failed to list folder %s", folder_id)
-            notify.notify_error(
-                f"Failed to list folder {folder_id}: {exc}\n{traceback.format_exc()}",
-                telegram_bot_token=config.telegram_bot_token,
-                telegram_chat_id=config.telegram_chat_id,
-                proxy_url=config.proxy_url,
-            )
-            continue
-        finally:
-            cycle_retry_total += listing_retry_state.retry_count
+    discovery = _discover(service, config)
+    cycle_retry_total += discovery.retries
+    cycle_folder_errors += discovery.folder_errors
 
+    for folder_id, items in discovery.listings:
         _apply_local_output_state(items, config)
         pending = _pending_items(items, config)
         # A marked recording is settled: reconsidering it every cycle would re-log and
@@ -1785,6 +1928,12 @@ def run_once(
                     telegram_chat_id=config.telegram_chat_id,
                     proxy_url=config.proxy_url,
                 )
+
+    if not dry_run and discovery.cursor:
+        # After the work, not before: a cycle that died half way through must see the
+        # same changes again rather than step over them. Re-reading is free, because
+        # the folder listing -- not the journal -- decides what still needs doing.
+        change_cursor.write(change_cursor.path_for(config.data_dir), discovery.cursor)
 
     logger.info(
         "Cycle summary [provider=%s, outcome=%s, folders=%d, pending=%d, processed=%d, failed=%d, "
