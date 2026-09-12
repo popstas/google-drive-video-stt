@@ -36,6 +36,10 @@ CONFIG_HOME_ENV_VAR = "GDSTT_HOME"
 DEFAULT_CONFIG_HOME = Path("data")
 
 SUPPORTED_STT_PROVIDERS = ("", "deepgram")
+# How the polling loop finds work. The CLI has a third, ``changes``, which only
+# makes sense as a one-off diagnostic -- a service that refuses to fall back would
+# stop finding recordings the moment a cursor went stale.
+DISCOVERY_MODES = ("auto", "walk")
 OUTPUT_TARGETS = ("drive", "folder")
 DEEPGRAM_DIARIZE_MODELS = ("latest", "v1")
 DEEPGRAM_AUDIO_SOURCES = ("m4a_copy", "mp3_96k", "mp3_192k")
@@ -108,6 +112,13 @@ class Config:
     # Runtime control flag for the polling loop. ``gdstt stop`` sets ``run.enabled``
     # to false in the config; the loop re-reads it each cycle and exits cleanly.
     run_enabled: bool = True
+    # Which discovery path the polling loop takes. ``auto`` reads Drive's changes
+    # feed once a cursor exists; ``walk`` always lists every watched folder and its
+    # meeting subfolders. Walking costs a request per folder per cycle and stays
+    # well inside quota even at a thousand subfolders, so this is the switch to
+    # reach for if the feed ever turns out not to report what a deployment needs --
+    # notably folders shared *to* the service rather than owned by it.
+    run_discovery: str = "auto"
     output_target: str = "drive"
     output_dir: Path | None = None
     # Publish artifacts to Drive as well while keeping the local folder authoritative.
@@ -842,6 +853,7 @@ def _config_from_yaml(
     config_presets = _as_mapping(raw.get("presets"), "presets")
 
     run_enabled = _yaml_bool(run.get("enabled"), default=True)
+    run_discovery = (_yaml_str(run.get("discovery"), "auto") or "auto").lower()
 
     telegram_bot_token = _yaml_str(telegram.get("bot_token"))
     telegram_chat_id = _yaml_str(telegram.get("chat_id"))
@@ -1002,6 +1014,11 @@ def _config_from_yaml(
         )
     stt_presets = _parse_stt_presets(output.get("stt_presets"))
 
+    if run_discovery not in DISCOVERY_MODES:
+        raise ValueError(
+            f"run.discovery must be one of {DISCOVERY_MODES!r}, got: {run_discovery!r}"
+        )
+
     if validate_providers:
         if presets and not openai_api_key:
             raise ValueError(
@@ -1052,6 +1069,7 @@ def _config_from_yaml(
         stt_postprocess=stt_postprocess,
         drive_mp3_artifact=drive_mp3_artifact,
         run_enabled=run_enabled,
+        run_discovery=run_discovery,
         output_target=output_target,
         output_dir=output_dir,
         output_also_drive=output_also_drive,
@@ -1574,7 +1592,7 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "max_parallel": config.openai_max_parallel,
             "keypoints": config.openai_keypoints,
         },
-        "run": {"enabled": config.run_enabled},
+        "run": {"enabled": config.run_enabled, "discovery": config.run_discovery},
         "notifications": {
             "telegram": {
                 "bot_token": config.telegram_bot_token,

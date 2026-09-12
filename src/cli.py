@@ -202,7 +202,9 @@ def cmd_run_once(args: argparse.Namespace) -> None:
         dry_run=args.dry_run,
         max_size_bytes=args.max_size,
         confirm_large=args.confirm_large,
-        mode=args.mode,
+        # No --mode means "do what the service would do", so a deployment pinned to
+        # `run.discovery: walk` is not silently exercised on the other path.
+        mode=args.mode or config.run_discovery,
     )
 
 
@@ -906,11 +908,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run_once.add_argument(
         "--mode",
         choices=("auto", "walk", "changes"),
-        default="auto",
+        default=None,
         help=(
             "How to find work: 'auto' reads the changes feed when a cursor exists and "
             "sweeps otherwise; 'walk' sweeps every folder without touching the cursor; "
-            "'changes' only reads the feed and fails when there is no cursor"
+            "'changes' only reads the feed and fails when there is no cursor. "
+            "Defaults to run.discovery from the config, which the service itself uses"
         ),
     )
     _add_processing_safety_args(p_run_once)

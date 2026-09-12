@@ -1351,7 +1351,7 @@ def test_main_runs_loop_and_sleeps(mocker):
 
     run_calls = {"n": 0}
 
-    def fake_run_once(svc, c):
+    def fake_run_once(svc, c, **kwargs):
         run_calls["n"] += 1
         if run_calls["n"] >= 2:
             raise KeyboardInterrupt
@@ -1470,7 +1470,7 @@ def test_main_notifies_on_cycle_exception(mocker):
 
     call_count = {"n": 0}
 
-    def fake_run_once(svc, c):
+    def fake_run_once(svc, c, **kwargs):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise RuntimeError("boom")

@@ -2924,3 +2924,40 @@ def test_ignore_telegram_when_planfix_is_parsed(tmp_path):
     config = load_config(config_path=write_config(tmp_path, raw))
 
     assert config.planfix_ignore_telegram_when_planfix is True
+
+
+# --- run.discovery (the switch that turns the changes feed off) ---------------
+
+
+def test_run_discovery_defaults_to_auto(tmp_path):
+    config_file = tmp_path / "config.yml"
+    init_config(config_path=config_file)
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.run_discovery == "auto"
+    assert _config_to_yaml_dict(cfg, config_file)["run"]["discovery"] == "auto"
+
+
+def test_run_discovery_accepts_walk(tmp_path):
+    """The fallback that makes the feed optional: one assumption behind it -- that
+    it reports folders shared *to* the service, not only ones it owns -- has not
+    been proven on a real deployment yet."""
+    config_file = write_config(
+        tmp_path,
+        {"folders": [{"folder_id": "f1"}], "run": {"discovery": "WALK"}},
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.run_discovery == "walk"
+
+
+def test_an_unknown_run_discovery_is_rejected(tmp_path):
+    """`changes` is deliberately not offered here: a service that refuses to fall
+    back would stop finding recordings the moment a cursor went stale."""
+    config_file = write_config(
+        tmp_path,
+        {"folders": [{"folder_id": "f1"}], "run": {"discovery": "changes"}},
+    )
+
+    with pytest.raises(ValueError, match="run.discovery"):
+        load_config(config_path=config_file, validate_providers=False)

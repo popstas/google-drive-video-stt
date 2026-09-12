@@ -2120,7 +2120,7 @@ def main(*, config_path: str | Path | None = None) -> None:
             continue
         paused_logged = False
         try:
-            run_once(service, config)
+            run_once(service, config, mode=config.run_discovery)
         except (RefreshError, AuthError) as exc:
             logger.exception("OAuth refresh failed; exiting for restart")
             notify.notify_error(
