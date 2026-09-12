@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from unittest.mock import MagicMock
 
 import pytest
@@ -7,29 +8,114 @@ import pytest
 from src import drive
 
 
-def _make_list_service(pages_by_query: dict[str, list[dict]]) -> MagicMock:
-    """Build a mock Drive service whose files().list().execute() returns lists matched by mimeType."""
+# A fixture file that belongs to whichever folder is being queried. Tests that
+# predate subfolders say "these files are in the folder under test" and mean it; only
+# tests that exercise the parent filter itself need to name real parents.
+_ANY_PARENT = "*"
+
+_PARENT_RE = re.compile(r"'([^']+)' in parents")
+_MIME_RE = re.compile(r"mimeType\s*=\s*'([^']+)'")
+
+
+def _make_drive_service(
+    files: list[dict],
+    *,
+    changes: list[dict] | None = None,
+    start_page_token: str = "tok-start",
+    new_start_page_token: str = "tok-next",
+) -> MagicMock:
+    """A tiny in-memory Drive: ``files().list`` really filters by parent and mimeType.
+
+    The fake this replaced dispatched on a substring of ``q`` and answered anything it
+    did not recognise with an empty list. That is the worst possible default for a
+    fake: a query for subfolders fell through to it, so a test walking into subfolders
+    passed while discovering none of them. Parsing the query instead means an
+    unsupported filter shows up as a wrong answer, not a silently empty one.
+
+    Every file in ``files`` carries ``parents``; ``_ANY_PARENT`` matches whatever
+    folder is asked about, which is what the pre-subfolder tests assume.
+    """
     service = MagicMock()
     files_resource = MagicMock()
     service.files.return_value = files_resource
 
+    def matches(f: dict, parent: str | None, mimes: set[str], want_untrashed: bool) -> bool:
+        if want_untrashed and f.get("trashed"):
+            return False
+        if mimes and f.get("mimeType") not in mimes:
+            return False
+        if parent is not None:
+            owners = f.get("parents", [_ANY_PARENT])
+            if _ANY_PARENT not in owners and parent not in owners:
+                return False
+        return True
+
     def list_side_effect(**kwargs):
-        q = kwargs["q"]
+        q = kwargs.get("q", "")
+        parent_match = _PARENT_RE.search(q)
+        parent = parent_match.group(1) if parent_match else None
+        mimes = set(_MIME_RE.findall(q))
+        want_untrashed = "trashed = false" in q
+
+        found = [f for f in files if matches(f, parent, mimes, want_untrashed)]
+
+        order_by = kwargs.get("orderBy") or ""
+        if order_by.startswith("createdTime desc"):
+            found.sort(key=lambda f: f.get("createdTime", ""), reverse=True)
+
+        page_size = kwargs.get("pageSize") or len(found) or 1
+        start = int(kwargs.get("pageToken") or 0)
+        page = found[start : start + page_size]
+        body: dict = {"files": page}
+        if start + page_size < len(found):
+            body["nextPageToken"] = str(start + page_size)
+
         request = MagicMock()
-        if "video/mp4" in q:
-            request.execute.return_value = {"files": pages_by_query.get("mp4", [])}
-        elif "audio/mpeg" in q:
-            request.execute.return_value = {"files": pages_by_query.get("mp3", [])}
-        elif "text/plain" in q:
-            request.execute.return_value = {"files": pages_by_query.get("txt", [])}
-        elif "text/markdown" in q:
-            request.execute.return_value = {"files": pages_by_query.get("md", [])}
-        else:
-            request.execute.return_value = {"files": []}
+        request.execute.return_value = body
         return request
 
     files_resource.list.side_effect = list_side_effect
+
+    by_id = {f["id"]: f for f in files}
+
+    def get_side_effect(**kwargs):
+        request = MagicMock()
+        request.execute.return_value = by_id.get(kwargs["fileId"], {})
+        return request
+
+    files_resource.get.side_effect = get_side_effect
+
+    changes_resource = MagicMock()
+    service.changes.return_value = changes_resource
+    changes_resource.getStartPageToken.return_value.execute.return_value = {
+        "startPageToken": start_page_token
+    }
+
+    def changes_list_side_effect(**kwargs):
+        request = MagicMock()
+        request.execute.return_value = {
+            "changes": list(changes or []),
+            "newStartPageToken": new_start_page_token,
+        }
+        return request
+
+    changes_resource.list.side_effect = changes_list_side_effect
     return service
+
+
+def _make_list_service(pages_by_query: dict[str, list[dict]]) -> MagicMock:
+    """Build the tiny Drive from the old per-mime buckets, for tests that predate parents."""
+    mime_by_key = {
+        "mp4": drive.MP4_MIME,
+        "mp3": drive.MP3_MIME,
+        "txt": drive.TXT_MIME,
+        "md": drive.MD_MIME,
+    }
+    files: list[dict] = []
+    for key, mime in mime_by_key.items():
+        for f in pages_by_query.get(key, []):
+            files.append({"mimeType": mime, "parents": [_ANY_PARENT], **f})
+    return _make_drive_service(files)
 
 
 def test_download_writes_file_to_dest_dir(tmp_path, mocker):
@@ -710,3 +796,39 @@ def test_set_file_modified_time_sends_only_the_date():
         fields="id, name, modifiedTime",
         supportsAllDrives=True,
     )
+
+
+def test_fake_drive_filters_by_parent_and_not_just_mime():
+    """Pins the fake itself: the old one ignored `in parents` and answered any query it
+    did not recognise with an empty list, so a test that walked into subfolders passed
+    while finding none of them. Both halves of that are checked here."""
+    service = _make_drive_service([
+        {"id": "v1", "name": "root.mp4", "mimeType": drive.MP4_MIME, "parents": ["root"]},
+        {"id": "v2", "name": "child.mp4", "mimeType": drive.MP4_MIME, "parents": ["sub"]},
+        {"id": "d1", "name": "sub", "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+    ])
+
+    root_mp4 = drive._list_files_by_mime(service, "root", drive.MP4_MIME)
+    assert [f["id"] for f in root_mp4] == ["v1"]
+
+    sub_mp4 = drive._list_files_by_mime(service, "sub", drive.MP4_MIME)
+    assert [f["id"] for f in sub_mp4] == ["v2"]
+
+    # The query the old fake fell through on.
+    folders = drive._list_files_by_mime(service, "root", drive.FOLDER_MIME)
+    assert [f["id"] for f in folders] == ["d1"]
+
+
+def test_fake_drive_paginates():
+    service = _make_drive_service(
+        [
+            {"id": f"v{i}", "name": f"{i}.mp4", "mimeType": drive.MP4_MIME, "parents": ["root"]}
+            for i in range(5)
+        ]
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(drive, "PAGE_SIZE", 2)
+        found = drive._list_files_by_mime(service, "root", drive.MP4_MIME)
+
+    assert [f["id"] for f in found] == ["v0", "v1", "v2", "v3", "v4"]
