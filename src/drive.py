@@ -17,6 +17,9 @@ TXT_MIME = "text/plain"
 MD_MIME = "text/markdown"
 FOLDER_MIME = "application/vnd.google-apps.folder"
 PAGE_SIZE = 1000
+# Meet nests meeting folders one level under the root; the slack absorbs an
+# unexpected layer without letting a circular parent chain run away.
+MAX_ANCESTOR_DEPTH = 4
 SOURCE_VIDEO_ID_PROPERTY = "source_video_id"
 ARTIFACT_TYPE_PROPERTY = "artifact_type"
 SPEAKER_NAMES_PROPERTY = "speaker_names"
@@ -176,6 +179,56 @@ def find_newest_mp4(service: Any, folder_id: str) -> dict | None:
     )
     files = response.get("files", [])
     return files[0] if files else None
+
+
+def find_configured_ancestor(
+    service: Any,
+    container_id: str,
+    configured_ids: set[str] | frozenset[str],
+    *,
+    cache: dict[str, str | None] | None = None,
+) -> str | None:
+    """Return which configured folder ``container_id`` belongs to, or ``None``.
+
+    A file's own folder no longer identifies the employee: it may be a per-meeting
+    subfolder the configuration has never heard of. Everything that starts from a
+    file rather than from the configuration needs this translation -- processing one
+    file by id, and reading the changes feed, which reports every file the token can
+    see and not only the ones we watch.
+
+    ``None`` means "not ours" and must be treated as a skip, not as an error: the
+    account sees folders nobody configured.
+
+    Walks at most ``MAX_ANCESTOR_DEPTH`` levels. Meet nests meeting folders one level
+    under the root, so the bound is slack rather than a limit, and it keeps a
+    malformed or circular parent chain from costing unbounded requests.
+    """
+    if cache is not None and container_id in cache:
+        return cache[container_id]
+
+    found: str | None = None
+    current = container_id
+    for _ in range(MAX_ANCESTOR_DEPTH):
+        if current in configured_ids:
+            found = current
+            break
+        try:
+            metadata = (
+                service.files()
+                .get(fileId=current, fields="id, parents", supportsAllDrives=True)
+                .execute()
+            )
+        except Exception:
+            logger.exception("Failed to resolve the parent of %s", current)
+            break
+        parents = metadata.get("parents") or []
+        if not parents:
+            break
+        current = parents[0]
+
+    if cache is not None:
+        cache[container_id] = found
+    return found
 
 
 def list_subfolders(service: Any, folder_id: str) -> list[dict]:

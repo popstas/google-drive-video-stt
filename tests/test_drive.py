@@ -978,3 +978,73 @@ def test_list_folder_state_ignores_mime_types_it_did_not_ask_for():
     item = drive.list_folder_state(service, "f1")[0]
 
     assert item["has_txt"] is False
+
+
+def _nested_service() -> MagicMock:
+    return _make_drive_service([
+        {"id": "sub", "name": "meeting", "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+        {"id": "root", "name": "Google Meet", "mimeType": drive.FOLDER_MIME, "parents": ["mydrive"]},
+        {"id": "other", "name": "Someone else", "mimeType": drive.FOLDER_MIME, "parents": ["elsewhere"]},
+    ])
+
+
+def test_configured_ancestor_of_a_configured_folder_is_itself():
+    service = _nested_service()
+
+    assert drive.find_configured_ancestor(service, "root", {"root"}) == "root"
+    assert service.files.return_value.get.call_count == 0
+
+
+def test_configured_ancestor_of_a_meeting_subfolder_is_the_configured_root():
+    assert drive.find_configured_ancestor(_nested_service(), "sub", {"root"}) == "root"
+
+
+def test_configured_ancestor_is_none_for_a_folder_outside_the_configured_set():
+    """A shared-with-us folder nobody configured must not be processed just because
+    it turned up: the changes feed reports everything the token can see."""
+    assert drive.find_configured_ancestor(_nested_service(), "other", {"root"}) is None
+
+
+def test_configured_ancestor_caches_across_calls():
+    """Meeting folders do not move, and the feed reports many files from the same one."""
+    service = _nested_service()
+    cache: dict[str, str | None] = {}
+
+    drive.find_configured_ancestor(service, "sub", {"root"}, cache=cache)
+    calls_after_first = service.files.return_value.get.call_count
+    drive.find_configured_ancestor(service, "sub", {"root"}, cache=cache)
+
+    assert calls_after_first == 1
+    assert service.files.return_value.get.call_count == 1
+
+
+def test_configured_ancestor_caches_a_miss_too():
+    service = _nested_service()
+    cache: dict[str, str | None] = {}
+
+    drive.find_configured_ancestor(service, "other", {"root"}, cache=cache)
+    calls_after_first = service.files.return_value.get.call_count
+    drive.find_configured_ancestor(service, "other", {"root"}, cache=cache)
+
+    assert calls_after_first > 0
+    assert service.files.return_value.get.call_count == calls_after_first
+    assert cache["other"] is None
+
+
+def test_configured_ancestor_gives_up_instead_of_looping_forever():
+    """A malformed or circular parent chain must cost a bounded number of requests."""
+    service = _make_drive_service([
+        {"id": "a", "name": "a", "mimeType": drive.FOLDER_MIME, "parents": ["b"]},
+        {"id": "b", "name": "b", "mimeType": drive.FOLDER_MIME, "parents": ["a"]},
+    ])
+
+    assert drive.find_configured_ancestor(service, "a", {"root"}) is None
+    assert service.files.return_value.get.call_count <= drive.MAX_ANCESTOR_DEPTH
+
+
+def test_configured_ancestor_handles_a_folder_with_no_parents():
+    service = _make_drive_service([
+        {"id": "orphan", "name": "orphan", "mimeType": drive.FOLDER_MIME},
+    ])
+
+    assert drive.find_configured_ancestor(service, "orphan", {"root"}) is None
