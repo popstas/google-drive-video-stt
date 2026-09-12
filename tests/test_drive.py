@@ -1119,3 +1119,29 @@ def test_newest_mp4_reports_the_folder_it_was_found_in():
     newest = drive.find_newest_mp4_in_tree(_dated_tree_service(), "root")
 
     assert newest["container_id"] == "d2"
+
+
+def test_folder_state_reports_whether_drive_finished_with_the_video():
+    """Drive fills videoMediaMetadata once it has processed an upload. Its absence is
+    the cheapest signal that a video is still settling."""
+    service = _make_drive_service([
+        {"id": "v1", "name": "ready.mp4", "mimeType": drive.MP4_MIME, "parents": ["f1"],
+         "videoMediaMetadata": {"width": 1920, "height": 1080, "durationMillis": "3619000"}},
+        {"id": "v2", "name": "settling.mp4", "mimeType": drive.MP4_MIME, "parents": ["f1"]},
+    ])
+
+    by_id = {it["file"]["id"]: it for it in drive.list_folder_state(service, "f1")}
+
+    assert by_id["v1"]["has_media_metadata"] is True
+    assert by_id["v2"]["has_media_metadata"] is False
+
+
+def test_folder_state_keeps_created_time_for_the_readiness_decision():
+    service = _make_drive_service([
+        {"id": "v1", "name": "a.mp4", "mimeType": drive.MP4_MIME, "parents": ["f1"],
+         "createdTime": "2026-09-09T18:53:00Z"},
+    ])
+
+    item = drive.list_folder_state(service, "f1")[0]
+
+    assert item["file"]["createdTime"] == "2026-09-09T18:53:00Z"

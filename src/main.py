@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import json
 import re
@@ -43,6 +43,10 @@ from src.stt.transcribe import transcribe_file
 logger = logging.getLogger(__name__)
 
 _TRANSIENT_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
+# How long a video with no videoMediaMetadata is assumed to be still uploading rather
+# than simply never getting any. Generous on purpose: the cost of waiting is one more
+# cycle, the cost of giving up too early is a download of a half-written file.
+_MEDIA_SETTLING_GRACE = timedelta(hours=2)
 _TRANSIENT_RETRY_ATTEMPTS = 3
 _TRANSIENT_RETRY_DELAYS = (1.0, 2.0)
 
@@ -1360,10 +1364,47 @@ def process_item(
     )
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _is_still_settling(item: dict, now: datetime) -> bool:
+    """True while Drive looks like it has not finished processing this upload.
+
+    Meet's recording lands in Drive well after the meeting folder does -- around an
+    hour for an hour-long call -- and `videoMediaMetadata` is filled once Drive has
+    processed it. Skipping a video that has no metadata yet costs one cycle;
+    downloading one costs a transfer and an STT run that may have to be redone.
+
+    The grace window is the important half. A video that never gets metadata still
+    has to be transcribed, and waiting on it indefinitely would lose the recording
+    quietly -- the exact failure this whole change exists to remove. So the wait is
+    bounded, and anything without a readable age is processed rather than held.
+    """
+    if item.get("has_media_metadata", True):
+        return False
+    created_raw = item.get("file", {}).get("createdTime")
+    if not created_raw:
+        return False
+    try:
+        created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+    except ValueError:
+        logger.info("Unreadable createdTime %r; not waiting on it", created_raw)
+        return False
+    return now - created < _MEDIA_SETTLING_GRACE
+
+
 def _pending_items(items: list[dict], config: Config) -> list[dict]:
     stt_enabled = bool(config.stt_provider)
+    now = _utcnow()
     pending = []
     for item in items:
+        if _is_still_settling(item, now):
+            logger.info(
+                "Drive has not finished processing %s yet; leaving it for a later cycle",
+                item.get("file", {}).get("name"),
+            )
+            continue
         needs_txt = stt_enabled and not item.get("has_txt")
         if (
             (_should_make_mp3_artifact(config) and not item.get("has_mp3"))

@@ -4393,3 +4393,63 @@ def test_process_a_folder_walks_its_subfolders(mocker):
     main.process_target(service, "root", cfg, is_folder=True)
 
     tree_mock.assert_called_once_with(service, "root")
+
+
+def _settling_item(file_id, name, created_at, *, has_media_metadata):
+    item = _item(file_id, name)
+    item["file"]["createdTime"] = created_at
+    item["has_media_metadata"] = has_media_metadata
+    return item
+
+
+def _now():
+    return datetime(2026, 9, 9, 20, 0, tzinfo=timezone.utc)
+
+
+def test_a_video_drive_has_not_finished_with_is_left_for_the_next_cycle(mocker):
+    """Meet's upload lands minutes to an hour after the meeting folder appears. Taking
+    a video Drive is still processing buys a wasted download and a wasted STT run."""
+    cfg = make_config(folders=["root"], stt_provider="deepgram")
+    item = _settling_item("v1", "a.mp4", "2026-09-09T19:58:00Z", has_media_metadata=False)
+    mocker.patch("src.main._utcnow", return_value=_now())
+
+    assert main._pending_items([item], cfg) == []
+
+
+def test_a_finished_video_is_picked_up_at_once(mocker):
+    cfg = make_config(folders=["root"], stt_provider="deepgram")
+    item = _settling_item("v1", "a.mp4", "2026-09-09T19:58:00Z", has_media_metadata=True)
+    mocker.patch("src.main._utcnow", return_value=_now())
+
+    assert len(main._pending_items([item], cfg)) == 1
+
+
+def test_waiting_for_metadata_gives_up_rather_than_stalling_forever(mocker):
+    """A video that never gets metadata -- an odd encode, a Drive that simply never
+    fills it in -- must still be transcribed. Waiting without a limit would lose it
+    silently, which is the failure mode this whole change exists to remove."""
+    cfg = make_config(folders=["root"], stt_provider="deepgram")
+    item = _settling_item("v1", "a.mp4", "2026-09-08T06:00:00Z", has_media_metadata=False)
+    mocker.patch("src.main._utcnow", return_value=_now())
+
+    assert len(main._pending_items([item], cfg)) == 1
+
+
+def test_a_video_of_unknown_age_is_not_held_back(mocker):
+    """No createdTime means no way to tell young from stuck; processing is the safe
+    side of that guess."""
+    cfg = make_config(folders=["root"], stt_provider="deepgram")
+    item = _item("v1", "a.mp4")
+    item["has_media_metadata"] = False
+    mocker.patch("src.main._utcnow", return_value=_now())
+
+    assert len(main._pending_items([item], cfg)) == 1
+
+
+def test_items_from_before_this_change_are_not_held_back(mocker):
+    """An item built by a caller that knows nothing of media metadata -- every existing
+    test, and `reprocess` -- must behave as it always did."""
+    cfg = make_config(folders=["root"], stt_provider="deepgram")
+    mocker.patch("src.main._utcnow", return_value=_now())
+
+    assert len(main._pending_items([_item("v1", "a.mp4")], cfg)) == 1

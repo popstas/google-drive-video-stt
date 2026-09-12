@@ -92,7 +92,10 @@ def _list_files_by_mimes(
             service.files()
             .list(
                 q=query,
-                fields="nextPageToken, files(id, name, mimeType, size, appProperties)",
+                fields=(
+                    "nextPageToken, files(id, name, mimeType, size, createdTime, "
+                    "videoMediaMetadata, appProperties)"
+                ),
                 pageSize=PAGE_SIZE,
                 pageToken=page_token,
                 supportsAllDrives=True,
@@ -392,6 +395,11 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
             # must not be confused: the configured one identifies the employee,
             # this one addresses the files.
             "container_id": folder_id,
+            # Drive fills videoMediaMetadata once it has finished processing an
+            # upload. Its absence is the cheapest available "still settling" signal;
+            # the caller decides how long to honour it, because a video that never
+            # gets metadata must not wait forever.
+            "has_media_metadata": bool(mp4.get("videoMediaMetadata")),
             "has_mp3": mp3 is not None,
             "has_txt": txt is not None,
             "mp3_id": mp3["id"] if mp3 else None,
