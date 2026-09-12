@@ -122,11 +122,38 @@ keeps siblings, `source_video_id`, booking markers and preset backfill working
 unchanged.
 
 The cursor (`src/change_cursor.py`, `<data-dir>/changes_cursor.txt`) is the service's
-only durable state and is deliberately disposable: absent, unreadable, deleted, or
+only *discovery* state -- the booking journal and each artifact's appProperties are
+durable too -- and is deliberately disposable: absent, unreadable, deleted, or
 rejected by Drive with 404/410 all lead to the same branch — sweep, take a fresh
 cursor, continue. Three orderings are load-bearing and each has a test: the cursor is
 taken *before* a sweep (so a file landing mid-sweep is not stepped over), saved *after*
 the work (so a failed cycle re-reads the same changes), and never moved by `--dry-run`.
+
+`<data-dir>/changes_folders.txt` holds the folder ids the cursor was taken against and
+is written only where the cursor is, under the same `cycle_drained` guard. A cursor
+vouches for nothing outside that set: recordings already sitting in a folder added
+since were never a change after it, so the feed will never name that folder. A
+mismatch (or a missing file) therefore sweeps once -- `_cursor_covers_config`. That
+guard matters: a config edited before the folder is actually shared fails to list,
+which counts as a folder error, which holds both files where they are until the share
+lands. `--mode changes` refuses outright on a mismatch rather than warning and
+reading: that cycle would drain, and draining records the new folder set as vouched
+for without it ever having been swept, which loses the backlog permanently.
+
+`run.discovery` (`auto`|`walk`) picks the path the polling loop takes; the CLI's
+`--mode` defaults to it rather than to `auto`, so a deployment pinned to `walk` is not
+silently exercised on the other path. It exists because one assumption behind the feed
+is still unproven: discovery via `changes.list` has only been exercised on folders the
+account *owns*, and production watches folders shared *to* the service. Walking costs
+a request per folder per cycle and stays inside quota at a thousand subfolders, so
+`walk` is a real fallback, not a degraded mode.
+
+Neither path sees a **shortcut** to a recording: Drive reports the shortcut's own
+`application/vnd.google-apps.shortcut`, with the real type only in
+`shortcutDetails.targetMimeType`, so the `video/mp4` filter drops it in the listing and
+in the feed alike (verified live). Organizers get real files, which is whose folders
+are configured; a participant who only gets a shortcut is out of scope, and processing
+one would duplicate work the organizer's folder already did.
 
 It is also held back entirely unless the cycle drained what it found. The feed names a
 folder once, when something happens in it, and a recording that failed writes no

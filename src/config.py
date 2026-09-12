@@ -1281,7 +1281,7 @@ def _default_config_dict(
             "batch": True,
             "max_parallel": 4,
         },
-        "run": {"enabled": True},
+        "run": {"enabled": True, "discovery": "auto"},
         "notifications": {
             "telegram": {
                 "bot_token": "",

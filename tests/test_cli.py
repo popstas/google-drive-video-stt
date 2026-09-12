@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
@@ -44,6 +45,25 @@ def _flat_folders_and_a_scratch_cursor(mocker, tmp_path):
         "src.change_cursor.path_for",
         return_value=tmp_path / "cursor" / "changes_cursor.txt",
     )
+    mocker.patch(
+        "src.change_cursor.folders_path_for",
+        return_value=tmp_path / "cursor" / "changes_folders.txt",
+    )
+
+
+def _save_cursor(cfg, token):
+    """Save a cursor the way a real cycle does: together with the folders it covers.
+
+    A cursor on its own cannot be vouched for, and an unvouched cursor makes the next
+    cycle sweep -- that is the whole point of `changes_folders.txt`. So a test that
+    wants the feed to be read has to set up both, exactly like `run_once` does.
+    """
+    change_cursor.write(change_cursor.path_for(cfg.data_dir), token)
+    change_cursor.write_folders(
+        change_cursor.folders_path_for(cfg.data_dir),
+        change_cursor.fingerprint(folder.folder_id for folder in cfg.folders),
+    )
+
 
 
 def _normalized_help(text: str) -> str:
@@ -1565,7 +1585,7 @@ def test_doctor_reports_an_unreachable_folder_instead_of_crashing(
 
 
 def test_doctor_reports_the_cursor(mocker, capsys, tmp_path):
-    cfg = _doctor_config(mocker, tmp_path)
+    _doctor_config(mocker, tmp_path)
     mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
     mocker.patch("src.cli.drive.describe_folder", return_value=_folder_meta())
     mocker.patch("src.cli.drive.list_folder_tree_state", return_value=[])
@@ -1621,7 +1641,7 @@ def test_changes_never_moves_the_cursor(mocker, capsys, tmp_path):
     """Looking into the feed must not consume it, or the cycle that follows finds
     nothing and the recording is skipped."""
     cfg = _doctor_config(mocker, tmp_path)
-    change_cursor.write(change_cursor.path_for(cfg.data_dir), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
     mocker.patch("src.cli.drive.list_changes", return_value=([], "tok-2"))
 
@@ -1635,7 +1655,7 @@ def test_changes_shows_our_videos_with_the_folder_they_belong_to(
     mocker, capsys, tmp_path
 ):
     cfg = _doctor_config(mocker, tmp_path)
-    change_cursor.write(change_cursor.path_for(cfg.data_dir), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
     mocker.patch(
         "src.cli.drive.list_changes",
@@ -1662,7 +1682,7 @@ def test_changes_shows_our_videos_with_the_folder_they_belong_to(
 
 def test_changes_raw_shows_entries_that_are_not_ours(mocker, capsys, tmp_path):
     cfg = _doctor_config(mocker, tmp_path)
-    change_cursor.write(change_cursor.path_for(cfg.data_dir), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
     mocker.patch(
         "src.cli.drive.list_changes",
@@ -1693,7 +1713,7 @@ def test_cursor_show_reports_an_absent_cursor(mocker, capsys, tmp_path):
 
 def test_cursor_reset_forgets_it_and_says_so(mocker, capsys, tmp_path):
     cfg = _doctor_config(mocker, tmp_path)
-    change_cursor.write(change_cursor.path_for(cfg.data_dir), "tok-1")
+    _save_cursor(cfg, "tok-1")
 
     cli.main(["cursor", "reset"])
 
@@ -1715,7 +1735,7 @@ def test_run_once_walk_mode_leaves_the_cursor_where_it_was(mocker, tmp_path):
     """A "check everything now" must not become a new starting point: the feed has to
     pick up exactly where it was."""
     cfg = _doctor_config(mocker, tmp_path)
-    change_cursor.write(change_cursor.path_for(cfg.data_dir), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
     mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
     mocker.patch("src.main.drive.get_start_page_token", return_value="tok-9")
@@ -1733,3 +1753,74 @@ def test_run_once_changes_mode_refuses_without_a_cursor(mocker, tmp_path):
 
     with pytest.raises(SystemExit):
         cli.main(["run-once", "--mode", "changes"])
+
+
+# --- run-once without --mode follows the service, not a hardcoded default ------
+
+
+def test_run_once_without_a_mode_follows_the_configured_discovery(mocker, tmp_path):
+    """A deployment pinned to run.discovery=walk must not be silently exercised on
+    the other path just because the operator typed the command by hand."""
+    cfg = dataclasses.replace(make_config(data_dir=tmp_path), run_discovery="walk")
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    run_once_mock = mocker.patch("src.cli.main_module.run_once")
+
+    cli.main(["run-once"])
+
+    assert run_once_mock.call_args.kwargs["mode"] == "walk"
+
+
+def test_an_explicit_mode_still_wins_over_the_config(mocker, tmp_path):
+    cfg = dataclasses.replace(make_config(data_dir=tmp_path), run_discovery="walk")
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    run_once_mock = mocker.patch("src.cli.main_module.run_once")
+
+    cli.main(["run-once", "--mode", "changes"])
+
+    assert run_once_mock.call_args.kwargs["mode"] == "changes"
+
+
+def test_cursor_show_says_which_folders_the_cursor_covers(mocker, tmp_path, capsys):
+    cfg = make_config(data_dir=tmp_path, folders=["root"])
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    _save_cursor(cfg, "tok-1")
+
+    cli.main(["cursor", "show"])
+
+    out = capsys.readouterr().out
+    assert "cursor: tok-1" in out
+    assert "all covered" in out
+
+
+def test_cursor_show_names_a_folder_the_cursor_cannot_vouch_for(
+    mocker, tmp_path, capsys
+):
+    """The question an operator actually has after editing the config: does the
+    saved cursor still mean anything for the folder I just added?"""
+    cfg = make_config(data_dir=tmp_path, folders=["root"])
+    _save_cursor(cfg, "tok-1")
+    grown = make_config(data_dir=tmp_path, folders=["root", "new"])
+    mocker.patch("src.cli.load_config", return_value=grown)
+
+    cli.main(["cursor", "show"])
+
+    out = capsys.readouterr().out
+    assert "changed since the cursor was taken" in out
+    assert "added:   new" in out
+
+
+def test_cursor_reset_forgets_the_folder_set_too(mocker, tmp_path):
+    """Left behind, it would vouch for a cursor that no longer exists."""
+    cfg = make_config(data_dir=tmp_path, folders=["root"])
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    _save_cursor(cfg, "tok-1")
+
+    cli.main(["cursor", "reset"])
+
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) is None
+    assert (
+        change_cursor.read_folders(change_cursor.folders_path_for(cfg.data_dir))
+        is None
+    )

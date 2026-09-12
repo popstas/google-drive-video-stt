@@ -47,6 +47,10 @@ def _flat_folders_and_a_scratch_cursor(mocker, tmp_path):
         "src.change_cursor.path_for",
         return_value=tmp_path / "cursor" / "changes_cursor.txt",
     )
+    mocker.patch(
+        "src.change_cursor.folders_path_for",
+        return_value=tmp_path / "cursor" / "changes_folders.txt",
+    )
 
 
 def test_the_suite_never_resolves_the_repos_real_config():
@@ -4504,6 +4508,20 @@ def _cursor_file(cfg):
     return change_cursor.path_for(cfg.data_dir)
 
 
+def _save_cursor(cfg, token):
+    """Save a cursor the way a real cycle does: together with the folders it covers.
+
+    A cursor on its own cannot be vouched for, and an unvouched cursor makes the next
+    cycle sweep -- that is the whole point of `changes_folders.txt`. So a test that
+    wants the feed to be read has to set up both, exactly like `run_once` does.
+    """
+    change_cursor.write(change_cursor.path_for(cfg.data_dir), token)
+    change_cursor.write_folders(
+        change_cursor.folders_path_for(cfg.data_dir),
+        change_cursor.fingerprint(folder.folder_id for folder in cfg.folders),
+    )
+
+
 def test_the_first_cycle_sweeps_and_remembers_where_it_got_to(mocker, tmp_path):
     cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
     tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
@@ -4538,7 +4556,7 @@ def test_the_cursor_is_taken_before_the_sweep_not_after(mocker, tmp_path):
 
 def test_a_later_cycle_reads_the_feed_instead_of_sweeping(mocker, tmp_path):
     cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
-    change_cursor.write(_cursor_file(cfg), "tok-1")
+    _save_cursor(cfg, "tok-1")
     tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
     changes_mock = mocker.patch("src.main.drive.list_changes", return_value=([], "tok-2"))
 
@@ -4552,7 +4570,7 @@ def test_a_later_cycle_reads_the_feed_instead_of_sweeping(mocker, tmp_path):
 def test_a_changed_video_has_only_its_own_folder_listed(mocker, tmp_path):
     """The point of the feed: look where something happened, not everywhere."""
     cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
-    change_cursor.write(_cursor_file(cfg), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch(
         "src.main.drive.list_changes",
         return_value=([_change("v1", "meeting-1")], "tok-2"),
@@ -4567,7 +4585,7 @@ def test_a_changed_video_has_only_its_own_folder_listed(mocker, tmp_path):
 
 def test_two_videos_in_one_meeting_folder_cost_one_listing(mocker, tmp_path):
     cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
-    change_cursor.write(_cursor_file(cfg), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch(
         "src.main.drive.list_changes",
         return_value=([_change("v1", "meeting-1"), _change("v2", "meeting-1")], "tok-2"),
@@ -4584,7 +4602,7 @@ def test_a_video_found_through_the_feed_is_attributed_to_its_configured_folder(
     mocker, tmp_path
 ):
     cfg = make_config(folders=["root"], data_dir=tmp_path)
-    change_cursor.write(_cursor_file(cfg), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch(
         "src.main.drive.list_changes",
         return_value=([_change("v1", "meeting-1")], "tok-2"),
@@ -4606,7 +4624,7 @@ def test_our_own_uploads_in_the_feed_are_ignored(mocker, tmp_path):
     """Every artifact this service writes comes back through the feed. Deciding from
     the entry alone is what keeps that free."""
     cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
-    change_cursor.write(_cursor_file(cfg), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch(
         "src.main.drive.list_changes",
         return_value=([_change("t1", "meeting-1", mime="text/plain")], "tok-2"),
@@ -4620,7 +4638,7 @@ def test_our_own_uploads_in_the_feed_are_ignored(mocker, tmp_path):
 
 def test_deleted_and_trashed_entries_are_ignored(mocker, tmp_path):
     cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
-    change_cursor.write(_cursor_file(cfg), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch(
         "src.main.drive.list_changes",
         return_value=(
@@ -4641,7 +4659,7 @@ def test_deleted_and_trashed_entries_are_ignored(mocker, tmp_path):
 def test_a_video_in_a_folder_nobody_configured_is_ignored(mocker, tmp_path):
     """The feed reports everything the account can see, not only what we watch."""
     cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
-    change_cursor.write(_cursor_file(cfg), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch(
         "src.main.drive.list_changes",
         return_value=([_change("v1", "someone-elses")], "tok-2"),
@@ -4658,7 +4676,7 @@ def test_a_cursor_drive_no_longer_knows_falls_back_to_a_sweep(mocker, tmp_path):
     """Aging out of the journal is documented, not exceptional: sweep, take a fresh
     cursor, carry on."""
     cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
-    change_cursor.write(_cursor_file(cfg), "tok-stale")
+    _save_cursor(cfg, "tok-stale")
     mocker.patch("src.main.drive.list_changes", side_effect=_http_error(410))
     tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
     mocker.patch("src.main.drive.get_start_page_token", return_value="tok-fresh")
@@ -4673,7 +4691,7 @@ def test_a_cursor_drive_no_longer_knows_falls_back_to_a_sweep(mocker, tmp_path):
 
 def test_a_deleted_cursor_file_makes_the_next_cycle_sweep(mocker, tmp_path):
     cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
-    change_cursor.write(_cursor_file(cfg), "tok-1")
+    _save_cursor(cfg, "tok-1")
     change_cursor.clear(_cursor_file(cfg))
     tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
     mocker.patch("src.main.drive.get_start_page_token", return_value="tok-2")
@@ -4688,7 +4706,7 @@ def test_a_feed_that_fails_for_another_reason_keeps_the_cursor(mocker, tmp_path)
     """A network blip must not throw away the cursor: that would turn a retry into a
     full sweep of every folder."""
     cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
-    change_cursor.write(_cursor_file(cfg), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch("src.main.drive.list_changes", side_effect=_http_error(500))
     mocker.patch("src.main.time.sleep")
     tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
@@ -4705,7 +4723,7 @@ def test_a_dry_run_never_moves_the_cursor(mocker, tmp_path):
     """Otherwise a real run after a dry one starts past everything the dry run saw,
     and those recordings are never processed."""
     cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
-    change_cursor.write(_cursor_file(cfg), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch("src.main.drive.list_changes", return_value=([], "tok-2"))
 
     main.run_once(MagicMock(), cfg, dry_run=True)
@@ -4717,7 +4735,7 @@ def test_the_cursor_moves_only_after_the_work_is_done(mocker, tmp_path):
     """A cycle that dies half way through must see the same changes again. Re-reading
     them is free, because the folder listing decides what still needs doing."""
     cfg = make_config(folders=["root"], data_dir=tmp_path)
-    change_cursor.write(_cursor_file(cfg), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch(
         "src.main.drive.list_changes",
         return_value=([_change("v1", "meeting-1")], "tok-2"),
@@ -4836,7 +4854,7 @@ def test_without_candidates_the_file_name_is_still_the_source(mocker):
 
 def _one_change_cycle(mocker, tmp_path, **overrides):
     cfg = make_config(folders=["root"], data_dir=tmp_path, **overrides)
-    change_cursor.write(change_cursor.path_for(cfg.data_dir), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch(
         "src.main.drive.list_changes",
         return_value=([_change("v1", "meeting-1")], "tok-2"),
@@ -4909,7 +4927,7 @@ def test_an_unresolvable_folder_is_not_treated_as_someone_elses(mocker, tmp_path
     """An expired token during the ancestor lookup used to read as "belongs to
     nobody", and the change was consumed on the strength of that."""
     cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
-    change_cursor.write(change_cursor.path_for(cfg.data_dir), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch(
         "src.main.drive.list_changes",
         return_value=([_change("v1", "meeting-1")], "tok-2"),
@@ -4932,7 +4950,7 @@ def test_an_auth_failure_during_the_ancestor_lookup_still_stops_the_cycle(
     """Auth errors are re-raised everywhere else so the container restarts after
     re-auth; being swallowed here would let a whole cycle report success."""
     cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
-    change_cursor.write(change_cursor.path_for(cfg.data_dir), "tok-1")
+    _save_cursor(cfg, "tok-1")
     mocker.patch(
         "src.main.drive.list_changes",
         return_value=([_change("v1", "meeting-1")], "tok-2"),
@@ -5112,3 +5130,178 @@ def test_the_meta_document_names_the_employee_for_a_subfolder_recording(
     )
 
     assert build_mock.call_args.kwargs["folder_id"] == "root"
+
+
+# --- A cursor vouches only for the folders it was taken against -------------------
+#
+# Adding a folder is how an employee gets onboarded, not a one-off migration. The
+# recordings already sitting in that folder were never a change after the saved
+# cursor, so the feed will never name it: without noticing the config changed, the
+# backlog stays invisible until someone resets the cursor by hand.
+
+
+def test_a_cursor_saved_with_its_folders_reads_the_feed(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    changes_mock = mocker.patch(
+        "src.main.drive.list_changes", return_value=([], "tok-2")
+    )
+
+    main.run_once(MagicMock(), cfg)
+
+    changes_mock.assert_called_once_with(mocker.ANY, "tok-1")
+    tree_mock.assert_not_called()
+
+
+def test_adding_a_folder_sweeps_once_instead_of_trusting_the_feed(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    grown = make_config(folders=["root", "new"], data_dir=tmp_path, stt_provider="")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    changes_mock = mocker.patch("src.main.drive.list_changes")
+    token_mock = mocker.patch(
+        "src.main.drive.get_start_page_token", return_value="tok-fresh"
+    )
+
+    main.run_once(MagicMock(), grown)
+
+    changes_mock.assert_not_called()
+    assert tree_mock.call_count == 2
+    token_mock.assert_called_once()
+    assert change_cursor.read(_cursor_file(grown)) == "tok-fresh"
+
+
+def test_dropping_a_folder_also_sweeps_once(mocker, tmp_path):
+    """Not because shrinking misses anything, but because the pair is one identity:
+    treating a subset as covered would be a second rule, with its own way to be
+    wrong."""
+    cfg = make_config(folders=["root", "second"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    shrunk = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    changes_mock = mocker.patch("src.main.drive.list_changes")
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-fresh")
+
+    main.run_once(MagicMock(), shrunk)
+
+    changes_mock.assert_not_called()
+    tree_mock.assert_called_once()
+
+
+def test_a_cursor_with_no_recorded_folders_sweeps_once(mocker, tmp_path):
+    """An instance that predates the folder file, or one whose file is unreadable.
+    The cursor cannot be vouched for, and one sweep is the whole cost of finding
+    out -- after which the pair is written and the feed takes over again."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    change_cursor.write(change_cursor.path_for(cfg.data_dir), "tok-1")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    changes_mock = mocker.patch("src.main.drive.list_changes")
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-fresh")
+
+    main.run_once(MagicMock(), cfg)
+
+    changes_mock.assert_not_called()
+    tree_mock.assert_called_once()
+    assert change_cursor.read_folders(
+        change_cursor.folders_path_for(cfg.data_dir)
+    ) == change_cursor.fingerprint(["root"])
+
+
+def test_the_sweep_records_the_folders_it_covered(mocker, tmp_path):
+    cfg = make_config(folders=["root", "second"], data_dir=tmp_path, stt_provider="")
+    mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-1")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read_folders(
+        change_cursor.folders_path_for(cfg.data_dir)
+    ) == change_cursor.fingerprint(["root", "second"])
+
+
+def test_a_cycle_that_could_not_list_records_no_folder_set(mocker, tmp_path):
+    """The same cycle_drained guard the cursor has, and it is what makes editing the
+    config before the folder is actually shared safe: that listing fails, which
+    counts as a folder error, which leaves both files alone until the share lands."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-1")
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        side_effect=RuntimeError("not shared yet"),
+    )
+    mocker.patch("src.main.time.sleep")
+    mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read(_cursor_file(cfg)) is None
+    assert (
+        change_cursor.read_folders(change_cursor.folders_path_for(cfg.data_dir))
+        is None
+    )
+
+
+def test_changes_mode_refuses_when_the_folder_set_changed(mocker, tmp_path):
+    """Reading the feed anyway would be worse than useless. The cycle would find
+    nothing pending, drain, and record the new folder set as vouched for without it
+    ever having been swept -- so the backlog it cannot see would stay invisible for
+    good, and the operator would have been told to run a cycle that no longer helps."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    grown = make_config(folders=["root", "new"], data_dir=tmp_path, stt_provider="")
+    changes_mock = mocker.patch(
+        "src.main.drive.list_changes", return_value=([], "tok-2")
+    )
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+
+    with pytest.raises(SystemExit, match="watched folders changed"):
+        main.run_once(MagicMock(), grown, mode="changes")
+
+    changes_mock.assert_not_called()
+    tree_mock.assert_not_called()
+    assert change_cursor.read(_cursor_file(grown)) == "tok-1"
+    assert change_cursor.read_folders(
+        change_cursor.folders_path_for(grown.data_dir)
+    ) == change_cursor.fingerprint(["root"])
+
+
+def test_a_walk_cycle_leaves_the_folder_set_alone(mocker, tmp_path):
+    """Walk is a look, not a new starting point: it must not become one by quietly
+    vouching for a config the feed was never asked about."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    grown = make_config(folders=["root", "new"], data_dir=tmp_path, stt_provider="")
+    mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+
+    main.run_once(MagicMock(), grown, mode="walk")
+
+    assert change_cursor.read(_cursor_file(grown)) == "tok-1"
+    assert change_cursor.read_folders(
+        change_cursor.folders_path_for(grown.data_dir)
+    ) == change_cursor.fingerprint(["root"])
+
+
+# --- The polling loop must be able to run without the feed ------------------------
+
+
+def test_the_service_loop_takes_the_configured_discovery_path(mocker):
+    """Mode is a CLI flag. Without passing the config through, the daemon could only
+    ever run auto -- and the one assumption still unproven about the feed (folders
+    shared *to* the service rather than owned by it) would have no switch."""
+    cfg = replace(make_config(folders=["f1"], poll_interval=1), run_discovery="walk")
+    mocker.patch("src.main.load_config", return_value=cfg)
+    mocker.patch("src.main.build_drive_service", return_value=MagicMock())
+    modes = []
+
+    def fake_run_once(svc, c, **kwargs):
+        modes.append(kwargs.get("mode"))
+        raise KeyboardInterrupt
+
+    mocker.patch("src.main.run_once", side_effect=fake_run_once)
+    mocker.patch("src.main.time.sleep")
+
+    with pytest.raises(KeyboardInterrupt):
+        main.main()
+
+    assert modes == ["walk"]

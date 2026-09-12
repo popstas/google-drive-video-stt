@@ -480,10 +480,18 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print("Drive auth: OK")
     cursor_path = change_cursor.path_for(config.data_dir)
     saved_cursor = change_cursor.read(cursor_path)
-    print(
-        f"changes cursor: {cursor_path} "
-        f"({'set' if saved_cursor else 'absent, next cycle sweeps'})"
-    )
+    if not saved_cursor:
+        state = "absent, next cycle sweeps"
+    elif change_cursor.read_folders(
+        change_cursor.folders_path_for(config.data_dir)
+    ) == change_cursor.fingerprint(
+        folder.folder_id for folder in config.folders
+    ):
+        state = "set, covers the configured folders"
+    else:
+        state = "set, but the configured folders changed -- next cycle sweeps once"
+    print(f"changes cursor: {cursor_path} ({state})")
+    print(f"discovery: run.discovery={config.run_discovery}")
     for folder in config.folders:
         _print_folder_diagnosis(service, folder.folder_id)
 
@@ -702,6 +710,20 @@ def cmd_changes(args: argparse.Namespace) -> None:
         print(f"No cursor at {cursor_path}; the next cycle sweeps every folder.")
         return
 
+    # Same question the cycle asks itself. Without it this command would report
+    # "nothing of ours" for a folder just added to the config and be right about the
+    # feed while being useless to the operator.
+    if change_cursor.read_folders(
+        change_cursor.folders_path_for(config.data_dir)
+    ) != change_cursor.fingerprint(
+        folder.folder_id for folder in config.folders
+    ):
+        print(
+            "The configured folders changed since this cursor was taken; the feed "
+            "cannot show what was already in a folder added since. The next cycle "
+            "sweeps once."
+        )
+
     service = auth.build_drive_service(config=config)
     entries, next_cursor = drive.list_changes(service, cursor)
     print(f"{len(entries)} change(s) since the saved cursor")
@@ -746,6 +768,29 @@ def cmd_cursor_show(args: argparse.Namespace) -> None:
         print("cursor: absent -- the next cycle sweeps every folder")
         return
     print(f"cursor: {cursor}")
+    watched = change_cursor.fingerprint(
+        folder.folder_id for folder in config.folders
+    )
+    vouched = change_cursor.read_folders(
+        change_cursor.folders_path_for(config.data_dir)
+    )
+    if vouched is None:
+        print(
+            "folders: not recorded -- the next cycle sweeps once and records them"
+        )
+    elif vouched == watched:
+        print(f"folders: {len(watched.splitlines())} watched, all covered")
+    else:
+        added = sorted(set(watched.splitlines()) - set(vouched.splitlines()))
+        dropped = sorted(set(vouched.splitlines()) - set(watched.splitlines()))
+        print(
+            "folders: changed since the cursor was taken -- the next cycle sweeps "
+            "once so nothing already sitting in a new folder is missed"
+        )
+        for folder_id in added:
+            print(f"  added:   {folder_id}")
+        for folder_id in dropped:
+            print(f"  dropped: {folder_id}")
 
 
 def cmd_cursor_reset(args: argparse.Namespace) -> None:
@@ -756,6 +801,9 @@ def cmd_cursor_reset(args: argparse.Namespace) -> None:
     """
     config = load_config(validate_providers=False, config_path=args.config)
     path = change_cursor.path_for(config.data_dir)
+    # The folder set goes with it: left behind, it would vouch for a cursor that no
+    # longer exists.
+    change_cursor.clear_folders(change_cursor.folders_path_for(config.data_dir))
     if change_cursor.clear(path):
         print(f"Removed {path}; the next cycle sweeps every folder.")
     else:
@@ -1222,10 +1270,10 @@ def build_parser() -> argparse.ArgumentParser:
         "cursor",
         help="Inspect or forget the changes-feed cursor",
         description=(
-            "The cursor is where the changes feed resumes from, and the only state "
-            "this service keeps. It is safe to forget: without one a cycle reads "
-            "every configured folder and takes a fresh cursor, so the worst a reset "
-            "costs is one slower cycle."
+            "The cursor is where the changes feed resumes from, and the only "
+            "discovery state this service keeps. It is safe to forget: without one "
+            "a cycle reads every configured folder and takes a fresh cursor, so the "
+            "worst a reset costs is one slower cycle."
         ),
     )
     cursor_sub = p_cursor.add_subparsers(dest="cursor_command", required=True)

@@ -1870,6 +1870,42 @@ def _discover_by_changes(service: Any, config: Config, cursor: str) -> _Discover
     )
 
 
+def _cursor_covers_config(config: Config, *, mode: str) -> bool:
+    """Whether the saved cursor can vouch for the folders now being watched.
+
+    A cursor means "nothing has happened since" only for folders that were already
+    in the config when it was taken. A folder added afterwards -- which is how an
+    employee gets onboarded, not some one-off migration -- brings recordings that
+    were never a change after that cursor, so the feed will never name it and its
+    backlog would stay invisible until someone reset the cursor by hand. One sweep
+    is the whole cost of noticing.
+
+    ``changes`` mode refuses instead of sweeping -- that is its contract, and it is
+    the only safe answer here. Reading the feed anyway would let the cycle drain and
+    record the new folder set as vouched for without it ever having been swept, so
+    the backlog would be invisible from then on.
+    """
+    watched = change_cursor.fingerprint(
+        folder.folder_id for folder in config.folders
+    )
+    vouched = change_cursor.read_folders(
+        change_cursor.folders_path_for(config.data_dir)
+    )
+    if vouched == watched:
+        return True
+    if mode == "changes":
+        raise SystemExit(
+            "The watched folders changed since the cursor was taken; the feed cannot "
+            "report recordings that were already in a folder added since. Run a "
+            "normal cycle or `gdstt run-once --mode walk` first."
+        )
+    logger.info(
+        "The watched folders changed since the cursor was taken; sweeping once so a "
+        "newly added folder's existing recordings are not missed"
+    )
+    return False
+
+
 def _discover(service: Any, config: Config, *, mode: str = "auto") -> _Discovery:
     """Take the cheap path when a cursor says where to resume, the full one otherwise.
 
@@ -1890,6 +1926,8 @@ def _discover(service: Any, config: Config, *, mode: str = "auto") -> _Discovery
             "No changes cursor saved yet; run `gdstt run-once --mode walk` or a "
             "normal cycle first."
         )
+    if saved is not None and not _cursor_covers_config(config, mode=mode):
+        saved = None
     if saved is not None:
         found = _discover_by_changes(service, config, saved)
         if found is not None:
@@ -2032,6 +2070,17 @@ def run_once(
     cycle_drained = not (cycle_failed or cycle_folder_errors or cycle_deferred)
     if not dry_run and discovery.cursor and cycle_drained:
         change_cursor.write(change_cursor.path_for(config.data_dir), discovery.cursor)
+        # Saved with the cursor, never apart from it: a cursor whose folder set is
+        # missing cannot be vouched for and would sweep every cycle. The same
+        # `cycle_drained` guard is what keeps a config edited before the folder was
+        # actually shared from being recorded as seen -- that listing fails, which
+        # counts as a folder error, which holds both files where they are.
+        change_cursor.write_folders(
+            change_cursor.folders_path_for(config.data_dir),
+            change_cursor.fingerprint(
+                folder.folder_id for folder in config.folders
+            ),
+        )
     elif not dry_run and discovery.cursor:
         logger.info(
             "Holding the changes cursor [failed=%d, folder_errors=%d, deferred=%d]; "

@@ -256,15 +256,58 @@ one Drive no longer recognises, a cycle reads every configured folder and takes 
 fresh one. `gdstt cursor reset` forces exactly that, and `gdstt changes` shows what
 the feed holds without consuming it.
 
+### A cursor only vouches for the folders it was taken against
+
+`<data-dir>/changes_folders.txt` records which folders were being watched when the
+cursor was saved. Add an employee to `folders:` and their existing recordings were
+never a change after that cursor -- the feed will never name that folder, and the
+backlog would stay invisible. So a changed folder set sweeps once, says so, and
+records the new set:
+
+```
+The watched folders changed since the cursor was taken; sweeping once so a newly added folder's existing recordings are not missed
+```
+
+`gdstt cursor show` prints which folders the cursor covers and what changed, and
+`doctor` says whether it still covers the config. Editing the config *before* the
+folder is actually shared is safe: that listing fails, which counts as a folder error,
+which holds the cursor and its folder set where they are until the share lands.
+
 `run-once --mode` picks the path explicitly rather than by whether a cursor exists:
 
 | mode | what it does |
 | --- | --- |
-| `auto` (default) | reads the feed when a cursor is saved, sweeps otherwise |
+| `auto` | reads the feed when a cursor is saved, sweeps otherwise |
 | `walk` | always sweeps, and leaves the cursor untouched -- a "check everything now" that does not become a new starting point |
 | `changes` | only reads the feed, and fails rather than falling back, so the feed itself can be exercised on demand |
 
-`--dry-run` never moves the cursor in any mode.
+Without `--mode`, `run-once` uses `run.discovery` from the config -- the same path the
+service itself takes -- so a deployment pinned to `walk` is not silently exercised on
+the other one. `--dry-run` never moves the cursor in any mode.
+
+### Turning the feed off
+
+`run.discovery` accepts `auto` (default) or `walk`. `walk` makes the polling loop list
+every watched folder and its meeting subfolders every cycle and never read the feed.
+
+It is there because one assumption behind the feed is still unproven: discovery through
+`changes.list` has only been exercised on folders the account **owns**, and a
+deployment typically watches folders shared **to** it. Walking costs one request per
+folder per cycle -- about a thousand requests per cycle at a thousand meeting
+subfolders, comfortably inside quota -- so this is a real fallback, not a degraded
+mode. Start on `walk` if the feed has not proven itself on your Drive, and switch to
+`auto` once it has.
+
+### What neither path sees: shortcuts
+
+A Drive *shortcut* to a recording is invisible to both discovery paths. Drive reports
+the shortcut's own `application/vnd.google-apps.shortcut` and puts the real type in
+`shortcutDetails.targetMimeType`, so a `video/mp4` filter drops it in a folder listing
+and in the changes feed alike.
+
+This is deliberate rather than unnoticed. Meet gives the organizer the real file, and
+the organizer is whose folder gets configured; a participant who receives only a
+shortcut would otherwise have the same call transcribed twice, once from each side.
 
 **The cursor waits for the work.** It only moves after a cycle that processed
 everything it found. A recording that failed, a folder that could not be listed, or a
