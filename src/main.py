@@ -21,6 +21,7 @@ from src import (
     booking_server,
     change_cursor,
     drive,
+    meet_transcript as meet_transcript_module,
     meta as meta_module,
     meta_doc,
     meta_entity,
@@ -595,6 +596,44 @@ def _speaker_names_from_file_info(file_info: dict) -> list[str] | None:
     return names or None
 
 
+def _names_from_meet_transcript(
+    service: Any, container_id: str, file_name: str
+) -> list[str] | None:
+    """Who Meet says was on this call, or ``None`` when it does not say.
+
+    Meet writes a transcript next to every recording and names the people in it. That
+    closes the one gap the recording's own name cannot: a call started outside the
+    calendar is named after the meeting room, so there is nothing in it to read and the
+    speakers stay ``Speaker 1`` / ``Speaker 2``. Even when the name does carry names it
+    carries the ones the calendar invite used, which is how "Viktoriia" arrives without
+    a surname.
+
+    Failure here is not failure of the recording: no transcript, no access to it, or a
+    shape this cannot read all return ``None`` and leave the existing name parsing in
+    charge.
+    """
+    try:
+        doc = drive.find_meet_transcript(service, container_id, file_name)
+        if doc is None:
+            return None
+        text = drive.export_document_text(service, doc["id"])
+    except (RefreshError, AuthError):
+        raise
+    except Exception:
+        logger.info(
+            "Could not read Meet's transcript beside %s; falling back to the file name",
+            file_name,
+            exc_info=True,
+        )
+        return None
+
+    names = meet_transcript_module.participants(text)
+    if len(names) < 2:
+        return None
+    logger.info("Meet's transcript names %s for %s", names, file_name)
+    return names
+
+
 def _resolve_speaker_names(
     transcript: str,
     file_name: str,
@@ -602,6 +641,7 @@ def _resolve_speaker_names(
     config: Config,
     *,
     usage: dict[str, dict[str, int]] | None = None,
+    candidates: list[str] | None = None,
 ) -> list[str] | None:
     """Ask the model which diarized speaker is which participant.
 
@@ -615,7 +655,8 @@ def _resolve_speaker_names(
     """
     if not config.openai_api_key:
         return None
-    candidates = postprocess.extract_interlocutor_names(file_name)
+    if candidates is None:
+        candidates = postprocess.extract_interlocutor_names(file_name)
     if len(candidates) < 2:
         return None
 
@@ -1213,9 +1254,22 @@ def process_item(
                 speaker_names = _speaker_names_from_file_info(file_info)
                 if config.stt_postprocess:
                     if speaker_names is None:
-                        speaker_names = _resolve_speaker_names(
-                            text, file_name, folder_id, config, usage=usage
+                        # Meet's own transcript knows the participants even when the
+                        # recording's name does not, and knows them in full when the
+                        # name only has a first name from the calendar invite.
+                        from_meet = _names_from_meet_transcript(
+                            service, container_id, file_name
                         )
+                        speaker_names = _resolve_speaker_names(
+                            text, file_name, folder_id, config, usage=usage,
+                            candidates=from_meet,
+                        )
+                        if speaker_names is None:
+                            # No model, or an answer it would not stand behind. Meet
+                            # lists speakers in the order they first spoke, which is
+                            # the order diarized labels are numbered in, so it still
+                            # beats parsing the file name.
+                            speaker_names = from_meet
                     text = postprocess.postprocess_transcript(
                         text,
                         file_name,

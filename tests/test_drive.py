@@ -1204,3 +1204,54 @@ def test_list_changes_asks_for_the_fields_the_caller_decides_on():
     fields = service.changes.return_value.list.call_args.kwargs["fields"]
     for needed in ("fileId", "removed", "mimeType", "parents", "trashed"):
         assert needed in fields
+
+
+
+def test_transcript_name_for_a_calendar_recording():
+    assert drive.meet_transcript_name(
+        "Weekly - 2026/09/09 16:56 CEST - Recording.mp4"
+    ) == "Weekly - 2026/09/09 16:56 CEST - Transcript"
+
+
+def test_transcript_name_for_a_room_code_recording():
+    assert drive.meet_transcript_name(
+        "may-doqs-end (2026-09-09 18_53 GMT+2).mp4"
+    ) == "may-doqs-end (2026-09-09 18_53 GMT+2) - Transcript"
+
+
+def test_the_transcript_is_found_by_name_not_by_being_the_only_document():
+    """A recurring meeting keeps every instance in one subfolder, so "the transcript
+    here" has no single answer."""
+    service = _make_drive_service([
+        {"id": "d1", "name": "Weekly - 2026/09/02 10:00 CEST - Transcript",
+         "mimeType": drive.GOOGLE_DOC_MIME, "parents": ["series"]},
+        {"id": "d2", "name": "Weekly - 2026/09/09 10:00 CEST - Transcript",
+         "mimeType": drive.GOOGLE_DOC_MIME, "parents": ["series"]},
+    ])
+
+    found = drive.find_meet_transcript(
+        service, "series", "Weekly - 2026/09/09 10:00 CEST - Recording.mp4"
+    )
+
+    assert found["id"] == "d2"
+
+
+def test_no_transcript_beside_the_recording_is_not_an_error():
+    service = _make_drive_service([
+        {"id": "v1", "name": "a.mp4", "mimeType": drive.MP4_MIME, "parents": ["f1"]},
+    ])
+
+    assert drive.find_meet_transcript(service, "f1", "a.mp4") is None
+
+
+def test_a_google_doc_is_exported_rather_than_downloaded():
+    """A Google Doc has no bytes to download, which is also why a listing asking for
+    text/plain never saw Meet's transcripts."""
+    service = MagicMock()
+    service.files.return_value.export.return_value.execute.return_value = b"Attendees\n"
+
+    text = drive.export_document_text(service, "d1")
+
+    assert text == "Attendees\n"
+    kwargs = service.files.return_value.export.call_args.kwargs
+    assert kwargs["mimeType"] == "text/plain"

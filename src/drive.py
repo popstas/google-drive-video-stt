@@ -16,6 +16,7 @@ MP3_MIME = "audio/mpeg"
 TXT_MIME = "text/plain"
 MD_MIME = "text/markdown"
 FOLDER_MIME = "application/vnd.google-apps.folder"
+GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 PAGE_SIZE = 1000
 # Meet nests meeting folders one level under the root; the slack absorbs an
 # unexpected layer without letting a circular parent chain run away.
@@ -68,6 +69,20 @@ def get_file_metadata(service: Any, file_id: str) -> dict:
     )
 
 
+def _next_page_token(response: Any) -> str | None:
+    """The next page token, or ``None`` when there is not one.
+
+    Every listing here loops until Drive stops handing out tokens, so the loop's exit
+    depends on a value that arrives untyped from outside. Insisting on a non-empty
+    string makes a malformed answer end the listing instead of spinning on it -- the
+    difference between a short read and a process that never returns.
+    """
+    token = response.get("nextPageToken")
+    if isinstance(token, str) and token:
+        return token
+    return None
+
+
 def _list_files_by_mime(service: Any, folder_id: str, mime_type: str) -> list[dict]:
     return _list_files_by_mimes(service, folder_id, (mime_type,))
 
@@ -104,8 +119,8 @@ def _list_files_by_mimes(
             .execute()
         )
         files.extend(response.get("files", []))
-        page_token = response.get("nextPageToken")
-        if not page_token:
+        page_token = _next_page_token(response)
+        if page_token is None:
             break
     return files
 
@@ -139,8 +154,8 @@ def list_mp4_timestamps(service: Any, folder_id: str) -> list[dict]:
             .execute()
         )
         files.extend(response.get("files", []))
-        page_token = response.get("nextPageToken")
-        if not page_token:
+        page_token = _next_page_token(response)
+        if page_token is None:
             break
     return files
 
@@ -209,6 +224,51 @@ def find_newest_mp4_in_tree(service: Any, folder_id: str) -> dict | None:
     return newest
 
 
+def meet_transcript_name(video_name: str) -> str:
+    """The name Meet gives the transcript sitting beside ``video_name``.
+
+    Meet names the pair from one base. A call booked in the calendar gets
+    ``<title> - <when> - Recording`` and ``<title> - <when> - Transcript``; a call
+    started outside it gets ``<room> (<when>)`` and ``<room> (<when>) - Transcript``.
+    Dropping a trailing ``- Recording`` covers both.
+    """
+    base = drive_stem(video_name)
+    if base.endswith(" - Recording"):
+        base = base[: -len(" - Recording")]
+    return f"{base} - Transcript"
+
+
+def find_meet_transcript(service: Any, folder_id: str, video_name: str) -> dict | None:
+    """The Google Doc transcript belonging to one recording, or ``None``.
+
+    Matched by name rather than by being the only document in the folder: a recurring
+    meeting keeps every instance in the same subfolder, so "the transcript here" is
+    not a question with one answer.
+    """
+    wanted = meet_transcript_name(video_name)
+    for doc in _list_files_by_mimes(service, folder_id, (GOOGLE_DOC_MIME,)):
+        if doc.get("name") == wanted:
+            return doc
+    return None
+
+
+def export_document_text(service: Any, file_id: str) -> str:
+    """Read a Google Doc as plain text.
+
+    A Google Doc has no bytes to download -- it has to be exported -- which is also
+    why this service never saw Meet's transcripts before: they are invisible to a
+    listing that asks for ``text/plain``.
+    """
+    data = (
+        service.files()
+        .export(fileId=file_id, mimeType="text/plain")
+        .execute()
+    )
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return str(data)
+
+
 def describe_folder(service: Any, folder_id: str) -> dict:
     """Return ``{id, name, parents, trashed}`` for a folder.
 
@@ -275,9 +335,10 @@ def list_changes(service: Any, page_token: str) -> tuple[list[dict], str]:
             .execute()
         )
         entries.extend(response.get("changes", []))
-        next_page = response.get("nextPageToken")
-        if not next_page:
-            return entries, response.get("newStartPageToken", cursor)
+        next_page = _next_page_token(response)
+        if next_page is None:
+            new_cursor = response.get("newStartPageToken")
+            return entries, new_cursor if isinstance(new_cursor, str) else cursor
         cursor = next_page
 
 
@@ -357,8 +418,8 @@ def list_subfolders(service: Any, folder_id: str) -> list[dict]:
             .execute()
         )
         folders.extend(response.get("files", []))
-        page_token = response.get("nextPageToken")
-        if not page_token:
+        page_token = _next_page_token(response)
+        if page_token is None:
             break
     return folders
 

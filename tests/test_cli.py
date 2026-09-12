@@ -26,9 +26,9 @@ def _flat_folders_and_a_scratch_cursor(mocker, tmp_path):
     """Every folder here is flat, and the changes cursor lives in a scratch file.
 
     `run_once` and `process <folder>` now read a folder together with its meeting
-    subfolders, and a cycle now saves where the changes feed got to. These tests
-    describe neither: they patch `list_folder_state` to say the folder is flat, and
-    they do not care about the cursor.
+    subfolders, a cycle now saves where the changes feed got to, and a recording may
+    have a Meet transcript beside it. These fixtures describe none of that: the folder
+    is flat, the cursor is nobody's business here, and there is no transcript.
 
     Both halves have teeth. Left alone, the real `list_subfolders` runs against a
     MagicMock whose `nextPageToken` is truthy and the paging loop never ends; and the
@@ -39,6 +39,7 @@ def _flat_folders_and_a_scratch_cursor(mocker, tmp_path):
     """
     mocker.patch("src.drive.list_subfolders", return_value=[])
     mocker.patch("src.drive.get_start_page_token", return_value="tok-sweep")
+    mocker.patch("src.drive.find_meet_transcript", return_value=None)
     mocker.patch(
         "src.change_cursor.path_for",
         return_value=tmp_path / "cursor" / "changes_cursor.txt",

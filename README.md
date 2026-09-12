@@ -486,6 +486,15 @@ the recording file name (e.g. `Alice and Bob - 2026/05/28 ... .mp4` → `Alice`,
 merges any extra (spurious) diarization speakers into the real one whose turns they
 continue.
 
+Where the recording's own name has nothing to give, Meet's transcript does. Meet
+leaves a Google Doc beside each recording listing the attendees, and the service reads
+it for the names before falling back to the file name. This matters most for a call
+started outside the calendar: it is named after the meeting room
+(`may-doqs-end (2026-09-09 18:53 GMT+2)`), so there is nothing to parse and the
+speakers would stay `Speaker N`. It also helps a calendar call, where the invite often
+carries only a first name. A missing or unreadable transcript changes nothing: the
+file name stays in charge.
+
 When a sibling `.txt` already exists, normal polling skips it to avoid spending STT
 credits repeatedly. Use `gdstt process <file-id> --reprocess-txt` when you
 intentionally want to run STT again and overwrite the existing `.txt` in place. New

@@ -160,6 +160,16 @@ splits on `,`/`&`/`and`/`и`/`х`/`x`, and discards Google Meet room codes and t
 config (an operator's own org name would be read as a person), and the latin `x`
 separator is matched case-sensitively so an uppercase `X` stays a middle initial.
 
+Names are looked for in Meet's own transcript first (`src/meet_transcript.py`): a
+Google Doc sits beside each recording with an `Attendees` block and `Name: turn` lines.
+Both are read — the block is complete but unordered and includes a shared screen as
+`<name>'s Presentation`, while the turns give speaking order, which is what diarized
+labels are numbered by. The result feeds `_resolve_speaker_names` as its `candidates`,
+and is used directly when no model is configured. Every failure path (no transcript,
+no access, an unfamiliar shape, fewer than two names) returns `None` and leaves file-name
+parsing in charge: losing the names is a worse transcript, losing the recording is an
+outage.
+
 **Preset DAG** (`src/presets.py` + `src/preset_pipeline.py`): after the transcript
 is written, `process_item` runs the enabled presets that are still missing an
 artifact. Each preset is one OpenAI pass (`src/openai_pipeline.py`, sync or the
