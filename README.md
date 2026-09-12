@@ -367,8 +367,19 @@ That is deliberate. The feed names a folder once, when something happens in it, 
 recording that failed writes no artifact -- so nothing there would ever change again
 and the feed would never name it twice. Re-reading the same changes costs nothing,
 because the folder listing decides what still needs doing. Permanent skips by design
-(no booking, larger than `--max-size`) are not counted, or the cursor would freeze for
-good.
+(no booking, larger than `--max-size`, before `since`) are not counted, or the cursor
+would freeze for good.
+
+The cost of that rule is worth knowing. A recording that can *never* succeed -- a
+corrupt upload -- holds the cursor on every cycle and is retried on every cycle.
+Nothing is lost: each cycle still reads the changes after the held point, so new
+recordings keep flowing. But the feed re-reads a growing tail until Drive expires the
+token, and nothing caps the retries. The fix is to remove or repair that file; the
+log names it on every attempt.
+
+A cursor Drive refuses is swept over, whatever the reason. An expired one gets 404 or
+410; a malformed one -- a hand-edited or damaged cursor file -- gets 400 with the error
+on the `pageToken` parameter, and is treated the same way.
 
 ### Waiting for a recording Drive is still processing
 

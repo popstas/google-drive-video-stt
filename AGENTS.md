@@ -162,12 +162,24 @@ old video Drive never finished processing would otherwise count as `deferred`, w
 holds the cursor too. Absolute dates only; a rolling `max_age_days` would drop a
 still-pending recording out of scope overnight with nothing having happened.
 
+`_is_rejected_cursor` covers 404, 410 **and** a 400 whose error location is
+`pageToken`. The 400 case was found live, not by reading: a corrupt cursor file made
+Drive answer 400, which was handled as an ordinary feed failure, which held the
+cursor, which was the same bad token next cycle -- the service failed every cycle for
+good. Match the parameter, never 400 alone, or a genuinely broken request gets swept
+over quietly. In changes mode, listings are merged per configured folder; each item
+keeps its own `container_id`, so nothing about placement is lost.
+
 Neither path sees a **shortcut** to a recording: Drive reports the shortcut's own
 `application/vnd.google-apps.shortcut`, with the real type only in
 `shortcutDetails.targetMimeType`, so the `video/mp4` filter drops it in the listing and
 in the feed alike (verified live). Organizers get real files, which is whose folders
 are configured; a participant who only gets a shortcut is out of scope, and processing
-one would duplicate work the organizer's folder already did.
+one would duplicate work the organizer's folder already did. On the first real employee
+folder checked, all five shortcuts' targets returned 404 to the account the folder was
+shared with, so following them would not work either. `list_recording_shortcuts` +
+`is_readable` exist only so `doctor --drive` can say how many calls a folder will never
+process -- the rest of its diagnosis reads as healthy without that line.
 
 It is also held back entirely unless the cycle drained what it found. The feed names a
 folder once, when something happens in it, and a recording that failed writes no

@@ -5492,3 +5492,147 @@ def test_a_dry_run_names_what_the_cutoff_leaves_out(mocker, tmp_path, caplog):
     assert "not in scope" in caplog.text
     assert OLD_CALL in caplog.text
     assert "skipped_old=1" in caplog.text
+
+
+# --- Found by the live emulation, not by reading the code ------------------------
+
+
+def _drive_400(location):
+    """Drive's own error body, as captured live for a malformed page token."""
+    body = (
+        '{"error": {"code": 400, "message": "Invalid Value", "errors": '
+        '[{"reason": "invalid", "location": "%s", "locationType": "parameter"}]}}'
+    ) % location
+    return HttpError(MagicMock(status=400), body.encode("utf-8"))
+
+
+def test_a_malformed_cursor_is_swept_over_instead_of_failing_forever(mocker, tmp_path):
+    """Drive answers a corrupt page token with 400, not 404/410. Read as an ordinary
+    feed failure it held the cursor -- and a held cursor is the same bad token next
+    cycle, so the service failed every cycle for good while the cursor module said a
+    corrupt cursor costs one sweep. Reproduced live with `not-a-token` and `0`."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "not-a-token")
+    mocker.patch(
+        "src.main.drive.list_changes", side_effect=_drive_400("pageToken")
+    )
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-fresh")
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_called_once()
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-fresh"
+    notify_mock.assert_not_called()
+
+
+def test_a_400_about_anything_but_the_cursor_is_still_a_failure(mocker, tmp_path):
+    """The match is on the parameter, not on 400: a request broken some other way
+    must surface, not be quietly swept over every ten minutes."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    mocker.patch("src.main.drive.list_changes", side_effect=_drive_400("fields"))
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_not_called()
+    notify_mock.assert_called_once()
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-1"
+
+
+def test_a_400_without_a_readable_body_is_not_mistaken_for_a_bad_cursor(
+    mocker, tmp_path
+):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    mocker.patch("src.main.drive.list_changes", side_effect=_http_error(400))
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_not_called()
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-1"
+
+
+def test_one_configured_folder_is_one_listing_however_many_meetings_changed(
+    mocker, tmp_path
+):
+    """Found live: an old cursor made the feed name three meetings under one
+    employee, and the log reported that employee's folder three times over."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=(
+            [
+                _change("v1", "meeting-1"),
+                _change("v2", "meeting-2"),
+                _change("v3", "meeting-3"),
+            ],
+            "tok-2",
+        ),
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        side_effect=lambda _service, container: [
+            _subfolder_item(f"v-{container}", f"{container}.mp4", container)
+        ],
+    )
+
+    found = main._discover(MagicMock(), cfg)
+
+    assert [folder_id for folder_id, _ in found.listings] == ["root"]
+    items = found.listings[0][1]
+    assert sorted(item["container_id"] for item in items) == [
+        "meeting-1", "meeting-2", "meeting-3",
+    ]
+
+
+def test_a_recording_that_always_fails_holds_the_cursor_every_cycle(mocker, tmp_path):
+    """A trade-off, pinned so that it is visible rather than rediscovered.
+
+    Holding the cursor is what keeps a failed recording from being lost; the price is
+    that a recording which can never succeed -- a corrupt upload, say -- holds it on
+    every cycle and is retried on every cycle, while the feed re-reads a tail that
+    grows until Drive expires the token and a sweep takes a fresh one. New recordings
+    still flow, because each cycle reads the changes after the held point too. Nothing
+    caps the retries today; if that ever changes, this test is where it shows."""
+    cfg = _one_change_cycle(mocker, tmp_path)
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    mocker.patch("src.main.booking_gate.resolve", return_value=MATCHED_DECISION)
+    process_mock = mocker.patch(
+        "src.main.process_item", side_effect=RuntimeError("not a video")
+    )
+    mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+    main.run_once(MagicMock(), cfg)
+
+    assert process_mock.call_count == 2
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) == "tok-1"
+
+
+def test_a_recording_drive_never_processes_is_held_only_within_the_grace(
+    mocker, tmp_path
+):
+    """Reproduced live with an upload that is not a video, so Drive never fills
+    `videoMediaMetadata`: inside the grace it is deferred and holds the cursor; past
+    it, it is treated as ready rather than waited on for ever."""
+    fresh = _item("v1", "a.mp4")
+    fresh["has_media_metadata"] = False
+    stale = _item("v2", "b.mp4")
+    stale["has_media_metadata"] = False
+    now = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
+    fresh["file"]["createdTime"] = (now - timedelta(minutes=5)).isoformat()
+    stale["file"]["createdTime"] = (now - timedelta(hours=3)).isoformat()
+
+    assert main._is_still_settling(fresh, now) is True
+    assert main._is_still_settling(stale, now) is False

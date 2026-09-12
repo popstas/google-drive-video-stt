@@ -88,6 +88,35 @@ def _http_status_code(exc: Exception) -> int | None:
     return None
 
 
+def _is_rejected_cursor(exc: Exception) -> bool:
+    """Whether Drive refused the saved cursor itself, rather than failing the read.
+
+    An expired cursor gets 404 or 410. A malformed one gets 400 instead, with the
+    error pinned to the ``pageToken`` parameter -- found by writing a corrupt token
+    into the cursor file on a live Drive. Read as an ordinary feed failure, that 400
+    held the cursor, and a held cursor is the same bad token on the next cycle: the
+    service failed every cycle for good while the module promised that a corrupt
+    cursor costs one sweep.
+
+    Matching the parameter rather than 400 alone keeps a genuinely broken request
+    -- a bad ``fields`` after a code change, say -- surfacing as the failure it is
+    instead of being swept over quietly every cycle.
+    """
+    status = _http_status_code(exc)
+    if status in _STALE_CURSOR_HTTP_STATUS_CODES:
+        return True
+    if status != 400 or not isinstance(exc, HttpError):
+        return False
+    try:
+        details = json.loads(exc.content.decode("utf-8"))["error"]["errors"]
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+    return any(
+        isinstance(detail, dict) and detail.get("location") == "pageToken"
+        for detail in details
+    )
+
+
 def _is_transient_runtime_error(exc: Exception) -> bool:
     if isinstance(exc, (RefreshError, AuthError)):
         return False
@@ -1862,7 +1891,7 @@ def _discover_by_changes(service: Any, config: Config, cursor: str) -> _Discover
     except (RefreshError, AuthError):
         raise
     except Exception as exc:
-        if _http_status_code(exc) in _STALE_CURSOR_HTTP_STATUS_CODES:
+        if _is_rejected_cursor(exc):
             logger.info("The changes cursor is no longer valid; sweeping instead")
             return None
         _notify_listing_failure("the changes feed", exc, config)
@@ -1907,7 +1936,7 @@ def _discover_by_changes(service: Any, config: Config, cursor: str) -> _Discover
             continue
         containers[container_id] = owner
 
-    listings: list[tuple[str, list[dict]]] = []
+    by_owner: dict[str, list[dict]] = {}
     folder_errors = 0
     for container_id, owner in containers.items():
         listing_retry_state = _RetryState()
@@ -1925,10 +1954,16 @@ def _discover_by_changes(service: Any, config: Config, cursor: str) -> _Discover
             continue
         finally:
             retry_state.retry_count += listing_retry_state.retry_count
-        listings.append((owner, items))
+        # Each item already carries its own `container_id`, so merging them under
+        # the configured folder loses nothing about where the files live.
+        by_owner.setdefault(owner, []).extend(items)
 
+    listings = list(by_owner.items())
     logger.info(
-        "Changes feed [entries=%d, folders_touched=%d]", len(entries), len(listings)
+        "Changes feed [entries=%d, meeting_folders=%d, folders=%d]",
+        len(entries),
+        len(containers),
+        len(listings),
     )
     return _Discovery(
         listings, new_cursor, retry_state.retry_count, folder_errors + unresolved
