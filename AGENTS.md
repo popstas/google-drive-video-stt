@@ -146,6 +146,14 @@ completion webhook's `file.folder_id`), the container is where artifacts are wri
 for entry points that start from a file — `process_target` and the changes feed — and
 returns `None` for folders nobody configured, which is a skip rather than an error.
 
+Two rules that are easy to reintroduce, because each failed silently once. **Every
+write goes to `container_id`** — the `.txt`, each preset artifact, `.meta.yml`, `.stt`
+and the `.mp3`; the mp3 upload is its own call site and was the one left behind, which
+put every artifact a level above its recording. **Every folder listing an operator
+command makes reads the tree**, not one level: `list`, `latest`, `doctor --drive`,
+`planfix sent` and `bookings restore-dates` all go through a `*_in_tree` helper,
+because one level on a Meet root returns nothing and reads as "there is nothing here".
+
 `process_target` (`src/main.py`) is the on-demand entry the CLI's `process` command uses:
 it auto-detects file vs folder by `mimeType` (override with `is_folder`), then runs the same
 `process_item` over a single file or every pending file in a folder. The `gdstt` CLI
