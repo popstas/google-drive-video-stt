@@ -128,6 +128,13 @@ cursor, continue. Three orderings are load-bearing and each has a test: the curs
 taken *before* a sweep (so a file landing mid-sweep is not stepped over), saved *after*
 the work (so a failed cycle re-reads the same changes), and never moved by `--dry-run`.
 
+It is also held back entirely unless the cycle drained what it found. The feed names a
+folder once, when something happens in it, and a recording that failed writes no
+artifact -- so nothing there changes again and the feed never names it twice. A failed
+file, an unlistable folder, an unresolvable parent, or a video left to settle therefore
+all keep the cursor where it is. Deliberate permanent skips (no booking, over
+`--max-size`) are *not* counted: those would freeze the cursor for good.
+
 **Meeting subfolders** (`drive.list_folder_tree_state`): Google Meet files each meeting
 into its own subfolder, so a configured folder is read together with its direct
 subfolders — a union, not a mode, which is why a flat folder still behaves exactly as

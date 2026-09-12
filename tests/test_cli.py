@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -1251,12 +1251,17 @@ def test_start_command_sets_run_enabled(mocker, capsys, tmp_path):
 
 def test_bookings_list_prints_the_journal(tmp_path, capsys, monkeypatch):
     config_path = write_cli_config(tmp_path)
+    # Yesterday, not a fixed date: `bookings list` reads through the same retention
+    # window as the gate, so a pinned date makes this test expire by itself.
+    start_time = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+        hour=7, minute=0, second=0, microsecond=0
+    )
     append(
         tmp_path / "call_bookings.jsonl",
         CallBooking(
             task_id="851030",
             manager_email="kate@example.com",
-            start_time=datetime(2026, 8, 11, 7, tzinfo=timezone.utc),
+            start_time=start_time,
         ),
     )
 
@@ -1265,7 +1270,7 @@ def test_bookings_list_prints_the_journal(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "851030" in out
     assert "kate@example.com" in out
-    assert "2026-08-11T07:00:00+00:00" in out
+    assert start_time.isoformat() in out
 
 
 def test_bookings_list_reports_an_empty_journal(tmp_path, capsys):
