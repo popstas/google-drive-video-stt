@@ -713,7 +713,9 @@ def test_find_newest_mp4_returns_first_file():
 
     result = drive.find_newest_mp4(service, "folder1")
 
-    assert result == newest
+    # The folder is now part of the answer: with subfolders the caller can no longer
+    # infer where the file lives from the folder it asked about.
+    assert result == {**newest, "container_id": "folder1"}
     list_kwargs = service.files.return_value.list.call_args.kwargs
     assert list_kwargs["orderBy"] == "createdTime desc"
     assert list_kwargs["pageSize"] == 1
@@ -1048,3 +1050,72 @@ def test_configured_ancestor_handles_a_folder_with_no_parents():
     ])
 
     assert drive.find_configured_ancestor(service, "orphan", {"root"}) is None
+
+
+def _dated_tree_service() -> MagicMock:
+    return _make_drive_service([
+        {"id": "d1", "name": "older meeting", "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+        {"id": "d2", "name": "newer meeting", "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+        {"id": "v1", "name": "old.mp4", "mimeType": drive.MP4_MIME, "parents": ["d1"],
+         "createdTime": "2026-09-03T23:00:00Z"},
+        {"id": "v2", "name": "new.mp4", "mimeType": drive.MP4_MIME, "parents": ["d2"],
+         "createdTime": "2026-09-09T18:53:00Z"},
+    ])
+
+
+def test_newest_in_tree_looks_inside_subfolders():
+    """`gdstt latest` pointed at a Meet root would otherwise report no mp4 at all:
+    the root holds only subfolders."""
+    newest = drive.find_newest_mp4_in_tree(_dated_tree_service(), "root")
+
+    assert newest is not None
+    assert newest["id"] == "v2"
+
+
+def test_newest_in_tree_compares_across_subfolders_not_within_one():
+    service = _make_drive_service([
+        {"id": "d1", "name": "a", "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+        {"id": "d2", "name": "b", "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+        {"id": "v1", "name": "x.mp4", "mimeType": drive.MP4_MIME, "parents": ["d1"],
+         "createdTime": "2026-09-10T10:00:00Z"},
+        {"id": "v2", "name": "y.mp4", "mimeType": drive.MP4_MIME, "parents": ["d2"],
+         "createdTime": "2026-09-09T10:00:00Z"},
+    ])
+
+    assert drive.find_newest_mp4_in_tree(service, "root")["id"] == "v1"
+
+
+def test_newest_in_tree_includes_a_video_loose_in_the_folder_itself():
+    service = _make_drive_service([
+        {"id": "d1", "name": "a", "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+        {"id": "v0", "name": "loose.mp4", "mimeType": drive.MP4_MIME, "parents": ["root"],
+         "createdTime": "2026-09-11T10:00:00Z"},
+        {"id": "v1", "name": "nested.mp4", "mimeType": drive.MP4_MIME, "parents": ["d1"],
+         "createdTime": "2026-09-09T10:00:00Z"},
+    ])
+
+    assert drive.find_newest_mp4_in_tree(service, "root")["id"] == "v0"
+
+
+def test_newest_in_tree_on_a_flat_folder_matches_the_single_folder_lookup():
+    service = _make_drive_service([
+        {"id": "v1", "name": "a.mp4", "mimeType": drive.MP4_MIME, "parents": ["flat"],
+         "createdTime": "2026-09-01T10:00:00Z"},
+    ])
+
+    assert drive.find_newest_mp4_in_tree(service, "flat")["id"] == "v1"
+
+
+def test_newest_in_tree_is_none_when_nothing_is_there():
+    service = _make_drive_service([
+        {"id": "d1", "name": "empty meeting", "mimeType": drive.FOLDER_MIME, "parents": ["root"]},
+    ])
+
+    assert drive.find_newest_mp4_in_tree(service, "root") is None
+
+
+def test_newest_mp4_reports_the_folder_it_was_found_in():
+    """The caller needs the container to write artifacts next to the video."""
+    newest = drive.find_newest_mp4_in_tree(_dated_tree_service(), "root")
+
+    assert newest["container_id"] == "d2"

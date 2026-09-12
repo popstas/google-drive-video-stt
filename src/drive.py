@@ -161,7 +161,7 @@ def set_file_modified_time(service: Any, file_id: str, modified_time: str) -> di
 
 
 def find_newest_mp4(service: Any, folder_id: str) -> dict | None:
-    """Return the most recently created mp4 in a folder, or None when empty."""
+    """Return the most recently created mp4 directly in a folder, or None when empty."""
     query = (
         f"'{folder_id}' in parents and mimeType = '{MP4_MIME}' and trashed = false"
     )
@@ -169,7 +169,7 @@ def find_newest_mp4(service: Any, folder_id: str) -> dict | None:
         service.files()
         .list(
             q=query,
-            fields="files(id, name, mimeType, size, appProperties)",
+            fields="files(id, name, mimeType, size, createdTime, appProperties)",
             orderBy="createdTime desc",
             pageSize=1,
             supportsAllDrives=True,
@@ -178,7 +178,32 @@ def find_newest_mp4(service: Any, folder_id: str) -> dict | None:
         .execute()
     )
     files = response.get("files", [])
-    return files[0] if files else None
+    if not files:
+        return None
+    return {**files[0], "container_id": folder_id}
+
+
+def find_newest_mp4_in_tree(service: Any, folder_id: str) -> dict | None:
+    """Return the newest mp4 in a folder or any of its subfolders, with its container.
+
+    Pointed at a Google Meet root, the single-folder lookup answers "no mp4 files":
+    the root holds only per-meeting subfolders. That is the worst answer an operator
+    can get from `gdstt latest`, because it looks like an empty folder rather than a
+    command that stopped understanding the folder layout.
+
+    Asks each folder separately instead of joining every parent into one query: the
+    joined form grows with the number of meetings and would eventually outgrow the
+    query, while this is a hand-run command where a few extra round trips cost
+    nothing.
+    """
+    newest: dict | None = None
+    for candidate_folder in [folder_id, *(f["id"] for f in list_subfolders(service, folder_id))]:
+        candidate = find_newest_mp4(service, candidate_folder)
+        if candidate is None:
+            continue
+        if newest is None or candidate.get("createdTime", "") > newest.get("createdTime", ""):
+            newest = candidate
+    return newest
 
 
 def find_configured_ancestor(
