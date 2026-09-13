@@ -248,9 +248,11 @@ and the manager the calendar title marks (`postprocess.split_participants`). The
 window is time-based on purpose: `word_speaker` splits a line on every voice change,
 so the old 30-line sample was a minute of mic checks. A reply of `{}` means "cannot
 tell" and returns `None`, as does anything outside the candidates. **Meet's names are
-never bound to speakers by position**, with or without a model: Meet's speaking order
-is not diarization's, and on a real call using it swapped the labels. An unconfirmed
-mapping falls back to the file name exactly as before Meet was read.
+never bound to speakers by position**: Meet's speaking order is not diarization's, and
+on a real call using it swapped the labels. An unconfirmed mapping falls back to the
+file name exactly as before Meet was read, while `_run_preset_stage` still gets Meet's
+names as `participant_names` -- `build_prompt` lists them "in no particular order", so
+they carry no swap there. Without an OpenAI key the transcript is not read at all.
 
 **Preset DAG** (`src/presets.py` + `src/preset_pipeline.py`): after the transcript
 is written, `process_item` runs the enabled presets that are still missing an

@@ -1288,22 +1288,29 @@ def process_item(
                 stt_audio_path = _prepare_deepgram_audio(mp4_path, config)
                 text = transcribe_file(stt_audio_path, config, cost_usd=cost_usd)
                 speaker_names = _speaker_names_from_file_info(file_info)
+                # Who the presets are told was on the call. The same names as the
+                # transcript's labels, except when Meet named people nobody could place
+                # on a speaker: presets take them "in no particular order", so they are
+                # still worth knowing.
+                participant_names = speaker_names
                 if config.stt_postprocess:
-                    if speaker_names is None:
+                    if speaker_names is None and config.openai_api_key:
                         # Meet's own transcript knows the participants even when the
                         # recording's name does not, and knows them in full when the
-                        # name only has a first name from the calendar invite.
+                        # name only has a first name from the calendar invite. Without
+                        # a model nothing could use it, so it is not read.
                         meet = _read_meet_transcript(service, container_id, file_name)
-                        # No model, or an answer it would not stand behind, leaves
-                        # ``None``: the file name decides, as it did before Meet's
-                        # transcript was read. Meet's names are never bound to speakers
-                        # by order -- Meet and diarization can disagree about who spoke
-                        # first, and on a real call that swapped the labels.
+                        # An answer the model would not stand behind leaves ``None``:
+                        # the file name decides, as it did before Meet's transcript was
+                        # read. Meet's names are never bound to speakers by order --
+                        # Meet and diarization can disagree about who spoke first, and
+                        # on a real call that swapped the labels.
                         speaker_names = _resolve_speaker_names(
                             text, file_name, folder_id, config, usage=usage,
                             candidates=meet[0] if meet else None,
                             meet_text=meet[1] if meet else "",
                         )
+                        participant_names = speaker_names or (meet[0] if meet else None)
                     text = postprocess.postprocess_transcript(
                         text,
                         file_name,
@@ -1325,7 +1332,7 @@ def process_item(
                     container_id,
                     tmp_dir,
                     config,
-                    speaker_names=speaker_names,
+                    speaker_names=participant_names,
                     artifact_ids=item.get("artifact_ids") or {},
                     reprocess=reprocess_txt,
                     usage=usage,

@@ -5,6 +5,7 @@ import ssl
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -4872,7 +4873,7 @@ def test_without_candidates_the_file_name_is_still_the_source(mocker):
 
 
 def _transcript_written_with_meet_beside(mocker, tmp_path, file_name, *, resolved, key):
-    """Run a recording through STT with Meet's transcript beside it; return the .txt."""
+    """Run a recording through STT with Meet's transcript beside it."""
     mocker.patch("src.main.drive.download", return_value=tmp_path / "video.mp4")
     mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
     captured = {}
@@ -4886,10 +4887,13 @@ def _transcript_written_with_meet_beside(mocker, tmp_path, file_name, *, resolve
         "src.main.transcribe_file",
         return_value="Speaker 1: hi there\nSpeaker 2: hello back",
     )
-    mocker.patch("src.main.drive.find_meet_transcript", return_value={"id": "d1"})
+    find_mock = mocker.patch(
+        "src.main.drive.find_meet_transcript", return_value={"id": "d1"}
+    )
     mocker.patch("src.main.drive.export_document_text", return_value=_MEET_DOC)
     mocker.patch("src.main.OpenAIPipeline")
     resolve_mock = mocker.patch("src.main.speaker_roles.resolve", return_value=resolved)
+    preset_spy = mocker.spy(main, "_run_preset_stage")
     cfg = make_config(
         stt_provider="deepgram",
         deepgram_api_key="dg-x",
@@ -4900,7 +4904,12 @@ def _transcript_written_with_meet_beside(mocker, tmp_path, file_name, *, resolve
 
     main.process_item(MagicMock(), _item("fid", file_name), "f", cfg)
 
-    return captured["txt"], resolve_mock
+    return SimpleNamespace(
+        txt=captured["txt"],
+        resolve=resolve_mock,
+        find=find_mock,
+        preset_names=preset_spy.call_args.kwargs["speaker_names"],
+    )
 
 
 _ROOM_CODE_CALL = "may-doqs-end (2026-09-09 18_53 GMT+2).mp4"
@@ -4910,25 +4919,38 @@ def test_meets_names_unconfirmed_by_the_model_are_not_bound_by_order(mocker, tmp
     """The regression this pins: Meet listed the people in the order it heard them,
     diarization heard someone else first, and binding the two by position put the
     manager's words under the client's name. Numbered speakers are less, not wrong."""
-    txt, resolve_mock = _transcript_written_with_meet_beside(
+    run = _transcript_written_with_meet_beside(
         mocker, tmp_path, _ROOM_CODE_CALL, resolved=None, key="sk-test"
     )
 
-    resolve_mock.assert_called_once()
-    assert txt == "Speaker 1: hi there\nSpeaker 2: hello back"
+    run.resolve.assert_called_once()
+    assert run.txt == "Speaker 1: hi there\nSpeaker 2: hello back"
 
 
-def test_without_a_model_meets_names_are_not_bound_by_order_either(mocker, tmp_path):
-    txt, resolve_mock = _transcript_written_with_meet_beside(
+def test_presets_still_hear_who_was_on_a_call_nobody_could_place(mocker, tmp_path):
+    """The presets' hint says "in no particular order", so Meet's names carry no swap
+    there -- and on a room-code call they are the only names there are."""
+    run = _transcript_written_with_meet_beside(
+        mocker, tmp_path, _ROOM_CODE_CALL, resolved=None, key="sk-test"
+    )
+
+    assert run.preset_names == ["Oksana Ciciarelli", "Roman Starodubtsev"]
+
+
+def test_without_a_model_meets_transcript_is_not_read(mocker, tmp_path):
+    """Nothing could place its names on speakers, so reading it would only cost two
+    Drive requests and log names nobody uses."""
+    run = _transcript_written_with_meet_beside(
         mocker, tmp_path, _ROOM_CODE_CALL, resolved=["x", "y"], key=""
     )
 
-    resolve_mock.assert_not_called()
-    assert txt == "Speaker 1: hi there\nSpeaker 2: hello back"
+    run.find.assert_not_called()
+    run.resolve.assert_not_called()
+    assert run.txt == "Speaker 1: hi there\nSpeaker 2: hello back"
 
 
 def test_meets_names_label_the_speakers_the_model_placed_them_on(mocker, tmp_path):
-    txt, resolve_mock = _transcript_written_with_meet_beside(
+    run = _transcript_written_with_meet_beside(
         mocker,
         tmp_path,
         _ROOM_CODE_CALL,
@@ -4936,19 +4958,20 @@ def test_meets_names_label_the_speakers_the_model_placed_them_on(mocker, tmp_pat
         key="sk-test",
     )
 
-    assert resolve_mock.call_args.kwargs["meet_text"] == _MEET_DOC
-    assert txt == "Roman Starodubtsev: hi there\nOksana Ciciarelli: hello back"
+    assert run.resolve.call_args.kwargs["meet_text"] == _MEET_DOC
+    assert run.txt == "Roman Starodubtsev: hi there\nOksana Ciciarelli: hello back"
+    assert run.preset_names == ["Roman Starodubtsev", "Oksana Ciciarelli"]
 
 
 def test_an_unconfirmed_calendar_call_keeps_the_file_names_order(mocker, tmp_path):
     """Upstream's behaviour for a calendar call the model could not place is kept as
     it was: Meet's transcript only ever adds evidence, never a new guess."""
-    txt, _ = _transcript_written_with_meet_beside(
+    run = _transcript_written_with_meet_beside(
         mocker, tmp_path, "Alice and Bob - 2026/09/09 10:00 CEST.mp4",
         resolved=None, key="sk-test",
     )
 
-    assert txt == "Alice: hi there\nBob: hello back"
+    assert run.txt == "Alice: hi there\nBob: hello back"
 
 
 # --- The cursor may only move past work that is actually finished -----------------
