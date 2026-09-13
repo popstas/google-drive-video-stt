@@ -343,13 +343,17 @@ This is deliberate rather than unnoticed, and it is not rare. Meet gives the
 organizer the real file and every other participant a shortcut to it, so an
 employee's folder holds a shortcut for each call they only attended. The first real
 employee folder checked had eleven meetings: eight with the recording itself, three
-holding nothing but shortcuts -- and none of those shortcuts' targets could be opened
-by the account the folder was shared with. Sharing a folder does not share what its
-shortcuts point at, so following them would not help either.
+holding nothing but shortcuts.
+
+A shortcut stays a shortcut whoever looks at it; access only decides whether its
+target opens. The shortcut is readable because its folder was shared, but the target
+keeps the organizer's sharing, not the folder's -- the account that employee folder
+was shared with could open none of the five. That is a fact about that account, not
+about every account.
 
 Those calls are processed from the organizer's folder, if that folder is configured.
-`gdstt doctor --drive` says how many a folder cannot process and how many of their
-targets this account cannot even open:
+`gdstt doctor --drive` says how many a folder does not process and how many of their
+targets this account cannot open:
 
 ```
   2 shortcut(s) to recordings, not processed from this folder (2 not readable by this account): calls organized by someone else -- configure the organizer's folder to capture them

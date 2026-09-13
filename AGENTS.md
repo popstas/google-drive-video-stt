@@ -175,11 +175,14 @@ Neither path sees a **shortcut** to a recording: Drive reports the shortcut's ow
 `shortcutDetails.targetMimeType`, so the `video/mp4` filter drops it in the listing and
 in the feed alike (verified live). Organizers get real files, which is whose folders
 are configured; a participant who only gets a shortcut is out of scope, and processing
-one would duplicate work the organizer's folder already did. On the first real employee
-folder checked, all five shortcuts' targets returned 404 to the account the folder was
-shared with, so following them would not work either. `list_recording_shortcuts` +
-`is_readable` exist only so `doctor --drive` can say how many calls a folder will never
-process -- the rest of its diagnosis reads as healthy without that line.
+one would duplicate work the organizer's folder already did. A shortcut is a shortcut
+whatever the viewer's access: its own ACL comes from its folder, its target's from the
+organizer. On the first real employee folder checked, all five targets returned 404 to
+the account the folder was shared with -- a fact about that account, not a law; one the
+organizer shared recordings with can open them. `list_recording_shortcuts` +
+`is_readable` exist so `doctor --drive` can say how many calls a folder does not process
+and how many targets this account cannot open -- the rest of its diagnosis reads as
+healthy without that line.
 
 It is also held back entirely unless the cycle drained what it found. The feed names a
 folder once, when something happens in it, and a recording that failed writes no

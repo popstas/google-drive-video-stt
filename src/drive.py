@@ -426,10 +426,10 @@ def list_recording_shortcuts(service: Any, folder_id: str) -> list[dict]:
 
     Meet files a call into every participant's folder, but only the organizer gets
     the recording itself -- everyone else gets a shortcut to it. Neither discovery
-    path follows shortcuts, and on the first real employee folder checked the targets
-    were not readable by the account the folder was shared with at all: sharing a
-    folder does not share what its shortcuts point at. So these are calls this folder
-    will never process, and the only place that fact can be surfaced is a diagnostic.
+    path follows shortcuts. Whether a target even opens depends on the organizer's
+    sharing, not the folder's: on the first real employee folder checked, the account
+    the folder was shared with could open none of them. So these are calls this folder
+    does not process, and the only place that fact can be surfaced is a diagnostic.
 
     Returns ``[{id, name, container_id, target_id}]``; nothing is resolved here.
     """

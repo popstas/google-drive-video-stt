@@ -441,7 +441,7 @@ def _print_folder_diagnosis(service, folder_id: str) -> None:
         f"newest {newest or 'never'}"
     )
 
-    # The calls this folder will never process, said out loud. Without it a manager's
+    # The calls this folder does not process, said out loud. Without it a manager's
     # folder reports every recording it holds as handled while the meetings they
     # only attended -- a shortcut each -- go missing without a trace.
     try:
