@@ -247,12 +247,15 @@ window (`meet_transcript.turns`, each carrying its block's start), the folder ow
 and the manager the calendar title marks (`postprocess.split_participants`). The
 window is time-based on purpose: `word_speaker` splits a line on every voice change,
 so the old 30-line sample was a minute of mic checks. A reply of `{}` means "cannot
-tell" and returns `None`, as does anything outside the candidates. **Meet's names are
-never bound to speakers by position**: Meet's speaking order is not diarization's, and
-on a real call using it swapped the labels. An unconfirmed mapping falls back to the
-file name exactly as before Meet was read, while `_run_preset_stage` still gets Meet's
-names as `participant_names` -- `build_prompt` lists them "in no particular order", so
-they carry no swap there. Without an OpenAI key the transcript is not read at all.
+tell" and returns `None`, as does anything outside the candidates. **Once a model
+could be asked, no name is bound to a speaker by position**: `_resolve_speaker_names`
+returns `[]` for "asked, not answered", and the transcript keeps `Speaker N`. Neither
+Meet's speaking order nor the file name's is diarization's -- on a real call Meet's
+swapped the labels. `None` means the model was never asked (no key, fewer than two
+names) and keeps the old positional binding from the file name. `_run_preset_stage`
+still gets the names as `participant_names` (Meet's, or the file name's via `None`):
+`build_prompt` lists them "in no particular order", so they carry no swap there.
+Without an OpenAI key Meet's transcript is not read at all.
 
 **Preset DAG** (`src/presets.py` + `src/preset_pipeline.py`): after the transcript
 is written, `process_item` runs the enabled presets that are still missing an

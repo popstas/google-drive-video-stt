@@ -683,8 +683,12 @@ def _resolve_speaker_names(
     minutes when there are any, the folder's owner and the name the calendar title
     marked with the company.
 
-    Returns None whenever the answer cannot be trusted; the caller then falls back to
-    the file name, which is what this code did before.
+    Returns the names in speaker order when the model placed them, and ``[]`` -- leave
+    the speakers numbered -- when it was asked and did not: binding the names by
+    position instead would be right only when the manager happens to speak first, and
+    wrong silently. ``None`` means the model was never asked (no key, fewer than two
+    names), and the caller keeps binding the file name's names by position, as it
+    always did without a model.
     """
     if not config.openai_api_key:
         return None
@@ -714,8 +718,10 @@ def _resolve_speaker_names(
             usage["openai_speaker_roles"] = dict(pipeline.last_usage)
         pipeline.close()
 
-    if names is not None:
-        logger.info("Speaker roles resolved for %s", file_name)
+    if names is None:
+        logger.info("Speaker roles unresolved for %s; leaving the speakers numbered", file_name)
+        return []
+    logger.info("Speaker roles resolved for %s", file_name)
     return names
 
 
@@ -1300,11 +1306,11 @@ def process_item(
                         # name only has a first name from the calendar invite. Without
                         # a model nothing could use it, so it is not read.
                         meet = _read_meet_transcript(service, container_id, file_name)
-                        # An answer the model would not stand behind leaves ``None``:
-                        # the file name decides, as it did before Meet's transcript was
-                        # read. Meet's names are never bound to speakers by order --
-                        # Meet and diarization can disagree about who spoke first, and
-                        # on a real call that swapped the labels.
+                        # An answer the model would not stand behind leaves the
+                        # speakers numbered (``[]``). No name is ever bound to a
+                        # speaker by order once a model could be asked: neither Meet's
+                        # order nor the file name's is diarization's, and on a real call
+                        # Meet's swapped the labels.
                         speaker_names = _resolve_speaker_names(
                             text, file_name, folder_id, config, usage=usage,
                             candidates=meet[0] if meet else None,

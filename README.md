@@ -646,12 +646,13 @@ the first speech, Meet's own turns for the same minutes, the owner of the folder
 recording came from, and the name the calendar title marked as the company's. Meet's
 words are often wrong — it can hear a Russian call as English — but every turn is tied
 to the account that spoke, which is the one source that knows whose voice is whose.
-The request stays around 2.5–3.5k input tokens. If the model cannot tell, Meet's names
-are not bound to speakers by order: Meet and diarization can disagree about who spoke
-first, and on a real call that swapped the labels. The file name decides instead, as it
-did before Meet's transcript was read, so a room-code call keeps `Speaker 1` /
-`Speaker 2`; the presets are still told who was on the call, in no particular order.
-Without an OpenAI key Meet's transcript is not read at all.
+The request stays around 2.5–3.5k input tokens. If the model cannot tell, the speakers
+stay `Speaker 1` / `Speaker 2`: no name is bound to a speaker by order, neither Meet's
+nor the file name's. Neither order is diarization's — on a real call Meet's swapped the
+labels, and the file name's is right only when the organizer happens to speak first.
+The presets are still told who was on the call, in no particular order. Without an
+OpenAI key nothing changes from before: Meet's transcript is not read, and the file
+name's names are bound by order of appearance.
 
 When a sibling `.txt` already exists, normal polling skips it to avoid spending STT
 credits repeatedly. Use `gdstt process <file-id> --reprocess-txt` when you

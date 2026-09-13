@@ -4872,7 +4872,9 @@ def test_without_candidates_the_file_name_is_still_the_source(mocker):
     assert resolve_mock.call_args.kwargs["candidates"] == ["Alice", "Bob"]
 
 
-def _transcript_written_with_meet_beside(mocker, tmp_path, file_name, *, resolved, key):
+def _transcript_written_with_meet_beside(
+    mocker, tmp_path, file_name, *, resolved, key, meet_doc=_MEET_DOC
+):
     """Run a recording through STT with Meet's transcript beside it."""
     mocker.patch("src.main.drive.download", return_value=tmp_path / "video.mp4")
     mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
@@ -4888,9 +4890,10 @@ def _transcript_written_with_meet_beside(mocker, tmp_path, file_name, *, resolve
         return_value="Speaker 1: hi there\nSpeaker 2: hello back",
     )
     find_mock = mocker.patch(
-        "src.main.drive.find_meet_transcript", return_value={"id": "d1"}
+        "src.main.drive.find_meet_transcript",
+        return_value={"id": "d1"} if meet_doc else None,
     )
-    mocker.patch("src.main.drive.export_document_text", return_value=_MEET_DOC)
+    mocker.patch("src.main.drive.export_document_text", return_value=meet_doc)
     mocker.patch("src.main.OpenAIPipeline")
     resolve_mock = mocker.patch("src.main.speaker_roles.resolve", return_value=resolved)
     preset_spy = mocker.spy(main, "_run_preset_stage")
@@ -4963,15 +4966,48 @@ def test_meets_names_label_the_speakers_the_model_placed_them_on(mocker, tmp_pat
     assert run.preset_names == ["Roman Starodubtsev", "Oksana Ciciarelli"]
 
 
-def test_an_unconfirmed_calendar_call_keeps_the_file_names_order(mocker, tmp_path):
-    """Upstream's behaviour for a calendar call the model could not place is kept as
-    it was: Meet's transcript only ever adds evidence, never a new guess."""
+def test_a_calendar_call_the_model_could_not_place_stays_numbered(mocker, tmp_path):
+    """The file name lists the organizer first; binding that by position is right only
+    when the manager happens to speak first, and wrong without a trace otherwise. Once
+    a model was asked, an unanswered call keeps numbered speakers."""
     run = _transcript_written_with_meet_beside(
         mocker, tmp_path, "Alice and Bob - 2026/09/09 10:00 CEST.mp4",
-        resolved=None, key="sk-test",
+        resolved=None, key="sk-test", meet_doc=None,
     )
 
+    run.resolve.assert_called_once()
+    assert run.txt == "Speaker 1: hi there\nSpeaker 2: hello back"
+    # ``None`` lets the presets read the names from the file name, unordered.
+    assert run.preset_names is None
+
+
+def test_without_a_model_a_calendar_call_keeps_the_file_names_order(mocker, tmp_path):
+    """No model, no presets: the file name's order is the only naming there is, as it
+    always was."""
+    run = _transcript_written_with_meet_beside(
+        mocker, tmp_path, "Alice and Bob - 2026/09/09 10:00 CEST.mp4",
+        resolved=None, key="",
+    )
+
+    run.resolve.assert_not_called()
     assert run.txt == "Alice: hi there\nBob: hello back"
+
+
+def test_resolve_speaker_names_is_empty_when_the_model_was_asked_and_did_not_answer(
+    mocker,
+):
+    """``[]`` and ``None`` mean different things to the caller: numbered speakers, or
+    the file name's order because no model was ever asked."""
+    cfg = make_config(folders=["root"], openai_api_key="sk-test")
+    mocker.patch("src.main.speaker_roles.resolve", return_value=None)
+    mocker.patch("src.main.OpenAIPipeline")
+
+    assert (
+        main._resolve_speaker_names(
+            "Speaker 1: hi", "Alice and Bob - 2026/09/09 10:00 CEST.mp4", "root", cfg
+        )
+        == []
+    )
 
 
 # --- The cursor may only move past work that is actually finished -----------------
