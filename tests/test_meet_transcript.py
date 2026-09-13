@@ -46,9 +46,9 @@ def test_a_shared_screen_is_not_a_participant():
     ]
 
 
-def test_speakers_come_back_in_the_order_they_first_spoke():
-    """Diarized labels are numbered by first appearance, so this order is what lines
-    the two up."""
+def test_speakers_come_back_in_the_order_meet_heard_them_first():
+    """A list of people, not a mapping: Meet and diarization can disagree about who
+    spoke first."""
     assert meet_transcript.speakers(CALENDAR_CALL) == [
         "Viktoriia Piesova",
         "Oksana Ciciarelli",
@@ -156,6 +156,28 @@ Alice: two
 Bob: three
 """
     assert meet_transcript.speakers(text) == ["Alice", "Bob"]
+
+
+def test_turns_carry_the_start_of_their_block():
+    """Meet only marks time between blocks, so that mark is each turn's time -- what
+    lines its turns up with the diarized transcript."""
+    assert meet_transcript.turns(ROOM_CODE_CALL) == [
+        (0, "Oksana Ciciarelli", "one"),
+        (0, "Roman Starodubtsev", "two"),
+        (300, "Roman Starodubtsev", "three"),
+    ]
+
+
+def test_a_turn_keeps_a_colon_inside_what_was_said():
+    text = "Transcript\n01:02:03\nAlice: the price: ten\n"
+
+    assert meet_transcript.turns(text) == [(3723, "Alice", "the price: ten")]
+
+
+def test_a_shared_screens_turns_are_not_turns():
+    text = "Transcript\nAlice's Presentation: slide one\nAlice: hello\n"
+
+    assert meet_transcript.turns(text) == [(0, "Alice", "hello")]
 
 
 def test_the_export_byte_order_mark_is_ignored():

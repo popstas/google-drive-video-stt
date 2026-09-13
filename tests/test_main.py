@@ -4783,17 +4783,19 @@ def test_meet_transcript_names_a_room_code_call_the_file_name_cannot(mocker):
     mocker.patch("src.main.drive.find_meet_transcript", return_value={"id": "d1"})
     mocker.patch("src.main.drive.export_document_text", return_value=_MEET_DOC)
 
-    names = main._names_from_meet_transcript(
+    names, text = main._read_meet_transcript(
         MagicMock(), "meeting-1", "may-doqs-end (2026-09-09 18_53 GMT+2).mp4"
     )
 
     assert names == ["Oksana Ciciarelli", "Roman Starodubtsev"]
+    # The turns travel with the names: they are the model's evidence of who is who.
+    assert text == _MEET_DOC
 
 
 def test_no_transcript_leaves_the_file_name_in_charge(mocker):
     mocker.patch("src.main.drive.find_meet_transcript", return_value=None)
 
-    assert main._names_from_meet_transcript(MagicMock(), "meeting-1", "a.mp4") is None
+    assert main._read_meet_transcript(MagicMock(), "meeting-1", "a.mp4") is None
 
 
 def test_an_unreadable_transcript_does_not_fail_the_recording(mocker):
@@ -4802,7 +4804,7 @@ def test_an_unreadable_transcript_does_not_fail_the_recording(mocker):
         "src.main.drive.find_meet_transcript", side_effect=RuntimeError("no access")
     )
 
-    assert main._names_from_meet_transcript(MagicMock(), "meeting-1", "a.mp4") is None
+    assert main._read_meet_transcript(MagicMock(), "meeting-1", "a.mp4") is None
 
 
 def test_a_transcript_naming_fewer_than_two_people_is_not_used(mocker):
@@ -4814,12 +4816,12 @@ def test_a_transcript_naming_fewer_than_two_people_is_not_used(mocker):
         return_value="Call - Transcript\nAttendees\nAlice\nTranscript\nAlice: one\n",
     )
 
-    assert main._names_from_meet_transcript(MagicMock(), "meeting-1", "a.mp4") is None
+    assert main._read_meet_transcript(MagicMock(), "meeting-1", "a.mp4") is None
 
 
-def test_meet_names_are_offered_to_the_model_as_the_candidates(mocker):
-    """The model still decides who is who; this only gives it something to work with
-    where the file name gave it nothing."""
+def test_meet_names_and_turns_are_handed_to_the_model(mocker):
+    """The model still decides who is who; Meet gives it the people and, in its turns,
+    the evidence of which voice is whose."""
     cfg = make_config(folders=["root"], openai_api_key="sk-test")
     resolve_mock = mocker.patch(
         "src.main.speaker_roles.resolve", return_value=["Roman", "Oksana"]
@@ -4829,12 +4831,30 @@ def test_meet_names_are_offered_to_the_model_as_the_candidates(mocker):
     main._resolve_speaker_names(
         "Speaker 1: hi", "may-doqs-end (2026-09-09 18_53 GMT+2).mp4", "root", cfg,
         candidates=["Oksana Ciciarelli", "Roman Starodubtsev"],
+        meet_text=_MEET_DOC,
     )
 
     assert resolve_mock.call_args.kwargs["candidates"] == [
         "Oksana Ciciarelli",
         "Roman Starodubtsev",
     ]
+    assert resolve_mock.call_args.kwargs["meet_text"] == _MEET_DOC
+    assert resolve_mock.call_args.kwargs["calendar_manager"] == ""
+
+
+def test_the_calendar_titles_marked_manager_is_handed_to_the_model(mocker):
+    cfg = make_config(folders=["root"], openai_api_key="sk-test")
+    resolve_mock = mocker.patch("src.main.speaker_roles.resolve", return_value=None)
+    mocker.patch("src.main.OpenAIPipeline")
+
+    main._resolve_speaker_names(
+        "Speaker 1: hi",
+        "Angelica Munkueva(ExpertizeMe) и Mels - 2026/08/13 14:29 CEST - Recording.mp4",
+        "root",
+        cfg,
+    )
+
+    assert resolve_mock.call_args.kwargs["calendar_manager"] == "Angelica Munkueva"
 
 
 def test_without_candidates_the_file_name_is_still_the_source(mocker):
@@ -4850,6 +4870,85 @@ def test_without_candidates_the_file_name_is_still_the_source(mocker):
 
     assert resolve_mock.call_args.kwargs["candidates"] == ["Alice", "Bob"]
 
+
+def _transcript_written_with_meet_beside(mocker, tmp_path, file_name, *, resolved, key):
+    """Run a recording through STT with Meet's transcript beside it; return the .txt."""
+    mocker.patch("src.main.drive.download", return_value=tmp_path / "video.mp4")
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    captured = {}
+
+    def fake_upload(svc, local_path, folder, mime_type, name=None, app_properties=None):
+        if name and name.endswith(".txt"):
+            captured["txt"] = local_path.read_text(encoding="utf-8")
+
+    mocker.patch("src.main.drive.upload", side_effect=fake_upload)
+    mocker.patch(
+        "src.main.transcribe_file",
+        return_value="Speaker 1: hi there\nSpeaker 2: hello back",
+    )
+    mocker.patch("src.main.drive.find_meet_transcript", return_value={"id": "d1"})
+    mocker.patch("src.main.drive.export_document_text", return_value=_MEET_DOC)
+    mocker.patch("src.main.OpenAIPipeline")
+    resolve_mock = mocker.patch("src.main.speaker_roles.resolve", return_value=resolved)
+    cfg = make_config(
+        stt_provider="deepgram",
+        deepgram_api_key="dg-x",
+        deepgram_audio_source="mp3_96k",
+        stt_postprocess=True,
+        openai_api_key=key,
+    )
+
+    main.process_item(MagicMock(), _item("fid", file_name), "f", cfg)
+
+    return captured["txt"], resolve_mock
+
+
+_ROOM_CODE_CALL = "may-doqs-end (2026-09-09 18_53 GMT+2).mp4"
+
+
+def test_meets_names_unconfirmed_by_the_model_are_not_bound_by_order(mocker, tmp_path):
+    """The regression this pins: Meet listed the people in the order it heard them,
+    diarization heard someone else first, and binding the two by position put the
+    manager's words under the client's name. Numbered speakers are less, not wrong."""
+    txt, resolve_mock = _transcript_written_with_meet_beside(
+        mocker, tmp_path, _ROOM_CODE_CALL, resolved=None, key="sk-test"
+    )
+
+    resolve_mock.assert_called_once()
+    assert txt == "Speaker 1: hi there\nSpeaker 2: hello back"
+
+
+def test_without_a_model_meets_names_are_not_bound_by_order_either(mocker, tmp_path):
+    txt, resolve_mock = _transcript_written_with_meet_beside(
+        mocker, tmp_path, _ROOM_CODE_CALL, resolved=["x", "y"], key=""
+    )
+
+    resolve_mock.assert_not_called()
+    assert txt == "Speaker 1: hi there\nSpeaker 2: hello back"
+
+
+def test_meets_names_label_the_speakers_the_model_placed_them_on(mocker, tmp_path):
+    txt, resolve_mock = _transcript_written_with_meet_beside(
+        mocker,
+        tmp_path,
+        _ROOM_CODE_CALL,
+        resolved=["Roman Starodubtsev", "Oksana Ciciarelli"],
+        key="sk-test",
+    )
+
+    assert resolve_mock.call_args.kwargs["meet_text"] == _MEET_DOC
+    assert txt == "Roman Starodubtsev: hi there\nOksana Ciciarelli: hello back"
+
+
+def test_an_unconfirmed_calendar_call_keeps_the_file_names_order(mocker, tmp_path):
+    """Upstream's behaviour for a calendar call the model could not place is kept as
+    it was: Meet's transcript only ever adds evidence, never a new guess."""
+    txt, _ = _transcript_written_with_meet_beside(
+        mocker, tmp_path, "Alice and Bob - 2026/09/09 10:00 CEST.mp4",
+        resolved=None, key="sk-test",
+    )
+
+    assert txt == "Alice: hi there\nBob: hello back"
 
 
 # --- The cursor may only move past work that is actually finished -----------------

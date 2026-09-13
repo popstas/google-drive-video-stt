@@ -640,6 +640,18 @@ speakers would stay `Speaker N`. It also helps a calendar call, where the invite
 carries only a first name. A missing or unreadable transcript changes nothing: the
 file name stays in charge.
 
+Which speaker is which person is decided by the OpenAI model when a key is
+configured. It gets the participant names, the transcript's first ten minutes from
+the first speech, Meet's own turns for the same minutes, the owner of the folder the
+recording came from, and the name the calendar title marked as the company's. Meet's
+words are often wrong — it can hear a Russian call as English — but every turn is tied
+to the account that spoke, which is the one source that knows whose voice is whose.
+The request stays around 2.5–3.5k input tokens. If the model cannot tell, or there is
+no key, Meet's names are not bound to speakers by order: Meet and diarization can
+disagree about who spoke first, and on a real call that swapped the labels. The file
+name decides instead, as it did before Meet's transcript was read, so a room-code
+call keeps `Speaker 1` / `Speaker 2`.
+
 When a sibling `.txt` already exists, normal polling skips it to avoid spending STT
 credits repeatedly. Use `gdstt process <file-id> --reprocess-txt` when you
 intentionally want to run STT again and overwrite the existing `.txt` in place. New

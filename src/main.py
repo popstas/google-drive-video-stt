@@ -626,17 +626,18 @@ def _speaker_names_from_file_info(file_info: dict) -> list[str] | None:
     return names or None
 
 
-def _names_from_meet_transcript(
+def _read_meet_transcript(
     service: Any, container_id: str, file_name: str
-) -> list[str] | None:
-    """Who Meet says was on this call, or ``None`` when it does not say.
+) -> tuple[list[str], str] | None:
+    """Who Meet says was on this call and the transcript itself, or ``None``.
 
     Meet writes a transcript next to every recording and names the people in it. That
     closes the one gap the recording's own name cannot: a call started outside the
     calendar is named after the meeting room, so there is nothing in it to read and the
     speakers stay ``Speaker 1`` / ``Speaker 2``. Even when the name does carry names it
     carries the ones the calendar invite used, which is how "Viktoriia" arrives without
-    a surname.
+    a surname. The text travels with the names because its turns are the model's best
+    evidence of who is who.
 
     Failure here is not failure of the recording: no transcript, no access to it, or a
     shape this cannot read all return ``None`` and leave the existing name parsing in
@@ -661,7 +662,7 @@ def _names_from_meet_transcript(
     if len(names) < 2:
         return None
     logger.info("Meet's transcript names %s for %s", names, file_name)
-    return names
+    return names, text
 
 
 def _resolve_speaker_names(
@@ -672,16 +673,18 @@ def _resolve_speaker_names(
     *,
     usage: dict[str, dict[str, int]] | None = None,
     candidates: list[str] | None = None,
+    meet_text: str = "",
 ) -> list[str] | None:
     """Ask the model which diarized speaker is which participant.
 
     Without this the names extracted from the file name are bound to speakers by who
     talks first, which silently swaps the pair on every call the client opens. The
-    folder's owner is the one identity we know for certain, so it is handed over as the
-    manager and the model places the rest from the opening turns.
+    model gets the opening minutes of the transcript, Meet's own turns for the same
+    minutes when there are any, the folder's owner and the name the calendar title
+    marked with the company.
 
-    Returns None whenever the answer cannot be trusted; the caller then keeps the
-    positional order, which is what this code did before.
+    Returns None whenever the answer cannot be trusted; the caller then falls back to
+    the file name, which is what this code did before.
     """
     if not config.openai_api_key:
         return None
@@ -691,6 +694,7 @@ def _resolve_speaker_names(
         return None
 
     employee = config.folder_by_id(folder_id)
+    calendar_manager, _ = postprocess.split_participants(file_name)
     pipeline = OpenAIPipeline(
         api_key=config.openai_api_key,
         model=config.openai_model,
@@ -702,6 +706,8 @@ def _resolve_speaker_names(
             candidates=candidates,
             manager_name=employee.name if employee else "",
             run=pipeline.run,
+            meet_text=meet_text,
+            calendar_manager=calendar_manager,
         )
     finally:
         if usage is not None and pipeline.last_usage:
@@ -1287,19 +1293,17 @@ def process_item(
                         # Meet's own transcript knows the participants even when the
                         # recording's name does not, and knows them in full when the
                         # name only has a first name from the calendar invite.
-                        from_meet = _names_from_meet_transcript(
-                            service, container_id, file_name
-                        )
+                        meet = _read_meet_transcript(service, container_id, file_name)
+                        # No model, or an answer it would not stand behind, leaves
+                        # ``None``: the file name decides, as it did before Meet's
+                        # transcript was read. Meet's names are never bound to speakers
+                        # by order -- Meet and diarization can disagree about who spoke
+                        # first, and on a real call that swapped the labels.
                         speaker_names = _resolve_speaker_names(
                             text, file_name, folder_id, config, usage=usage,
-                            candidates=from_meet,
+                            candidates=meet[0] if meet else None,
+                            meet_text=meet[1] if meet else "",
                         )
-                        if speaker_names is None:
-                            # No model, or an answer it would not stand behind. Meet
-                            # lists speakers in the order they first spoke, which is
-                            # the order diarized labels are numbered in, so it still
-                            # beats parsing the file name.
-                            speaker_names = from_meet
                     text = postprocess.postprocess_transcript(
                         text,
                         file_name,

@@ -20,8 +20,13 @@ The document opens with its own title, an ``Attendees`` block, and then the turn
 
 Both sources are read, because each is wrong on its own. The attendee list is complete
 but unordered and includes things that are not people -- a shared screen joins as
-``Oksana Ciciarelli's Presentation``. The turns say who actually spoke and in what
-order, but omit anyone who stayed silent.
+``Oksana Ciciarelli's Presentation``. The turns say who actually spoke, but omit anyone
+who stayed silent.
+
+The turns are also evidence of who is who. Meet's speech recognition is often useless
+(it heard a Russian call as English), but each turn is tied to the account that spoke,
+so who talks at length and who only says "Mhm" is reliable. ``speaker_roles`` hands
+them to the model for that.
 """
 
 from __future__ import annotations
@@ -88,32 +93,54 @@ def attendees(text: str) -> list[str]:
     return []
 
 
-def speakers(text: str) -> list[str]:
-    """Whoever actually took a turn, in the order they first did.
+def _seconds(marker: str) -> int:
+    parts = [int(part) for part in marker.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    hours, minutes, seconds = parts
+    return hours * 3600 + minutes * 60 + seconds
 
-    Order is the reason this exists. The attendee list is alphabetical-ish and says
-    nothing about who opened the call, while diarized labels are numbered by first
-    appearance -- so this is the sequence that lines the two up.
+
+def turns(text: str) -> list[tuple[int, str, str]]:
+    """Every spoken turn as ``(offset in seconds, name, what was said)``.
+
+    Meet does not time each turn; it drops a ``00:05:00`` marker between blocks, so a
+    turn's offset is the last marker above it (0 before the first). That is as precise
+    as the document gets, and enough to line it up with the diarized transcript.
     """
-    found: list[str] = []
+    found: list[tuple[int, str, str]] = []
+    offset = 0
     for line in _lines(text):
-        if not line or _TIMESTAMP_RE.match(line) or _CLOSING_RE.match(line):
+        if not line or _CLOSING_RE.match(line):
+            continue
+        if _TIMESTAMP_RE.match(line):
+            offset = _seconds(line)
             continue
         match = _TURN_RE.match(line)
         if not match:
             continue
         name = match.group("name").strip()
         if _is_person(name):
-            found.append(name)
-    return _dedupe(found)
+            said = line[match.end("name") :].lstrip(":").strip()
+            found.append((offset, name, said))
+    return found
+
+
+def speakers(text: str) -> list[str]:
+    """Whoever actually took a turn, in the order Meet heard them first.
+
+    Not the order diarized labels are numbered in: Meet and diarization can disagree
+    about who spoke first, so this is a list of people, never a mapping onto speakers.
+    """
+    return _dedupe([name for _, name, _ in turns(text)])
 
 
 def participants(text: str, limit: int = 2) -> list[str]:
-    """Who was on the call, speakers first and in speaking order.
+    """Who was on the call, speakers first.
 
-    Speakers lead because that order is what maps onto ``Speaker 1``/``Speaker 2``.
-    Silent attendees follow rather than being dropped: they are still real people, and
-    a caller asking for more names than there are speakers should get them.
+    Speakers lead so that ``limit`` keeps the people who talked. Silent attendees follow
+    rather than being dropped: they are still real people, and a caller asking for more
+    names than there are speakers should get them.
 
     Only names the attendee list agrees with are kept when there is one. A turn label
     is whatever text sat before a colon, so without that cross-check a stray line would

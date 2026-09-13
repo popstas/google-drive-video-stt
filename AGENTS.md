@@ -234,12 +234,23 @@ separator is matched case-sensitively so an uppercase `X` stays a middle initial
 Names are looked for in Meet's own transcript first (`src/meet_transcript.py`): a
 Google Doc sits beside each recording with an `Attendees` block and `Name: turn` lines.
 Both are read — the block is complete but unordered and includes a shared screen as
-`<name>'s Presentation`, while the turns give speaking order, which is what diarized
-labels are numbered by. The result feeds `_resolve_speaker_names` as its `candidates`,
-and is used directly when no model is configured. Every failure path (no transcript,
-no access, an unfamiliar shape, fewer than two names) returns `None` and leaves file-name
-parsing in charge: losing the names is a worse transcript, losing the recording is an
-outage.
+`<name>'s Presentation`, while the turns say who actually spoke but omit anyone silent.
+The result feeds `_resolve_speaker_names` as its `candidates`,
+together with the document text. Every failure path (no transcript, no access, an
+unfamiliar shape, fewer than two names) returns `None` and leaves file-name parsing in
+charge: losing the names is a worse transcript, losing the recording is an outage.
+
+`speaker_roles.resolve` gives the model everything at once: the candidates, the
+transcript from its first speech for `WINDOW_SECONDS` (consecutive lines of one
+speaker merged, capped by `MAX_*_CHARS`), Meet's turns for the blocks overlapping that
+window (`meet_transcript.turns`, each carrying its block's start), the folder owner,
+and the manager the calendar title marks (`postprocess.split_participants`). The
+window is time-based on purpose: `word_speaker` splits a line on every voice change,
+so the old 30-line sample was a minute of mic checks. A reply of `{}` means "cannot
+tell" and returns `None`, as does anything outside the candidates. **Meet's names are
+never bound to speakers by position**, with or without a model: Meet's speaking order
+is not diarization's, and on a real call using it swapped the labels. An unconfirmed
+mapping falls back to the file name exactly as before Meet was read.
 
 **Preset DAG** (`src/presets.py` + `src/preset_pipeline.py`): after the transcript
 is written, `process_item` runs the enabled presets that are still missing an
