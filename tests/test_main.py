@@ -19,7 +19,7 @@ from src.call_booking import append as append_booking
 from src.config import Config, EmployeeFolder, resolve_config_file_path
 from src.presets import BUILTIN_PRESETS, Preset
 from src.preset_pipeline import PresetResult
-from src.stt.base import STTError
+from src.stt.base import EmptyTranscriptError, STTError
 
 _KEYPOINTS_BUILTIN = next(p for p in BUILTIN_PRESETS if p.name == "keypoints")
 
@@ -1288,7 +1288,7 @@ def test_run_once_logs_folder_and_cycle_summary(mocker, caplog):
     assert (
         "Cycle summary [provider=deepgram, outcome=success, folders=1, pending=1, "
         "processed=1, failed=0, retry_total=0, skipped_size=0, skipped_unmatched=0, "
-        "folder_errors=0, dry_run=False, duration_s=1.250]"
+        "skipped_empty=0, folder_errors=0, dry_run=False, duration_s=1.250]"
     ) in caplog.text
 
 
@@ -2908,7 +2908,14 @@ def gate_config(tmp_path):
     )
 
 
-def gate_item(file_id="v1", *, booking_match="", planfix_comment_task_id=""):
+def gate_item(
+    file_id="v1",
+    *,
+    booking_match="",
+    transcript_empty="",
+    planfix_comment_task_id="",
+    telegram_sent_chat_id="",
+):
     """One `list_folder_state` item for an mp4 that still needs a transcript."""
     return {
         "file": {"id": file_id, "name": f"{file_id}.mp4", "mimeType": "video/mp4"},
@@ -2919,7 +2926,9 @@ def gate_item(file_id="v1", *, booking_match="", planfix_comment_task_id=""):
         "txt_id": None,
         "artifact_ids": {},
         "booking_match": booking_match,
+        "transcript_empty": transcript_empty,
         "planfix_comment_task_id": planfix_comment_task_id,
+        "telegram_sent_chat_id": telegram_sent_chat_id,
     }
 
 
@@ -3058,6 +3067,71 @@ def test_run_once_processes_when_disable_recognition_is_off(monkeypatch, gate_co
     assert marked == []
 
 
+def test_run_once_marks_a_recording_with_no_speech_instead_of_failing(
+    monkeypatch, gate_config, caplog
+):
+    """A silent call would otherwise be downloaded, sent to Deepgram and reported as
+    an error every cycle, and hold the changes cursor for good."""
+    patch_decision(monkeypatch, MATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    process_item = MagicMock(
+        side_effect=EmptyTranscriptError("deepgram returned an empty transcript")
+    )
+    monkeypatch.setattr(main, "process_item", process_item)
+    marked = []
+    monkeypatch.setattr(
+        main.drive,
+        "set_file_app_properties",
+        lambda svc, fid, props: marked.append((fid, props)),
+    )
+    notify_error = MagicMock()
+    monkeypatch.setattr(main.notify, "notify_error", notify_error)
+
+    with caplog.at_level(logging.INFO):
+        main.run_once(MagicMock(), gate_config)
+
+    assert marked == [("v1", {"transcript_empty": "true"})]
+    notify_error.assert_not_called()
+    assert "failed=0" in caplog.text
+    assert "skipped_empty=1" in caplog.text
+
+
+def test_run_once_survives_a_drive_failure_while_marking_empty(
+    monkeypatch, gate_config, caplog
+):
+    patch_decision(monkeypatch, MATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    monkeypatch.setattr(
+        main,
+        "process_item",
+        MagicMock(side_effect=EmptyTranscriptError("empty transcript")),
+    )
+
+    def raise_http_error(svc, fid, props):
+        raise HttpError(MagicMock(status=503), b"unavailable")
+
+    monkeypatch.setattr(main.drive, "set_file_app_properties", raise_http_error)
+
+    with caplog.at_level(logging.INFO):
+        main.run_once(MagicMock(), gate_config)
+
+    assert "Failed to mark" in caplog.text
+    assert "skipped_empty=1" in caplog.text
+
+
+def test_run_once_never_revisits_a_recording_with_no_speech(monkeypatch, gate_config):
+    resolve = MagicMock()
+    monkeypatch.setattr(main.booking_gate, "resolve", resolve)
+    patch_folder_items(monkeypatch, [gate_item("v1", transcript_empty="true")])
+    process_item = MagicMock()
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), gate_config)
+
+    process_item.assert_not_called()
+    resolve.assert_not_called()
+
+
 def test_process_target_ignores_the_mark_and_the_gate(monkeypatch, gate_config):
     """Manual processing is the supported way to undo a mark."""
     monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
@@ -3116,10 +3190,18 @@ def test_run_once_matches_a_real_booking_through_the_real_gate(monkeypatch, gate
     a real ``booking_gate.resolve`` run against a journal seeded with
     ``call_booking.append``.
     """
-    # "2026/08/08 09:00 GMT+04:00" is one of the formats parse_meeting_start
-    # accepts (see src/meeting_time.py); it resolves to 2026-08-08T05:00:00Z.
-    file_name = "Call with Kate - 2026/08/08 09:00 GMT+04:00 – Recording.mp4"
-    video_start_utc = datetime(2026, 8, 8, 5, 0, tzinfo=timezone.utc)
+    # "YYYY/MM/DD HH:MM GMT+04:00" is one of the formats parse_meeting_start accepts
+    # (see src/meeting_time.py). The date is yesterday's rather than a fixed one: the
+    # journal drops bookings older than call_booking.RETENTION_DAYS, so a pinned date
+    # makes this test start failing on its own once that many days have passed.
+    video_start_utc = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+        hour=5, minute=0, second=0, microsecond=0
+    )
+    file_name = (
+        "Call with Kate - "
+        + (video_start_utc + timedelta(hours=4)).strftime("%Y/%m/%d %H:%M")
+        + " GMT+04:00 – Recording.mp4"
+    )
 
     append_booking(
         gate_config.call_bookings_file,
@@ -3991,3 +4073,223 @@ def test_apply_local_output_state_stt_and_meta_yml_do_not_block_a_processed_reco
 
     assert items[0]["has_txt"] is True
     assert main._pending_items(items, cfg) == []
+
+
+# --- Telegram summary -----------------------------------------------------------
+
+
+TELEGRAM_CHAT_ID = "-1001234567890"
+
+
+@pytest.fixture
+def telegram_config(gate_config):
+    """A gate config whose folder delivers summaries to a Telegram chat."""
+    return replace(
+        gate_config,
+        folders=(
+            EmployeeFolder(
+                folder_id=GATE_FOLDER_ID,
+                name="Kate",
+                email="kate@example.com",
+                telegram=TELEGRAM_CHAT_ID,
+            ),
+        ),
+        telegram_bot_token="bot-token",
+        planfix_presets=("keypoints",),
+    )
+
+
+def test_telegram_summary_strips_markdown_to_plain_text():
+    """Telegram is sent without a parse mode, so `##`/`**`/`[](...)` would show up
+    literally. The content must be the same as the Planfix comment's -- only the
+    markup comes off."""
+    text = main._telegram_summary(
+        {"keypoints": "## Задачи\n\n- Собрать документы"},
+        ("keypoints",),
+        {
+            "subject": "Виза O-1",
+            "duration": "00:31:42",
+            "video_url": "https://drive.google.com/file/d/X/view",
+            "source_name": "rec.mp4",
+        },
+        ("subject", "duration", "video_url"),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "**" not in text
+    assert "##" not in text
+    assert "](" not in text
+    assert "Задачи" in text
+    assert "- Собрать документы" in text
+    assert "rec.mp4: https://drive.google.com/file/d/X/view" in text
+    # Header before the preset sections, same order as the CRM comment.
+    assert text.index("Виза O-1") < text.index("Задачи")
+
+
+def test_telegram_summary_drops_checkbox_markers_from_list_items():
+    """Telegram shows `- [ ] call back` literally, so a task keeps only its dash."""
+    text = main._telegram_summary(
+        {"keypoints": "## Задачи\n\n- [ ] Собрать документы\n  - [x] Отправить счёт"},
+        ("keypoints",),
+    )
+
+    assert "[ ]" not in text
+    assert "[x]" not in text
+    assert "- Собрать документы" in text
+    assert "  - Отправить счёт" in text
+
+
+def test_telegram_summary_is_blank_when_only_the_header_would_render():
+    """Same guard as `_planfix_description`: a duration and a link are not a summary,
+    and sending one would write the `telegram_sent_chat_id` marker and permanently
+    block the real one."""
+    assert main._telegram_summary(
+        {},
+        ("keypoints",),
+        {"duration": "00:31:42"},
+        ("duration",),
+        meta_entities=meta_entity.default_entities(),
+    ) == ""
+
+
+def test_telegram_summary_is_sent_and_marked(monkeypatch, telegram_config):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    marked = MagicMock()
+    monkeypatch.setattr(main.drive, "set_file_app_properties", marked)
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, telegram_config,
+        {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+    )
+
+    send.assert_called_once()
+    assert send.call_args.kwargs["chat_id"] == TELEGRAM_CHAT_ID
+    assert send.call_args.kwargs["bot_token"] == "bot-token"
+    assert send.call_args[0][0] == "Задачи: раз"
+    marked.assert_called_once()
+    assert marked.call_args[0][2] == {"telegram_sent_chat_id": TELEGRAM_CHAT_ID}
+
+
+def test_telegram_summary_is_not_sent_for_a_folder_without_a_chat(
+    monkeypatch, gate_config
+):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, gate_config,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_not_called()
+
+
+def test_telegram_summary_is_not_sent_twice(monkeypatch, telegram_config):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+
+    main._send_telegram_summary(
+        MagicMock(),
+        gate_item("v1", telegram_sent_chat_id=TELEGRAM_CHAT_ID),
+        "v1", GATE_FOLDER_ID, telegram_config,
+        {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+    )
+
+    send.assert_not_called()
+
+
+def test_telegram_summary_also_goes_out_for_a_matched_recording(
+    monkeypatch, telegram_config
+):
+    """Default: the chat is an independent channel, so a call that reached Planfix
+    reaches the chat too."""
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    monkeypatch.setattr(main.drive, "set_file_app_properties", MagicMock())
+    configured = replace(
+        telegram_config,
+        planfix_create_comment_url="https://crm.example.com/planfix_create_comment",
+    )
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, configured,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_called_once()
+
+
+def test_ignore_telegram_when_planfix_keeps_a_matched_recording_out_of_the_chat(
+    monkeypatch, telegram_config
+):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    configured = replace(
+        telegram_config,
+        planfix_create_comment_url="https://crm.example.com/planfix_create_comment",
+        planfix_ignore_telegram_when_planfix=True,
+    )
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, configured,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_not_called()
+
+
+def test_ignore_telegram_when_planfix_still_sends_an_unmatched_recording(
+    monkeypatch, telegram_config
+):
+    """The option is a de-duplication rule, not an off switch: a call Planfix never
+    saw is exactly the one the chat exists for."""
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    monkeypatch.setattr(main.drive, "set_file_app_properties", MagicMock())
+    configured = replace(
+        telegram_config,
+        planfix_create_comment_url="https://crm.example.com/planfix_create_comment",
+        planfix_ignore_telegram_when_planfix=True,
+    )
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, configured,
+        {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+    )
+
+    send.assert_called_once()
+
+
+def test_a_failed_telegram_send_leaves_no_marker(monkeypatch, telegram_config):
+    """No marker means `gdstt reprocess` can resend it."""
+    monkeypatch.setattr(main.notify, "send_message", MagicMock(return_value=False))
+    marked = MagicMock()
+    monkeypatch.setattr(main.drive, "set_file_app_properties", marked)
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, telegram_config,
+        {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+    )
+
+    marked.assert_not_called()
+
+
+def test_run_once_processes_an_unmatched_recording_in_a_telegram_folder(
+    monkeypatch, telegram_config
+):
+    """`telegram` on a folder means "recognize always". Skipping here -- and worse,
+    writing the permanent `booking_match=none` mark -- would park every recording in a
+    folder that has no bookings by design."""
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_decision(monkeypatch, UNMATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    marked = MagicMock()
+    monkeypatch.setattr(main.booking_gate, "mark_unmatched", marked)
+    process_item = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), telegram_config)
+
+    process_item.assert_called_once()
+    marked.assert_not_called()

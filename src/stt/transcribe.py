@@ -5,7 +5,7 @@ from pathlib import Path
 
 from src.config import Config
 from src.stt import get_provider
-from src.stt.base import STTError
+from src.stt.base import EmptyTranscriptError, STTError
 from src.stt.deepgram_provider import DeepgramProvider
 from src.stt.deepgram_usage import fetch_request_cost_usd
 
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 def _require_non_empty_transcript(text: str, *, audio_name: str, provider_name: str) -> str:
     if text.strip():
         return text
-    raise STTError(
+    raise EmptyTranscriptError(
         f"{provider_name} returned an empty transcript for {audio_name}"
     )
 

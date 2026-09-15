@@ -65,11 +65,17 @@ class EmployeeFolder:
 
     ``name``/``email`` are optional: a folder whose employee is unknown still polls,
     and downstream consumers (the completion webhook) send empty strings for it.
+
+    ``telegram`` is a chat id (``-100...`` or ``@channel``) the call summary is posted
+    to. Setting it also forces recognition for the folder: its recordings are
+    transcribed even with no booking behind them, because the chat -- not a Planfix
+    task -- is the destination.
     """
 
     folder_id: str
     name: str = ""
     email: str = ""
+    telegram: str = ""
 
 
 @dataclass(frozen=True)
@@ -177,6 +183,11 @@ class Config:
     # host, so this cannot be derived from the comment webhook URL. Blank leaves
     # ``planfix_task_url`` empty in the meta document rather than guessing a host.
     planfix_task_url: str = ""
+    # When true, a recording that reached Planfix does not also reach the folder's
+    # Telegram chat -- the CRM comment is the record and the chat would duplicate it.
+    # Default false: the two are independent channels and a folder that asked for a
+    # chat gets every call in it.
+    planfix_ignore_telegram_when_planfix: bool = False
     presets: tuple[Preset, ...] = ()
     # Google OAuth is config-owned and inline-first. ``google_credentials``/
     # ``google_token`` hold inline mappings (the OAuth client JSON and the saved
@@ -240,8 +251,8 @@ def _parse_config_yaml(text: str) -> object:
 def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
     """Parse the ``folders:`` block into ``EmployeeFolder`` entries.
 
-    Each entry must be a mapping carrying a non-empty, unique ``folder_id``; ``name``
-    and ``email`` are optional and default to empty strings.
+    Each entry must be a mapping carrying a non-empty, unique ``folder_id``; ``name``,
+    ``email`` and ``telegram`` are optional and default to empty strings.
     """
     if raw is None:
         return ()
@@ -272,6 +283,7 @@ def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
                 folder_id=folder_id,
                 name=_yaml_str(entry.get("name")),
                 email=_yaml_str(entry.get("email")),
+                telegram=_yaml_str(entry.get("telegram")),
             )
         )
     return tuple(folders)
@@ -340,12 +352,36 @@ def _validate_call_booking(
         )
     if not disable_recognition:
         return
-    emailless = [f.folder_id for f in folders if not f.email.strip()]
+    # A folder with a ``telegram`` chat is exempt: it never needs to match a booking,
+    # because its recordings are recognized unconditionally and delivered to the chat.
+    emailless = [
+        f.folder_id
+        for f in folders
+        if not f.email.strip() and not f.telegram.strip()
+    ]
     if emailless:
         raise ValueError(
             "call_booking.disable_recognition is true, so every folder must have an "
-            "email to match bookings against; these do not: "
-            + ", ".join(emailless)
+            "email to match bookings against (or a telegram chat to deliver to); "
+            "these have neither: " + ", ".join(emailless)
+        )
+
+
+def _validate_folder_telegram(
+    folders: tuple[EmployeeFolder, ...], bot_token: str
+) -> None:
+    """Reject folder chats that no bot could ever post to.
+
+    Without a token ``notify.send_message`` returns quietly, so an operator who set a
+    chat id would see recordings transcribed at full cost and no message anywhere.
+    """
+    if bot_token.strip():
+        return
+    tokenless = [f.folder_id for f in folders if f.telegram.strip()]
+    if tokenless:
+        raise ValueError(
+            "these folders set telegram but notifications.telegram.bot_token is "
+            "empty, so nothing can be delivered: " + ", ".join(tokenless)
         )
 
 
@@ -852,6 +888,9 @@ def _config_from_yaml(
     planfix_presets = _parse_planfix_presets(planfix.get("presets"))
     planfix_meta_fields = _parse_planfix_meta_fields(planfix.get("meta_fields"))
     planfix_task_url = _yaml_str(planfix.get("task_url"))
+    planfix_ignore_telegram_when_planfix = _yaml_bool(
+        planfix.get("ignore_telegram_when_planfix"), default=False
+    )
 
     (
         google_credentials,
@@ -871,6 +910,7 @@ def _config_from_yaml(
         disable_recognition=call_booking_disable_recognition,
         folders=folders,
     )
+    _validate_folder_telegram(folders, telegram_bot_token)
 
     poll_raw = raw.get("poll_interval", 600)
     try:
@@ -1048,6 +1088,7 @@ def _config_from_yaml(
         planfix_presets=planfix_presets,
         planfix_meta_fields=planfix_meta_fields,
         planfix_task_url=planfix_task_url,
+        planfix_ignore_telegram_when_planfix=planfix_ignore_telegram_when_planfix,
         presets=presets,
         google_credentials=google_credentials,
         google_token=google_token,
@@ -1370,6 +1411,9 @@ def _default_config_dict(
             ],
             # e.g. https://<account>.planfix.com/task/<task-id>
             "task_url": "",
+            # true = a call that reached Planfix is not also posted to the folder's
+            # telegram chat.
+            "ignore_telegram_when_planfix": False,
         },
         # Google auth is inline-first and config-owned. The generated config ships an
         # empty block (no *_file pointers) so the data_dir fallback applies until the
@@ -1475,7 +1519,12 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
     """
     return {
         "folders": [
-            {"folder_id": folder.folder_id, "name": folder.name, "email": folder.email}
+            {
+                "folder_id": folder.folder_id,
+                "name": folder.name,
+                "email": folder.email,
+                "telegram": folder.telegram,
+            }
             for folder in config.folders
         ],
         "poll_interval": config.poll_interval,
@@ -1554,6 +1603,7 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "presets": list(config.planfix_presets),
             "meta_fields": list(config.planfix_meta_fields),
             "task_url": config.planfix_task_url,
+            "ignore_telegram_when_planfix": config.planfix_ignore_telegram_when_planfix,
         },
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
