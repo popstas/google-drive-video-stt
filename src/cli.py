@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
-from src import auth, booking_gate, call_booking, drive, meta_doc
+from src import auth, booking_gate, call_booking, change_cursor, drive, meta_doc
 from src import main as main_module
 from src import preset_pipeline, relabel_transcript
 from src.config import (
@@ -18,6 +18,7 @@ from src.config import (
     import_google_credentials,
     init_config,
     load_config,
+    parse_since,
     resolve_config_file_path,
     set_run_enabled,
     use_google_files,
@@ -193,6 +194,15 @@ def cmd_start(args: argparse.Namespace) -> None:
     )
 
 
+def _since_argument(value: str) -> str:
+    """Validate `--since` at parse time so a typo fails before Drive is touched."""
+    try:
+        parsed = parse_since(value, source="--since")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return parsed.isoformat() if parsed is not None else ""
+
+
 def cmd_run_once(args: argparse.Namespace) -> None:
     config = load_config(config_path=args.config)
     service = auth.build_drive_service(config=config)
@@ -202,6 +212,10 @@ def cmd_run_once(args: argparse.Namespace) -> None:
         dry_run=args.dry_run,
         max_size_bytes=args.max_size,
         confirm_large=args.confirm_large,
+        # No --mode means "do what the service would do", so a deployment pinned to
+        # `run.discovery: walk` is not silently exercised on the other path.
+        mode=args.mode or config.run_discovery,
+        since=args.since or "",
     )
 
 
@@ -234,7 +248,7 @@ def cmd_latest(args: argparse.Namespace) -> None:
             len(config.folders), folder_id,
         )
     service = auth.build_drive_service(config=config)
-    newest = drive.find_newest_mp4(service, folder_id)
+    newest = drive.find_newest_mp4_in_tree(service, folder_id)
     if newest is None:
         logger.info("Folder %s has no mp4 files", folder_id)
         return
@@ -395,6 +409,59 @@ def _describe_employee(folder) -> str:
     return folder.name or folder.email or "(no employee configured)"
 
 
+def _print_folder_diagnosis(service, folder_id: str) -> None:
+    """One line per configured folder, saying enough to spot a folder gone quiet.
+
+    Reachability alone is what made this service look healthy while it was finding
+    nothing, so this reports what the folder *is* and when it last received anything,
+    not only that it answered.
+    """
+    try:
+        meta = drive.describe_folder(service, folder_id)
+    except Exception as exc:  # noqa: BLE001 -- a diagnostic must report, not raise
+        print(f"Folder {folder_id}: UNREACHABLE ({exc})")
+        return
+
+    name = meta.get("name") or "(no name)"
+    parents = ", ".join(meta.get("parents") or []) or "none"
+    trashed = " TRASHED" if meta.get("trashed") else ""
+    try:
+        items = drive.list_folder_tree_state(service, folder_id)
+        subfolders = drive.list_subfolders(service, folder_id)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Folder {folder_id}: {name!r}{trashed}, parent {parents}, listing failed ({exc})")
+        return
+
+    newest = max(
+        (it["file"].get("createdTime", "") for it in items), default=""
+    )
+    print(
+        f"Folder {folder_id}: {name!r}{trashed}, parent {parents}, "
+        f"{len(subfolders)} subfolder(s), {len(items)} mp4 file(s), "
+        f"newest {newest or 'never'}"
+    )
+
+    # The calls this folder does not process, said out loud. Without it a manager's
+    # folder reports every recording it holds as handled while the meetings they
+    # only attended -- a shortcut each -- go missing without a trace.
+    try:
+        shortcuts = drive.list_recording_shortcuts(service, folder_id)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  shortcuts to recordings: could not list ({exc})")
+        return
+    if not shortcuts:
+        return
+    unreadable = sum(
+        1 for shortcut in shortcuts
+        if not shortcut["target_id"] or not drive.is_readable(service, shortcut["target_id"])
+    )
+    print(
+        f"  {len(shortcuts)} shortcut(s) to recordings, not processed from this folder "
+        f"({unreadable} not readable by this account): calls organized by someone "
+        "else -- configure the organizer's folder to capture them"
+    )
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     config_path = resolve_config_file_path(args.config)
     try:
@@ -442,9 +509,23 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
     service = auth.build_drive_service(config=config)
     print("Drive auth: OK")
+    cursor_path = change_cursor.path_for(config.data_dir)
+    saved_cursor = change_cursor.read(cursor_path)
+    if not saved_cursor:
+        state = "absent, next cycle sweeps"
+    elif change_cursor.read_folders(
+        change_cursor.folders_path_for(config.data_dir)
+    ) == change_cursor.fingerprint(
+        folder.folder_id for folder in config.folders
+    ):
+        state = "set, covers the configured folders"
+    else:
+        state = "set, but the configured folders changed -- next cycle sweeps once"
+    print(f"changes cursor: {cursor_path} ({state})")
+    print(f"discovery: run.discovery={config.run_discovery}")
+    print(f"since: run.since={config.run_since or 'unset, every recording in scope'}")
     for folder in config.folders:
-        items = drive.list_folder_state(service, folder.folder_id)
-        print(f"Folder {folder.folder_id}: OK, {len(items)} mp4 file(s)")
+        _print_folder_diagnosis(service, folder.folder_id)
 
 
 def cmd_config_init(args: argparse.Namespace) -> None:
@@ -553,7 +634,7 @@ def cmd_planfix_sent(args: argparse.Namespace) -> None:
     service = auth.build_drive_service(config=config)
     rows: list[tuple[str, str, str, str, str]] = []
     for folder in config.folders:
-        for item in drive.list_mp4_timestamps(service, folder.folder_id):
+        for item in drive.list_mp4_timestamps_in_tree(service, folder.folder_id):
             task_id = (item.get("appProperties") or {}).get(
                 drive.PLANFIX_COMMENT_TASK_ID_PROPERTY, ""
             )
@@ -605,7 +686,7 @@ def cmd_bookings_restore_dates(args: argparse.Namespace) -> None:
     service = auth.build_drive_service(config=config)
     total = 0
     for folder in config.folders:
-        files = drive.list_mp4_timestamps(service, folder.folder_id)
+        files = drive.list_mp4_timestamps_in_tree(service, folder.folder_id)
         for file_id, name, created in booking_gate.select_stale_marks(files):
             total += 1
             if args.dry_run:
@@ -646,6 +727,121 @@ def cmd_relabel(args: argparse.Namespace) -> None:
     logger.info("Relabeled transcript written to %s", args.out)
 
 
+def cmd_changes(args: argparse.Namespace) -> None:
+    """Show what the changes feed reports, without acting on it or moving the cursor.
+
+    The question this answers is "does Drive think anything happened", asked before
+    the next cycle rather than after it. Read-only on purpose: an operator looking
+    into the feed must not consume it, or the cycle that follows would find nothing
+    and the recording would be skipped.
+    """
+    config = load_config(validate_providers=False, config_path=args.config)
+    cursor_path = change_cursor.path_for(config.data_dir)
+    cursor = change_cursor.read(cursor_path)
+    if cursor is None:
+        print(f"No cursor at {cursor_path}; the next cycle sweeps every folder.")
+        return
+
+    # Same question the cycle asks itself. Without it this command would report
+    # "nothing of ours" for a folder just added to the config and be right about the
+    # feed while being useless to the operator.
+    if change_cursor.read_folders(
+        change_cursor.folders_path_for(config.data_dir)
+    ) != change_cursor.fingerprint(
+        folder.folder_id for folder in config.folders
+    ):
+        print(
+            "The configured folders changed since this cursor was taken; the feed "
+            "cannot show what was already in a folder added since. The next cycle "
+            "sweeps once."
+        )
+
+    service = auth.build_drive_service(config=config)
+    entries, next_cursor = drive.list_changes(service, cursor)
+    print(f"{len(entries)} change(s) since the saved cursor")
+
+    if args.raw:
+        for entry in entries:
+            file_info = entry.get("file") or {}
+            state = "removed" if entry.get("removed") else file_info.get("mimeType", "?")
+            print(f"  {entry.get('fileId')}  {state}  {file_info.get('name', '')}")
+    else:
+        configured = {folder.folder_id for folder in config.folders}
+        ancestors: dict[str, str | None] = {}
+        shown = 0
+        for entry in entries:
+            file_info = entry.get("file") or {}
+            if entry.get("removed") or file_info.get("trashed"):
+                continue
+            if file_info.get("mimeType") != drive.MP4_MIME:
+                continue
+            parents = file_info.get("parents") or []
+            if not parents:
+                continue
+            owner = drive.find_configured_ancestor(
+                service, parents[0], configured, cache=ancestors
+            )
+            if owner is None:
+                continue
+            shown += 1
+            print(f"  {file_info.get('name')}  in {parents[0]}  (folder {owner})")
+        if not shown:
+            print("  nothing of ours; pass --raw to see every entry")
+
+    print(f"cursor would move to {next_cursor}; not saved")
+
+
+def cmd_cursor_show(args: argparse.Namespace) -> None:
+    config = load_config(validate_providers=False, config_path=args.config)
+    path = change_cursor.path_for(config.data_dir)
+    cursor = change_cursor.read(path)
+    print(f"path: {path}")
+    if cursor is None:
+        print("cursor: absent -- the next cycle sweeps every folder")
+        return
+    print(f"cursor: {cursor}")
+    watched = change_cursor.fingerprint(
+        folder.folder_id for folder in config.folders
+    )
+    vouched = change_cursor.read_folders(
+        change_cursor.folders_path_for(config.data_dir)
+    )
+    if vouched is None:
+        print(
+            "folders: not recorded -- the next cycle sweeps once and records them"
+        )
+    elif vouched == watched:
+        print(f"folders: {len(watched.splitlines())} watched, all covered")
+    else:
+        added = sorted(set(watched.splitlines()) - set(vouched.splitlines()))
+        dropped = sorted(set(vouched.splitlines()) - set(watched.splitlines()))
+        print(
+            "folders: changed since the cursor was taken -- the next cycle sweeps "
+            "once so nothing already sitting in a new folder is missed"
+        )
+        for folder_id in added:
+            print(f"  added:   {folder_id}")
+        for folder_id in dropped:
+            print(f"  dropped: {folder_id}")
+
+
+def cmd_cursor_reset(args: argparse.Namespace) -> None:
+    """Forget the cursor so the next cycle re-reads every folder.
+
+    The one safe big hammer in this service: a sweep re-derives what is done from
+    what is next to each video, so the worst it costs is a slower cycle.
+    """
+    config = load_config(validate_providers=False, config_path=args.config)
+    path = change_cursor.path_for(config.data_dir)
+    # The folder set goes with it: left behind, it would vouch for a cursor that no
+    # longer exists.
+    change_cursor.clear_folders(change_cursor.folders_path_for(config.data_dir))
+    if change_cursor.clear(path):
+        print(f"Removed {path}; the next cycle sweeps every folder.")
+    else:
+        print(f"No cursor at {path}; the next cycle already sweeps.")
+
+
 def cmd_list(args: argparse.Namespace) -> None:
     config = load_config(validate_providers=False, config_path=args.config)
     folder_ids = [args.folder] if args.folder else [f.folder_id for f in config.folders]
@@ -654,13 +850,24 @@ def cmd_list(args: argparse.Namespace) -> None:
         raise SystemExit(1)
     service = auth.build_drive_service(config=config)
     for folder_id in folder_ids:
-        items = drive.list_folder_state(service, folder_id)
+        items = drive.list_folder_tree_state(service, folder_id)
+        # Without this the report and the service disagree: `list` would show eight
+        # recordings with no transcript while every cycle skipped all eight, and the
+        # operator would be left wondering which one was lying.
+        cutoff = parse_since(config.since_for(folder_id), source="since")
         print(f"Folder {folder_id}: {len(items)} mp4 file(s)")
         for item in items:
             name = item["file"]["name"]
+            when = main_module._recording_datetime(item)
+            out_of_scope = cutoff is not None and when is not None and when < cutoff
             mp3 = "mp3" if item.get("has_mp3") else "---"
             txt = "txt" if item.get("has_txt") else "---"
-            print(f"  [{mp3}] [{txt}] {name}")
+            # The container is worth showing even when it equals the folder asked
+            # about: it is where the artifacts went, and with meeting subfolders the
+            # operator can no longer assume which folder that was.
+            where = item.get("container_id") or folder_id
+            scope = "  before since, not processed" if out_of_scope else ""
+            print(f"  [{mp3}] [{txt}] {name}  ({where}){scope}")
 
 
 def _add_processing_safety_args(parser: argparse.ArgumentParser) -> None:
@@ -785,6 +992,29 @@ def build_parser() -> argparse.ArgumentParser:
             "first and add --max-size only as an optional manual limit for larger folder runs."
         ),
     )
+    p_run_once.add_argument(
+        "--mode",
+        choices=("auto", "walk", "changes"),
+        default=None,
+        help=(
+            "How to find work: 'auto' reads the changes feed when a cursor exists and "
+            "sweeps otherwise; 'walk' sweeps every folder without touching the cursor; "
+            "'changes' only reads the feed and fails when there is no cursor. "
+            "Defaults to run.discovery from the config, which the service itself uses"
+        ),
+    )
+    p_run_once.add_argument(
+        "--since",
+        type=_since_argument,
+        default=None,
+        metavar="DATE",
+        help=(
+            "Ignore recordings of calls before this date (2026-09-12 or an ISO "
+            "timestamp), overriding run.since and any folder's own since for this "
+            "run. The date is read from the recording's name, falling back to when "
+            "Drive received it"
+        ),
+    )
     _add_processing_safety_args(p_run_once)
     p_run_once.set_defaults(func=cmd_run_once)
 
@@ -862,7 +1092,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _set_parser_safety_description(
         p_latest,
-        summary="Process the most recently created mp4 in a folder.",
+        summary=(
+            "Process the most recently created mp4 in a folder or any of its meeting "
+            "subfolders."
+        ),
         safety_note=(
             "this command spends STT credits on the newest mp4. Use --dry-run first to "
             "confirm which file would be processed."
@@ -899,7 +1132,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument(
         "--drive",
         action="store_true",
-        help="Also authenticate and list configured Drive folders",
+        help=(
+            "Also authenticate and report each configured folder: its name, its "
+            "parent, how many subfolders and recordings it holds, when it last "
+            "received one, and the state of the changes cursor"
+        ),
     )
     p_doctor.set_defaults(func=cmd_doctor)
 
@@ -1064,10 +1301,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_relabel.set_defaults(func=cmd_relabel)
 
+    p_changes = sub.add_parser(
+        "changes",
+        help="Show what the changes feed reports, without consuming it",
+        description=(
+            "Show what Drive's changes feed reports since the saved cursor. Read-only: "
+            "the cursor is not moved, so the next cycle still sees these changes. "
+            "Without a cursor there is nothing to read and the next cycle sweeps."
+        ),
+    )
+    p_changes.add_argument(
+        "--raw",
+        action="store_true",
+        help="Show every entry, not just the videos in configured folders",
+    )
+    p_changes.set_defaults(func=cmd_changes)
+
+    p_cursor = sub.add_parser(
+        "cursor",
+        help="Inspect or forget the changes-feed cursor",
+        description=(
+            "The cursor is where the changes feed resumes from, and the only "
+            "discovery state this service keeps. It is safe to forget: without one "
+            "a cycle reads every configured folder and takes a fresh cursor, so the "
+            "worst a reset costs is one slower cycle."
+        ),
+    )
+    cursor_sub = p_cursor.add_subparsers(dest="cursor_command", required=True)
+    p_cursor_show = cursor_sub.add_parser("show", help="Print the cursor and its path")
+    p_cursor_show.set_defaults(func=cmd_cursor_show)
+    p_cursor_reset = cursor_sub.add_parser(
+        "reset", help="Forget the cursor so the next cycle sweeps every folder"
+    )
+    p_cursor_reset.set_defaults(func=cmd_cursor_reset)
+
     p_list = sub.add_parser(
         "list",
         aliases=["status"],
         help="Show folder state (sibling MP3/TXT presence) without doing work",
+        description=(
+            "Show each folder's recordings and whether their MP3/TXT siblings exist, "
+            "without doing any work. Reads the folder together with its meeting "
+            "subfolders, prints the folder each recording actually lives in, and "
+            "marks the ones a since cutoff puts out of scope."
+        ),
     )
     p_list.add_argument(
         "--folder",

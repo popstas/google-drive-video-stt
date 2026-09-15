@@ -225,6 +225,182 @@ Copy the returned `id` into `config.yml` as an entry under `folders:` (see
 the last path segment in the browser URL:
 `https://drive.google.com/drive/folders/<folder-id>`.
 
+### Meeting subfolders
+
+Google Meet files each meeting into its own subfolder of a `Google Meet` folder in the
+organiser's Drive, rather than dropping every recording into one flat
+`Meet Recordings`. Point `folders:` at the `Google Meet` folder itself: each entry is
+read together with its direct subfolders, and artifacts are written next to the video
+they belong to, inside the meeting's own subfolder.
+
+A flat folder keeps working unchanged -- it simply has no subfolders -- so
+`Legacy Meet Recordings` and any hand-made folder need no special configuration.
+
+Two things this changes for an operator:
+
+- The folder in `folders:` still identifies the employee. A meeting subfolder never
+  appears there, and nothing has to be added when a new meeting creates one.
+- `gdstt doctor --drive` prints each folder's **name**. That is the fastest way to
+  notice a configured id now pointing at `Legacy Meet Recordings`: it stays readable
+  and reports zero errors while every new recording lands somewhere else.
+
+### How new recordings are found
+
+A cycle asks Drive's changes feed what has happened since the last cycle, and lists
+only the folders that feed names. The position is kept in
+`<data-dir>/changes_cursor.txt`.
+
+The cursor is a shortcut, never a record of what has been done -- that is still
+derived from what sits next to each video. So it is safe to lose: with no cursor, or
+one Drive no longer recognises, a cycle reads every configured folder and takes a
+fresh one. `gdstt cursor reset` forces exactly that, and `gdstt changes` shows what
+the feed holds without consuming it.
+
+### A cursor only vouches for the folders it was taken against
+
+`<data-dir>/changes_folders.txt` records which folders were being watched when the
+cursor was saved. Add an employee to `folders:` and their existing recordings were
+never a change after that cursor -- the feed will never name that folder, and the
+backlog would stay invisible. So a changed folder set sweeps once, says so, and
+records the new set:
+
+```
+The watched folders changed since the cursor was taken; sweeping once so a newly added folder's existing recordings are not missed
+```
+
+`gdstt cursor show` prints which folders the cursor covers and what changed, and
+`doctor` says whether it still covers the config. Editing the config *before* the
+folder is actually shared is safe: that listing fails, which counts as a folder error,
+which holds the cursor and its folder set where they are until the share lands.
+
+`run-once --mode` picks the path explicitly rather than by whether a cursor exists:
+
+| mode | what it does |
+| --- | --- |
+| `auto` | reads the feed when a cursor is saved, sweeps otherwise |
+| `walk` | always sweeps, and leaves the cursor untouched -- a "check everything now" that does not become a new starting point |
+| `changes` | only reads the feed, and fails rather than falling back, so the feed itself can be exercised on demand |
+
+Without `--mode`, `run-once` uses `run.discovery` from the config -- the same path the
+service itself takes -- so a deployment pinned to `walk` is not silently exercised on
+the other one. `--dry-run` never moves the cursor in any mode.
+
+### Turning the feed off
+
+`run.discovery` accepts `auto` (default) or `walk`. `walk` makes the polling loop list
+every watched folder and its meeting subfolders every cycle and never read the feed.
+
+It is there because one assumption behind the feed is still unproven: discovery through
+`changes.list` has only been exercised on folders the account **owns**, and a
+deployment typically watches folders shared **to** it. Walking costs one request per
+folder per cycle -- about a thousand requests per cycle at a thousand meeting
+subfolders, comfortably inside quota -- so this is a real fallback, not a degraded
+mode. Start on `walk` if the feed has not proven itself on your Drive, and switch to
+`auto` once it has.
+
+### Leaving a backlog alone
+
+A folder shared with the service arrives with everything the person ever recorded.
+`since` keeps the old ones out of scope:
+
+```yaml
+run:
+  since: 2026-09-12          # default for every folder
+folders:
+  - folder_id: ...
+    since: 2026-12-01        # this person joined later
+```
+
+Per folder because onboarding is an event about a person: a date that is right for
+today's employees is wrong for whoever joins in three months with a backlog of their
+own. `run-once --since DATE` overrides both for one run, and `gdstt process <file-id>`
+ignores the cutoff entirely -- asking for a file by id means that file.
+
+**The date is the call's, not the upload's.** It is read from the recording's name,
+where Meet writes the meeting time, and only falls back to when Drive received the
+file. `createdTime` answers a different question -- when this file appeared -- and the
+two come apart both ways. Meet's own lag measured 0-2 hours across eight real
+recordings, which is still enough to push a late-evening call into the next day; and
+copying or re-uploading a recording resets `createdTime` outright, which is how a set
+of test files ended up three days adrift from the calls they recorded. A recording
+neither can date is processed rather than skipped.
+
+An out-of-scope recording is a permanent skip by design, like one over `--max-size`:
+it is counted as `skipped_old`, it never holds the changes cursor, and nothing is
+written to Drive about it. Move the date back and the backlog is in scope again --
+which is also how to undo a cutoff set wrong. `--dry-run` names each recording a
+cutoff excludes; a real cycle only counts them, because a folder with a year of
+history would otherwise print itself every ten minutes.
+
+### What neither path sees: shortcuts
+
+A Drive *shortcut* to a recording is invisible to both discovery paths. Drive reports
+the shortcut's own `application/vnd.google-apps.shortcut` and puts the real type in
+`shortcutDetails.targetMimeType`, so a `video/mp4` filter drops it in a folder listing
+and in the changes feed alike.
+
+This is deliberate rather than unnoticed, and it is not rare. Meet gives the
+organizer the real file and every other participant a shortcut to it, so an
+employee's folder holds a shortcut for each call they only attended. The first real
+employee folder checked had eleven meetings: eight with the recording itself, three
+holding nothing but shortcuts.
+
+A shortcut stays a shortcut whoever looks at it; access only decides whether its
+target opens. The shortcut is readable because its folder was shared, but the target
+keeps the organizer's sharing, not the folder's -- the account that employee folder
+was shared with could open none of the five. That is a fact about that account, not
+about every account.
+
+Those calls are processed from the organizer's folder, if that folder is configured.
+`gdstt doctor --drive` says how many a folder does not process and how many of their
+targets this account cannot open:
+
+```
+  2 shortcut(s) to recordings, not processed from this folder (2 not readable by this account): calls organized by someone else -- configure the organizer's folder to capture them
+```
+
+**The cursor waits for the work.** It only moves after a cycle that processed
+everything it found. A recording that failed, a folder that could not be listed, or a
+video left to settle all hold it where it is, and the log says so:
+
+```
+Holding the changes cursor [failed=1, folder_errors=0, deferred=0]; the next cycle reads the same changes again
+```
+
+That is deliberate. The feed names a folder once, when something happens in it, and a
+recording that failed writes no artifact -- so nothing there would ever change again
+and the feed would never name it twice. Re-reading the same changes costs nothing,
+because the folder listing decides what still needs doing. Permanent skips by design
+(no booking, larger than `--max-size`, before `since`) are not counted, or the cursor
+would freeze for good.
+
+The cost of that rule is worth knowing. A recording that can *never* succeed -- a
+corrupt upload -- holds the cursor on every cycle and is retried on every cycle.
+Nothing is lost: each cycle still reads the changes after the held point, so new
+recordings keep flowing. But the feed re-reads a growing tail until Drive expires the
+token, and nothing caps the retries. The fix is to remove or repair that file; the
+log names it on every attempt.
+
+A cursor Drive refuses is swept over, whatever the reason. An expired one gets 404 or
+410; a malformed one -- a hand-edited or damaged cursor file -- gets 400 with the error
+on the `pageToken` parameter, and is treated the same way.
+
+### Waiting for a recording Drive is still processing
+
+Meet uploads a recording well after the meeting folder appears -- the activity log on
+a one-hour call shows the video and its transcript arriving together, 52 minutes
+later. Drive fills `videoMediaMetadata` once it has processed an upload, so a video
+without it is left for a later cycle rather than downloaded:
+
+```
+Drive has not finished processing <name> yet; leaving it for a later cycle
+```
+
+The wait is bounded. A video that never gets metadata is still transcribed once it is
+old enough, and one whose age cannot be read is processed rather than held -- waiting
+without a limit would lose a recording quietly, which is the failure this whole
+behaviour exists to avoid.
+
 ## Configuration
 
 All configuration lives in the active `config.yml` (`<GDSTT_HOME>/config.yml`, or
@@ -454,6 +630,29 @@ the recording file name (e.g. `Alice and Bob - 2026/05/28 ... .mp4` → `Alice`,
 `Bob`), maps them onto the diarized `Speaker N` labels by order of appearance, and
 merges any extra (spurious) diarization speakers into the real one whose turns they
 continue.
+
+Where the recording's own name has nothing to give, Meet's transcript does. Meet
+leaves a Google Doc beside each recording listing the attendees, and the service reads
+it for the names before falling back to the file name. This matters most for a call
+started outside the calendar: it is named after the meeting room
+(`may-doqs-end (2026-09-09 18:53 GMT+2)`), so there is nothing to parse and the
+speakers would stay `Speaker N`. It also helps a calendar call, where the invite often
+carries only a first name. A missing or unreadable transcript changes nothing: the
+file name stays in charge.
+
+Which speaker is which person is decided by the OpenAI model when a key is
+configured. It gets the participant names, the transcript's first ten minutes from
+the first speech, Meet's own turns for the same minutes, the owner of the folder the
+recording came from, and the name the calendar title marked as the company's. Meet's
+words are often wrong — it can hear a Russian call as English — but every turn is tied
+to the account that spoke, which is the one source that knows whose voice is whose.
+The request stays around 2.5–3.5k input tokens. If the model cannot tell, the speakers
+stay `Speaker 1` / `Speaker 2`: no name is bound to a speaker by order, neither Meet's
+nor the file name's. Neither order is diarization's — on a real call Meet's swapped the
+labels, and the file name's is right only when the organizer happens to speak first.
+The presets are still told who was on the call, in no particular order. Without an
+OpenAI key nothing changes from before: Meet's transcript is not read, and the file
+name's names are bound by order of appearance.
 
 When a sibling `.txt` already exists, normal polling skips it to avoid spending STT
 credits repeatedly. Use `gdstt process <file-id> --reprocess-txt` when you
@@ -719,7 +918,10 @@ gdstt latest [--folder ID] [--dry-run] [--max-size SIZE] [--confirm-large]   # p
 gdstt run                   # continuous polling; can spend STT credits across all pending configured folders
 gdstt stop                  # pause the loop (sets run.enabled=false; stays paused across restarts, no auto-resume)
 gdstt start                 # resume a paused loop (sets run.enabled=true)
-gdstt run-once [--dry-run] [--max-size SIZE] [--confirm-large]   # single cycle; use --dry-run first
+gdstt run-once [--mode auto|walk|changes] [--dry-run] [--max-size SIZE] [--confirm-large]   # single cycle; use --dry-run first
+gdstt changes [--raw]       # show what Drive's changes feed reports, without consuming it
+gdstt cursor show           # print the changes cursor and where it is kept
+gdstt cursor reset          # forget the cursor so the next cycle sweeps every folder
 gdstt process <id> [--folder] [--reprocess-txt] [--dry-run] [--max-size SIZE] [--confirm-large]   # single target or folder; use --dry-run first
 gdstt reprocess <id> [STAGES] [--folder] [--dry-run] [--max-size SIZE] [--confirm-large]   # force-rerun chain stages by number (0=transcript, 1..N=presets; see doctor)
 gdstt speakers set <file-id> "Alice" "Bob"   # store explicit speaker names on an MP4
@@ -844,7 +1046,9 @@ The runtime treats incomplete output as failure instead of silently uploading it
 
 `run-once` logs one process summary per worked file, one folder summary per folder,
 and one cycle summary. The cycle summary includes pending, processed, failed,
-`retry_total`, skipped-by-size, folder-error, and duration fields. Each process
+`retry_total`, skipped-by-size, skipped-unmatched, `skipped_old` (recordings before
+`since`), folder-error, `deferred` (videos Drive has not finished processing),
+`cursor_moved`, and duration fields. Each process
 summary also records the Deepgram request cost (USD, when the usage API has
 recorded it) and the OpenAI keypoints token usage.
 

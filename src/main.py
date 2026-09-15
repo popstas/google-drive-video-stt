@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 import logging
 import json
 import re
@@ -19,7 +19,9 @@ import requests
 from src import (
     booking_gate,
     booking_server,
+    change_cursor,
     drive,
+    meet_transcript as meet_transcript_module,
     meta as meta_module,
     meta_doc,
     meta_entity,
@@ -34,7 +36,8 @@ from src import (
     webhook,
 )
 from src.auth import AuthError, build_drive_service
-from src.config import Config, is_run_enabled, load_config
+from src.config import Config, is_run_enabled, load_config, parse_since
+from src.meeting_time import parse_meeting_start
 from src.extractor import extract_m4a_copy, extract_mp3
 from src.openai_pipeline import OpenAIPipeline
 from src.presets import Preset
@@ -44,6 +47,13 @@ from src.stt.transcribe import transcribe_file
 logger = logging.getLogger(__name__)
 
 _TRANSIENT_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
+# Drive's answer when a saved cursor has aged out of its journal. Not a failure to
+# report: it is the documented way of being told to start over.
+_STALE_CURSOR_HTTP_STATUS_CODES = {404, 410}
+# How long a video with no videoMediaMetadata is assumed to be still uploading rather
+# than simply never getting any. Generous on purpose: the cost of waiting is one more
+# cycle, the cost of giving up too early is a download of a half-written file.
+_MEDIA_SETTLING_GRACE = timedelta(hours=2)
 _TRANSIENT_RETRY_ATTEMPTS = 3
 _TRANSIENT_RETRY_DELAYS = (1.0, 2.0)
 
@@ -77,6 +87,35 @@ def _http_status_code(exc: Exception) -> int | None:
     if isinstance(exc, requests.HTTPError) and exc.response is not None:
         return exc.response.status_code
     return None
+
+
+def _is_rejected_cursor(exc: Exception) -> bool:
+    """Whether Drive refused the saved cursor itself, rather than failing the read.
+
+    An expired cursor gets 404 or 410. A malformed one gets 400 instead, with the
+    error pinned to the ``pageToken`` parameter -- found by writing a corrupt token
+    into the cursor file on a live Drive. Read as an ordinary feed failure, that 400
+    held the cursor, and a held cursor is the same bad token on the next cycle: the
+    service failed every cycle for good while the module promised that a corrupt
+    cursor costs one sweep.
+
+    Matching the parameter rather than 400 alone keeps a genuinely broken request
+    -- a bad ``fields`` after a code change, say -- surfacing as the failure it is
+    instead of being swept over quietly every cycle.
+    """
+    status = _http_status_code(exc)
+    if status in _STALE_CURSOR_HTTP_STATUS_CODES:
+        return True
+    if status != 400 or not isinstance(exc, HttpError):
+        return False
+    try:
+        details = json.loads(exc.content.decode("utf-8"))["error"]["errors"]
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+    return any(
+        isinstance(detail, dict) and detail.get("location") == "pageToken"
+        for detail in details
+    )
 
 
 def _is_transient_runtime_error(exc: Exception) -> bool:
@@ -124,7 +163,7 @@ def _save_and_upload_txt(
     source_file_id: str,
     mp4_name: str,
     text: str,
-    folder_id: str,
+    container_id: str,
     tmp_dir: Path,
     config: Config,
     *,
@@ -140,7 +179,7 @@ def _save_and_upload_txt(
         base_name=stem,
         suffix=".txt",
         text=text,
-        folder_id=folder_id,
+        folder_id=container_id,
         config=config,
         tmp_dir=tmp_dir,
         existing_id=txt_id,
@@ -155,7 +194,7 @@ def _save_and_upload_preset(
     mp4_name: str,
     preset: Preset,
     text: str,
-    folder_id: str,
+    container_id: str,
     tmp_dir: Path,
     config: Config,
     *,
@@ -171,7 +210,7 @@ def _save_and_upload_preset(
         base_name=stem,
         suffix=preset.artifact_suffix,
         text=text,
-        folder_id=folder_id,
+        folder_id=container_id,
         config=config,
         tmp_dir=tmp_dir,
         existing_id=existing_id,
@@ -186,6 +225,7 @@ def _run_preset_stage(
     mp4_name: str,
     transcript: str,
     folder_id: str,
+    container_id: str,
     tmp_dir: Path,
     config: Config,
     *,
@@ -338,7 +378,7 @@ def _run_preset_stage(
             mp4_name,
             preset_by_name[name],
             result.text,
-            folder_id,
+            container_id,
             tmp_dir,
             config,
             existing_id=artifact_ids.get(name),
@@ -406,6 +446,7 @@ def _write_call_documents(
     file_id: str,
     file_name: str,
     folder_id: str,
+    container_id: str,
     transcript: str,
     artifacts: dict[str, str],
     config: Config,
@@ -452,11 +493,11 @@ def _write_call_documents(
 
     output.write_artifact(
         service, base_name=stem, suffix=".meta.yml", text=meta_yaml,
-        folder_id=folder_id, config=config, tmp_dir=tmp_dir,
+        folder_id=container_id, config=config, tmp_dir=tmp_dir,
         existing_id=item.get("meta_yml_id"),
     )
     output.write_artifact(
-        service, base_name=stem, suffix=".stt", text=text, folder_id=folder_id,
+        service, base_name=stem, suffix=".stt", text=text, folder_id=container_id,
         config=config, tmp_dir=tmp_dir,
         existing_id=item.get("stt_id"),
         # No source_video_id: the transcript (`.txt`) is looked up on Drive by that
@@ -475,6 +516,7 @@ def _try_write_call_documents(
     file_id: str,
     file_name: str,
     folder_id: str,
+    container_id: str,
     transcript: str,
     artifacts: dict[str, str],
     config: Config,
@@ -496,7 +538,7 @@ def _try_write_call_documents(
     """
     try:
         return _write_call_documents(
-            service, file_id, file_name, folder_id, transcript, artifacts,
+            service, file_id, file_name, folder_id, container_id, transcript, artifacts,
             config, tmp_dir, item=item, booking_decision=booking_decision,
         )
     except Exception as exc:
@@ -585,6 +627,45 @@ def _speaker_names_from_file_info(file_info: dict) -> list[str] | None:
     return names or None
 
 
+def _read_meet_transcript(
+    service: Any, container_id: str, file_name: str
+) -> tuple[list[str], str] | None:
+    """Who Meet says was on this call and the transcript itself, or ``None``.
+
+    Meet writes a transcript next to every recording and names the people in it. That
+    closes the one gap the recording's own name cannot: a call started outside the
+    calendar is named after the meeting room, so there is nothing in it to read and the
+    speakers stay ``Speaker 1`` / ``Speaker 2``. Even when the name does carry names it
+    carries the ones the calendar invite used, which is how "Viktoriia" arrives without
+    a surname. The text travels with the names because its turns are the model's best
+    evidence of who is who.
+
+    Failure here is not failure of the recording: no transcript, no access to it, or a
+    shape this cannot read all return ``None`` and leave the existing name parsing in
+    charge.
+    """
+    try:
+        doc = drive.find_meet_transcript(service, container_id, file_name)
+        if doc is None:
+            return None
+        text = drive.export_document_text(service, doc["id"])
+    except (RefreshError, AuthError):
+        raise
+    except Exception:
+        logger.info(
+            "Could not read Meet's transcript beside %s; falling back to the file name",
+            file_name,
+            exc_info=True,
+        )
+        return None
+
+    names = meet_transcript_module.participants(text)
+    if len(names) < 2:
+        return None
+    logger.info("Meet's transcript names %s for %s", names, file_name)
+    return names, text
+
+
 def _resolve_speaker_names(
     transcript: str,
     file_name: str,
@@ -592,24 +673,33 @@ def _resolve_speaker_names(
     config: Config,
     *,
     usage: dict[str, dict[str, int]] | None = None,
+    candidates: list[str] | None = None,
+    meet_text: str = "",
 ) -> list[str] | None:
     """Ask the model which diarized speaker is which participant.
 
     Without this the names extracted from the file name are bound to speakers by who
     talks first, which silently swaps the pair on every call the client opens. The
-    folder's owner is the one identity we know for certain, so it is handed over as the
-    manager and the model places the rest from the opening turns.
+    model gets the opening minutes of the transcript, Meet's own turns for the same
+    minutes when there are any, the folder's owner and the name the calendar title
+    marked with the company.
 
-    Returns None whenever the answer cannot be trusted; the caller then keeps the
-    positional order, which is what this code did before.
+    Returns the names in speaker order when the model placed them, and ``[]`` -- leave
+    the speakers numbered -- when it was asked and did not: binding the names by
+    position instead would be right only when the manager happens to speak first, and
+    wrong silently. ``None`` means the model was never asked (no key, fewer than two
+    names), and the caller keeps binding the file name's names by position, as it
+    always did without a model.
     """
     if not config.openai_api_key:
         return None
-    candidates = postprocess.extract_interlocutor_names(file_name)
+    if candidates is None:
+        candidates = postprocess.extract_interlocutor_names(file_name)
     if len(candidates) < 2:
         return None
 
     employee = config.folder_by_id(folder_id)
+    calendar_manager, _ = postprocess.split_participants(file_name)
     pipeline = OpenAIPipeline(
         api_key=config.openai_api_key,
         model=config.openai_model,
@@ -621,14 +711,18 @@ def _resolve_speaker_names(
             candidates=candidates,
             manager_name=employee.name if employee else "",
             run=pipeline.run,
+            meet_text=meet_text,
+            calendar_manager=calendar_manager,
         )
     finally:
         if usage is not None and pipeline.last_usage:
             usage["openai_speaker_roles"] = dict(pipeline.last_usage)
         pipeline.close()
 
-    if names is not None:
-        logger.info("Speaker roles resolved for %s", file_name)
+    if names is None:
+        logger.info("Speaker roles unresolved for %s; leaving the speakers numbered", file_name)
+        return []
+    logger.info("Speaker roles resolved for %s", file_name)
     return names
 
 
@@ -1103,6 +1197,10 @@ def process_item(
     file_size = _coerce_size_bytes(file_info.get("size"))
     has_mp3 = item.get("has_mp3", False)
     has_txt = item.get("has_txt", False)
+    # Artifacts belong beside the video, which with a subfolder per meeting is no
+    # longer the configured folder. Falling back to ``folder_id`` keeps a caller that
+    # built an item by hand working, and is exactly right for a flat folder.
+    container_id = item.get("container_id") or folder_id
 
     stt_enabled = bool(config.stt_provider)
     preset_only_reprocess = reprocess_presets is not None and not reprocess_txt
@@ -1173,7 +1271,7 @@ def process_item(
                 drive.upload(
                     service,
                     mp3_path,
-                    folder_id,
+                    container_id,
                     mime_type=drive.MP3_MIME,
                     name=mp3_drive_name,
                     app_properties={
@@ -1182,7 +1280,7 @@ def process_item(
                     },
                 )
                 mp3_uploaded = True
-                logger.info("Uploaded %s to folder %s", mp3_drive_name, folder_id)
+                logger.info("Uploaded %s to folder %s", mp3_drive_name, container_id)
 
             if needs_txt:
                 if mp4_path is None:
@@ -1200,18 +1298,36 @@ def process_item(
                 stt_audio_path = _prepare_deepgram_audio(mp4_path, config)
                 text = transcribe_file(stt_audio_path, config, cost_usd=cost_usd)
                 speaker_names = _speaker_names_from_file_info(file_info)
+                # Who the presets are told was on the call. The same names as the
+                # transcript's labels, except when Meet named people nobody could place
+                # on a speaker: presets take them "in no particular order", so they are
+                # still worth knowing.
+                participant_names = speaker_names
                 if config.stt_postprocess:
-                    if speaker_names is None:
+                    if speaker_names is None and config.openai_api_key:
+                        # Meet's own transcript knows the participants even when the
+                        # recording's name does not, and knows them in full when the
+                        # name only has a first name from the calendar invite. Without
+                        # a model nothing could use it, so it is not read.
+                        meet = _read_meet_transcript(service, container_id, file_name)
+                        # An answer the model would not stand behind leaves the
+                        # speakers numbered (``[]``). No name is ever bound to a
+                        # speaker by order once a model could be asked: neither Meet's
+                        # order nor the file name's is diarization's, and on a real call
+                        # Meet's swapped the labels.
                         speaker_names = _resolve_speaker_names(
-                            text, file_name, folder_id, config, usage=usage
+                            text, file_name, folder_id, config, usage=usage,
+                            candidates=meet[0] if meet else None,
+                            meet_text=meet[1] if meet else "",
                         )
+                        participant_names = speaker_names or (meet[0] if meet else None)
                     text = postprocess.postprocess_transcript(
                         text,
                         file_name,
                         speaker_names=speaker_names,
                     )
                 _save_and_upload_txt(
-                    service, file_id, file_name, text, folder_id, tmp_dir, config,
+                    service, file_id, file_name, text, container_id, tmp_dir, config,
                     txt_id=item.get("txt_id"),
                 )
                 txt_uploaded = True
@@ -1223,9 +1339,10 @@ def process_item(
                     file_name,
                     text,
                     folder_id,
+                    container_id,
                     tmp_dir,
                     config,
-                    speaker_names=speaker_names,
+                    speaker_names=participant_names,
                     artifact_ids=item.get("artifact_ids") or {},
                     reprocess=reprocess_txt,
                     usage=usage,
@@ -1234,7 +1351,7 @@ def process_item(
                     only_presets=reprocess_presets,
                 )
                 meta_document = _try_write_call_documents(
-                    service, file_id, file_name, folder_id, text, artifacts,
+                    service, file_id, file_name, folder_id, container_id, text, artifacts,
                     config, tmp_dir, item=item, booking_decision=booking_decision,
                 )
             elif needs_presets:
@@ -1257,6 +1374,7 @@ def process_item(
                     file_name,
                     text,
                     folder_id,
+                    container_id,
                     tmp_dir,
                     config,
                     speaker_names=speaker_names,
@@ -1268,7 +1386,7 @@ def process_item(
                     only_presets=reprocess_presets,
                 )
                 meta_document = _try_write_call_documents(
-                    service, file_id, file_name, folder_id, text, artifacts,
+                    service, file_id, file_name, folder_id, container_id, text, artifacts,
                     config, tmp_dir, item=item, booking_decision=booking_decision,
                 )
     except Exception as exc:
@@ -1355,10 +1473,111 @@ def process_item(
     )
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _is_still_settling(item: dict, now: datetime) -> bool:
+    """True while Drive looks like it has not finished processing this upload.
+
+    Meet's recording lands in Drive well after the meeting folder does -- around an
+    hour for an hour-long call -- and `videoMediaMetadata` is filled once Drive has
+    processed it. Skipping a video that has no metadata yet costs one cycle;
+    downloading one costs a transfer and an STT run that may have to be redone.
+
+    The grace window is the important half. A video that never gets metadata still
+    has to be transcribed, and waiting on it indefinitely would lose the recording
+    quietly -- the exact failure this whole change exists to remove. So the wait is
+    bounded, and anything without a readable age is processed rather than held.
+    """
+    if item.get("has_media_metadata", True):
+        return False
+    created_raw = item.get("file", {}).get("createdTime")
+    if not created_raw:
+        return False
+    try:
+        created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+    except ValueError:
+        logger.info("Unreadable createdTime %r; not waiting on it", created_raw)
+        return False
+    return now - created < _MEDIA_SETTLING_GRACE
+
+
+def _recording_datetime(item: dict) -> datetime | None:
+    """When the call happened, as well as it can be known.
+
+    The name first: Meet writes the meeting time into it, and that is what an
+    operator means by "calls from the 12th". Drive's ``createdTime`` is the fallback
+    rather than the source because it answers a different question -- when this file
+    appeared -- and the two come apart in both small ways and large. Measured across
+    eight real recordings, Meet's own lag ran 0-2 hours, enough to push a late call
+    past midnight into the next day. Copying or re-uploading a recording resets
+    ``createdTime`` outright: the examples this was built against were three days
+    adrift for exactly that reason.
+
+    ``None`` when neither is readable, which the caller treats as in scope. Dropping
+    a recording nobody can date would be a silent loss, and silent loss is the
+    failure this whole area exists to remove.
+    """
+    file_info = item.get("file", {})
+    meeting = parse_meeting_start(file_info.get("name", ""))
+    if meeting is not None:
+        return meeting
+    created_raw = file_info.get("createdTime")
+    if not created_raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+    except ValueError:
+        logger.info("Unreadable createdTime %r; treating it as in scope", created_raw)
+        return None
+
+
+def _items_in_date_scope(
+    items: list[dict], cutoff: datetime | None, *, dry_run: bool
+) -> tuple[list[dict], int]:
+    """Split off recordings of calls older than ``cutoff``.
+
+    Applied before everything else in the cycle, and deliberately so: an old
+    recording that Drive never finished processing would otherwise be counted as
+    deferred, and deferred holds the changes cursor -- the backlog an operator asked
+    to ignore would freeze the feed instead.
+
+    Counted per folder rather than logged per file: a folder with a year of history
+    would print its whole backlog every ten minutes. ``--dry-run`` names them, which
+    is where an operator goes to see what a cutoff will actually do.
+    """
+    if cutoff is None:
+        return items, 0
+    kept: list[dict] = []
+    skipped = 0
+    for item in items:
+        when = _recording_datetime(item)
+        if when is not None and when < cutoff:
+            skipped += 1
+            if dry_run:
+                logger.info(
+                    "DRY RUN: %s is from %s, before %s; not in scope",
+                    item.get("file", {}).get("name"),
+                    when.isoformat(),
+                    cutoff.isoformat(),
+                )
+            continue
+        kept.append(item)
+    return kept, skipped
+
+
 def _pending_items(items: list[dict], config: Config) -> list[dict]:
     stt_enabled = bool(config.stt_provider)
+    now = _utcnow()
     pending = []
     for item in items:
+        if _is_still_settling(item, now):
+            logger.info(
+                "Drive has not finished processing %s yet; leaving it for a later cycle",
+                item.get("file", {}).get("name"),
+            )
+            continue
         needs_txt = stt_enabled and not item.get("has_txt")
         if (
             (_should_make_mp3_artifact(config) and not item.get("has_mp3"))
@@ -1482,6 +1701,30 @@ def _log_dry_run(
     )
 
 
+def _configured_folder_for(service: Any, container_id: str, config: Config) -> str:
+    """Which configured folder a container belongs to, falling back to itself.
+
+    `process` and `reprocess` start from an id an operator typed, which may be a
+    per-meeting subfolder the configuration has never named. Without this the
+    employee, the Planfix routing and the folder's Telegram chat all resolve to
+    nothing -- silently, because `folder_by_id` returns None rather than raising.
+
+    The fallback keeps the old behaviour for an id that belongs to no configured
+    folder at all: it is still processed, just without an employee, exactly as a
+    hand-made folder was before subfolders existed.
+    """
+    configured = drive.find_configured_ancestor(
+        service, container_id, {folder.folder_id for folder in config.folders}
+    )
+    if configured is None:
+        return container_id
+    if configured != container_id:
+        logger.info(
+            "Folder %s belongs to configured folder %s", container_id, configured
+        )
+    return configured
+
+
 def process_target(
     service: Any,
     target_id: str,
@@ -1505,9 +1748,10 @@ def process_target(
     if treat_as_folder:
         telemetry: list[_ProcessTelemetry] = []
         items = _call_with_transient_retries(
-            lambda: drive.list_folder_state(service, target_id),
+            lambda: drive.list_folder_tree_state(service, target_id),
             description=f"list folder state for {target_id}",
         )
+        configured_id = _configured_folder_for(service, target_id, config)
         _apply_local_output_state(items, config)
         if reprocess_txt:
             pending = items
@@ -1524,7 +1768,7 @@ def process_target(
         if dry_run:
             for item in pending:
                 _log_dry_run(
-                    target_id, item, config,
+                    configured_id, item, config,
                     reprocess_txt=reprocess_txt,
                     reprocess_presets=reprocess_presets,
                 )
@@ -1533,7 +1777,7 @@ def process_target(
             result = process_item(
                 service,
                 item,
-                target_id,
+                configured_id,
                 config,
                 reprocess_txt=reprocess_txt,
                 reprocess_presets=reprocess_presets,
@@ -1545,10 +1789,11 @@ def process_target(
     parents = meta.get("parents") or []
     if not parents:
         raise RuntimeError(f"File {target_id} has no parent folder")
-    folder_id = parents[0]
+    container_id = parents[0]
+    folder_id = _configured_folder_for(service, container_id, config)
     items = _call_with_transient_retries(
-        lambda: drive.list_folder_state(service, folder_id),
-        description=f"list folder state for {folder_id}",
+        lambda: drive.list_folder_state(service, container_id),
+        description=f"list folder state for {container_id}",
     )
     _apply_local_output_state(items, config)
     match = next(
@@ -1556,7 +1801,7 @@ def process_target(
     )
     if match is None:
         raise RuntimeError(
-            f"File {target_id} is not an MP4 in folder {folder_id}"
+            f"File {target_id} is not an MP4 in folder {container_id}"
         )
     allowed = _items_allowed_by_size(
         [match],
@@ -1580,6 +1825,242 @@ def process_target(
     return [result] if result is not None else []
 
 
+@dataclass
+class _Discovery:
+    """What one cycle found, and what to remember for the next one."""
+
+    listings: list[tuple[str, list[dict]]]
+    cursor: str | None
+    retries: int = 0
+    folder_errors: int = 0
+
+
+def _notify_listing_failure(what: str, exc: Exception, config: Config) -> None:
+    logger.exception("Failed to list %s", what)
+    notify.notify_error(
+        f"Failed to list {what}: {exc}\n{traceback.format_exc()}",
+        telegram_bot_token=config.telegram_bot_token,
+        telegram_chat_id=config.telegram_chat_id,
+        proxy_url=config.proxy_url,
+    )
+
+
+def _discover_by_walk(service: Any, config: Config) -> _Discovery:
+    """Read every configured folder and its meeting subfolders.
+
+    The complete answer, and the expensive one: a request per folder per cycle. It
+    runs on the first cycle and whenever the cursor is gone, which is what makes
+    losing the cursor a cost rather than a loss.
+
+    The cursor is taken *before* the sweep. Anything that lands while the sweep is
+    running then shows up in the next feed read; taking it afterwards would open a
+    window whose files no cycle ever looks at again.
+    """
+    cursor: str | None = None
+    retries = 0
+    try:
+        cursor = drive.get_start_page_token(service)
+    except (RefreshError, AuthError):
+        raise
+    except Exception:
+        # A sweep with no cursor still processes everything; it just has to sweep
+        # again next time. Refusing to sweep would be the worse trade.
+        logger.exception("Could not take a changes cursor; this cycle will sweep again")
+
+    listings: list[tuple[str, list[dict]]] = []
+    folder_errors = 0
+    for folder in config.folders:
+        folder_id = folder.folder_id
+        listing_retry_state = _RetryState()
+        try:
+            items = _call_with_transient_retries(
+                lambda: drive.list_folder_tree_state(service, folder_id),
+                description=f"list folder state for {folder_id}",
+                retry_state=listing_retry_state,
+            )
+        except (RefreshError, AuthError):
+            raise
+        except Exception as exc:
+            folder_errors += 1
+            _notify_listing_failure(f"folder {folder_id}", exc, config)
+            continue
+        finally:
+            retries += listing_retry_state.retry_count
+        listings.append((folder_id, items))
+    return _Discovery(listings, cursor, retries, folder_errors)
+
+
+def _discover_by_changes(service: Any, config: Config, cursor: str) -> _Discovery | None:
+    """Read Drive's own journal and look only where something happened.
+
+    One request answers "has anything changed", however many folders are watched and
+    however many meeting subfolders have piled up in them. Only the folders the
+    journal names are then listed, and the listing -- not the journal -- still decides
+    what needs doing, so every existing rule about siblings, markers and reprocessing
+    keeps working untouched.
+
+    Returns ``None`` when the cursor is no longer usable, which is the caller's signal
+    to sweep and take a fresh one.
+    """
+    retry_state = _RetryState()
+    try:
+        entries, new_cursor = _call_with_transient_retries(
+            lambda: drive.list_changes(service, cursor),
+            description="read the changes feed",
+            retry_state=retry_state,
+        )
+    except (RefreshError, AuthError):
+        raise
+    except Exception as exc:
+        if _is_rejected_cursor(exc):
+            logger.info("The changes cursor is no longer valid; sweeping instead")
+            return None
+        _notify_listing_failure("the changes feed", exc, config)
+        return _Discovery([], cursor, retry_state.retry_count, folder_errors=1)
+
+    configured_ids = {folder.folder_id for folder in config.folders}
+    ancestors: dict[str, str | None] = {}
+    containers: dict[str, str] = {}
+    unresolved = 0
+    for entry in entries:
+        if entry.get("removed"):
+            continue
+        file_info = entry.get("file") or {}
+        if file_info.get("trashed"):
+            continue
+        # Our own uploads come through here too. Judging by the entry alone is what
+        # keeps the feed to a single request: no files.get to find out what something
+        # is.
+        if file_info.get("mimeType") != drive.MP4_MIME:
+            continue
+        parents = file_info.get("parents") or []
+        if not parents:
+            continue
+        container_id = parents[0]
+        if container_id in containers:
+            continue
+        try:
+            owner = drive.find_configured_ancestor(
+                service, container_id, configured_ids, cache=ancestors
+            )
+        except (RefreshError, AuthError):
+            raise
+        except Exception as exc:
+            # Not knowing whose folder this is must not read as "nobody's". Counting
+            # it holds the cursor, so the same change is read again next cycle.
+            unresolved += 1
+            _notify_listing_failure(f"the folder above {container_id}", exc, config)
+            continue
+        if owner is None:
+            # The account can see folders nobody configured, and the feed reports
+            # those too.
+            continue
+        containers[container_id] = owner
+
+    by_owner: dict[str, list[dict]] = {}
+    folder_errors = 0
+    for container_id, owner in containers.items():
+        listing_retry_state = _RetryState()
+        try:
+            items = _call_with_transient_retries(
+                lambda: drive.list_folder_state(service, container_id),
+                description=f"list folder state for {container_id}",
+                retry_state=listing_retry_state,
+            )
+        except (RefreshError, AuthError):
+            raise
+        except Exception as exc:
+            folder_errors += 1
+            _notify_listing_failure(f"folder {container_id}", exc, config)
+            continue
+        finally:
+            retry_state.retry_count += listing_retry_state.retry_count
+        # Each item already carries its own `container_id`, so merging them under
+        # the configured folder loses nothing about where the files live.
+        by_owner.setdefault(owner, []).extend(items)
+
+    listings = list(by_owner.items())
+    logger.info(
+        "Changes feed [entries=%d, meeting_folders=%d, folders=%d]",
+        len(entries),
+        len(containers),
+        len(listings),
+    )
+    return _Discovery(
+        listings, new_cursor, retry_state.retry_count, folder_errors + unresolved
+    )
+
+
+def _cursor_covers_config(config: Config, *, mode: str) -> bool:
+    """Whether the saved cursor can vouch for the folders now being watched.
+
+    A cursor means "nothing has happened since" only for folders that were already
+    in the config when it was taken. A folder added afterwards -- which is how an
+    employee gets onboarded, not some one-off migration -- brings recordings that
+    were never a change after that cursor, so the feed will never name it and its
+    backlog would stay invisible until someone reset the cursor by hand. One sweep
+    is the whole cost of noticing.
+
+    ``changes`` mode refuses instead of sweeping -- that is its contract, and it is
+    the only safe answer here. Reading the feed anyway would let the cycle drain and
+    record the new folder set as vouched for without it ever having been swept, so
+    the backlog would be invisible from then on.
+    """
+    watched = change_cursor.fingerprint(
+        folder.folder_id for folder in config.folders
+    )
+    vouched = change_cursor.read_folders(
+        change_cursor.folders_path_for(config.data_dir)
+    )
+    if vouched == watched:
+        return True
+    if mode == "changes":
+        raise SystemExit(
+            "The watched folders changed since the cursor was taken; the feed cannot "
+            "report recordings that were already in a folder added since. Run a "
+            "normal cycle or `gdstt run-once --mode walk` first."
+        )
+    logger.info(
+        "The watched folders changed since the cursor was taken; sweeping once so a "
+        "newly added folder's existing recordings are not missed"
+    )
+    return False
+
+
+def _discover(service: Any, config: Config, *, mode: str = "auto") -> _Discovery:
+    """Take the cheap path when a cursor says where to resume, the full one otherwise.
+
+    ``walk`` forces the sweep and leaves the cursor where it is, which is what makes
+    it a safe "check everything now" for an operator: the feed picks up afterwards
+    exactly where it was, and anything the sweep already handled is simply found
+    done. ``changes`` refuses to fall back, so it can answer whether the feed itself
+    works without waiting for a cycle.
+    """
+    if mode == "walk":
+        found = _discover_by_walk(service, config)
+        # Leave the saved cursor alone: this was a look, not a new starting point.
+        return replace(found, cursor=None)
+
+    saved = change_cursor.read(change_cursor.path_for(config.data_dir))
+    if mode == "changes" and saved is None:
+        raise SystemExit(
+            "No changes cursor saved yet; run `gdstt run-once --mode walk` or a "
+            "normal cycle first."
+        )
+    if saved is not None and not _cursor_covers_config(config, mode=mode):
+        saved = None
+    if saved is not None:
+        found = _discover_by_changes(service, config, saved)
+        if found is not None:
+            return found
+        if mode == "changes":
+            raise SystemExit(
+                "The saved changes cursor is no longer valid; a normal cycle would "
+                "sweep and take a fresh one."
+            )
+    return _discover_by_walk(service, config)
+
+
 def run_once(
     service: Any,
     config: Config,
@@ -1587,6 +2068,8 @@ def run_once(
     dry_run: bool = False,
     max_size_bytes: int | None = None,
     confirm_large: bool = False,
+    mode: str = "auto",
+    since: str = "",
 ) -> None:
     cycle_started_at = time.monotonic()
     cycle_pending = 0
@@ -1597,32 +2080,26 @@ def run_once(
     cycle_skipped_unmatched = 0
     cycle_skipped_empty = 0
     cycle_folder_errors = 0
+    cycle_deferred = 0
+    cycle_skipped_old = 0
+    settle_check_time = _utcnow()
 
-    for folder in config.folders:
-        folder_id = folder.folder_id
-        listing_retry_state = _RetryState()
-        try:
-            items = _call_with_transient_retries(
-                lambda: drive.list_folder_state(service, folder_id),
-                description=f"list folder state for {folder_id}",
-                retry_state=listing_retry_state,
-            )
-        except (RefreshError, AuthError):
-            raise
-        except Exception as exc:
-            cycle_folder_errors += 1
-            logger.exception("Failed to list folder %s", folder_id)
-            notify.notify_error(
-                f"Failed to list folder {folder_id}: {exc}\n{traceback.format_exc()}",
-                telegram_bot_token=config.telegram_bot_token,
-                telegram_chat_id=config.telegram_chat_id,
-                proxy_url=config.proxy_url,
-            )
-            continue
-        finally:
-            cycle_retry_total += listing_retry_state.retry_count
+    discovery = _discover(service, config, mode=mode)
+    cycle_retry_total += discovery.retries
+    cycle_folder_errors += discovery.folder_errors
 
+    for folder_id, items in discovery.listings:
         _apply_local_output_state(items, config)
+        total_seen = len(items)
+        items, skipped_old = _items_in_date_scope(
+            items,
+            parse_since(since or config.since_for(folder_id), source="since"),
+            dry_run=dry_run,
+        )
+        cycle_skipped_old += skipped_old
+        cycle_deferred += sum(
+            1 for item in items if _is_still_settling(item, settle_check_time)
+        )
         pending = _pending_items(items, config)
         # A marked recording is settled: reconsidering it every cycle would re-log and
         # re-decide forever. `gdstt bookings rematch` or any manual command revives it.
@@ -1641,11 +2118,13 @@ def run_once(
         cycle_pending += len(pending)
         cycle_skipped_size += skipped_size
         logger.info(
-            "Folder %s summary [total=%d, pending=%d, skipped_size=%d, dry_run=%s]",
+            "Folder %s summary [total=%d, pending=%d, skipped_size=%d, "
+            "skipped_old=%d, dry_run=%s]",
             folder_id,
-            len(items),
+            total_seen,
             len(pending),
             skipped_size,
+            skipped_old,
             dry_run,
         )
         if dry_run:
@@ -1742,10 +2221,40 @@ def run_once(
                     proxy_url=config.proxy_url,
                 )
 
+    # Only a cycle that actually drained what it found may move the cursor, and only
+    # after the work. The changes feed reports a folder once, when something happens
+    # in it; a recording this cycle failed on, or deliberately left for later, will
+    # produce no second change of its own. Stepping over it would lose it for good --
+    # the very failure this whole change exists to remove. Re-reading changes instead
+    # is free, because the folder listing decides what still needs doing.
+    # `cycle_skipped_old` is deliberately absent: a recording left out by `since` is
+    # a permanent skip by design, like one over `--max-size`. Counting it would hold
+    # the cursor on a backlog that is never going to be processed.
+    cycle_drained = not (cycle_failed or cycle_folder_errors or cycle_deferred)
+    if not dry_run and discovery.cursor and cycle_drained:
+        change_cursor.write(change_cursor.path_for(config.data_dir), discovery.cursor)
+        # Saved with the cursor, never apart from it: a cursor whose folder set is
+        # missing cannot be vouched for and would sweep every cycle. The same
+        # `cycle_drained` guard is what keeps a config edited before the folder was
+        # actually shared from being recorded as seen -- that listing fails, which
+        # counts as a folder error, which holds both files where they are.
+        change_cursor.write_folders(
+            change_cursor.folders_path_for(config.data_dir),
+            change_cursor.fingerprint(
+                folder.folder_id for folder in config.folders
+            ),
+        )
+    elif not dry_run and discovery.cursor:
+        logger.info(
+            "Holding the changes cursor [failed=%d, folder_errors=%d, deferred=%d]; "
+            "the next cycle reads the same changes again",
+            cycle_failed, cycle_folder_errors, cycle_deferred,
+        )
+
     logger.info(
         "Cycle summary [provider=%s, outcome=%s, folders=%d, pending=%d, processed=%d, failed=%d, "
-        "retry_total=%d, skipped_size=%d, skipped_unmatched=%d, skipped_empty=%d, "
-        "folder_errors=%d, dry_run=%s, "
+        "retry_total=%d, skipped_size=%d, skipped_unmatched=%d, skipped_old=%d, "
+        "skipped_empty=%d, folder_errors=%d, deferred=%d, cursor_moved=%s, dry_run=%s, "
         "duration_s=%.3f]",
         config.stt_provider or "artifact-only",
         _cycle_outcome(
@@ -1760,8 +2269,11 @@ def run_once(
         cycle_retry_total,
         cycle_skipped_size,
         cycle_skipped_unmatched,
+        cycle_skipped_old,
         cycle_skipped_empty,
         cycle_folder_errors,
+        cycle_deferred,
+        bool(discovery.cursor) and cycle_drained and not dry_run,
         dry_run,
         time.monotonic() - cycle_started_at,
     )
@@ -1823,7 +2335,7 @@ def main(*, config_path: str | Path | None = None) -> None:
             continue
         paused_logged = False
         try:
-            run_once(service, config)
+            run_once(service, config, mode=config.run_discovery)
         except (RefreshError, AuthError) as exc:
             logger.exception("OAuth refresh failed; exiting for restart")
             notify.notify_error(

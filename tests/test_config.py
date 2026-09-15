@@ -3,6 +3,8 @@ import logging
 import os
 from pathlib import Path
 
+import datetime
+
 import pytest
 import yaml
 
@@ -2924,3 +2926,134 @@ def test_ignore_telegram_when_planfix_is_parsed(tmp_path):
     config = load_config(config_path=write_config(tmp_path, raw))
 
     assert config.planfix_ignore_telegram_when_planfix is True
+
+
+# --- run.discovery (the switch that turns the changes feed off) ---------------
+
+
+def test_run_discovery_defaults_to_auto(tmp_path):
+    config_file = tmp_path / "config.yml"
+    init_config(config_path=config_file)
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.run_discovery == "auto"
+    assert _config_to_yaml_dict(cfg, config_file)["run"]["discovery"] == "auto"
+
+
+def test_run_discovery_accepts_walk(tmp_path):
+    """The fallback that makes the feed optional: one assumption behind it -- that
+    it reports folders shared *to* the service, not only ones it owns -- has not
+    been proven on a real deployment yet."""
+    config_file = write_config(
+        tmp_path,
+        {"folders": [{"folder_id": "f1"}], "run": {"discovery": "WALK"}},
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.run_discovery == "walk"
+
+
+def test_an_unknown_run_discovery_is_rejected(tmp_path):
+    """`changes` is deliberately not offered here: a service that refuses to fall
+    back would stop finding recordings the moment a cursor went stale."""
+    config_file = write_config(
+        tmp_path,
+        {"folders": [{"folder_id": "f1"}], "run": {"discovery": "changes"}},
+    )
+
+    with pytest.raises(ValueError, match="run.discovery"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
+# --- since (leaving a shared folder's backlog out of scope) -------------------
+
+
+def test_a_bare_yaml_date_is_read_as_midnight_utc(tmp_path):
+    """YAML hands back a `date` object for an unquoted `2026-09-12`, not a string.
+    Everything it gets compared against -- the meeting time out of a recording's
+    name, Drive's createdTime -- is UTC, so that is what it has to become."""
+    config_file = write_config(
+        tmp_path,
+        {"folders": [{"folder_id": "f1"}], "run": {"since": datetime.date(2026, 9, 12)}},
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.run_since == "2026-09-12T00:00:00+00:00"
+
+
+def test_a_quoted_timestamp_keeps_its_offset(tmp_path):
+    config_file = write_config(
+        tmp_path,
+        {
+            "folders": [{"folder_id": "f1"}],
+            "run": {"since": "2026-09-12T10:00:00+02:00"},
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.run_since == "2026-09-12T08:00:00+00:00"
+
+
+def test_an_unreadable_since_is_rejected_at_load(tmp_path):
+    """Silently ignoring it would be discovered as a Deepgram bill for somebody's
+    entire backlog."""
+    config_file = write_config(
+        tmp_path,
+        {"folders": [{"folder_id": "f1"}], "run": {"since": "last tuesday"}},
+    )
+
+    with pytest.raises(ValueError, match="run.since"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
+def test_an_unreadable_folder_since_names_the_folder(tmp_path):
+    config_file = write_config(
+        tmp_path,
+        {"folders": [{"folder_id": "f1", "since": "soon"}]},
+    )
+
+    with pytest.raises(ValueError, match=r"folders\[0\].since"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
+def test_a_folder_without_its_own_since_uses_the_global_one(tmp_path):
+    config_file = write_config(
+        tmp_path,
+        {
+            "folders": [
+                {"folder_id": "early"},
+                {"folder_id": "late", "since": "2026-12-01"},
+            ],
+            "run": {"since": "2026-09-01"},
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.since_for("early") == "2026-09-01T00:00:00+00:00"
+    assert cfg.since_for("late") == "2026-12-01T00:00:00+00:00"
+    # A folder nobody configured still answers, so callers need no special case.
+    assert cfg.since_for("unknown") == "2026-09-01T00:00:00+00:00"
+
+
+def test_since_round_trips_through_the_written_config(tmp_path):
+    config_file = write_config(
+        tmp_path,
+        {
+            "folders": [{"folder_id": "f1", "since": "2026-09-12"}],
+            "run": {"since": "2026-09-01"},
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    written = _config_to_yaml_dict(cfg, config_file)
+    assert written["run"]["since"] == "2026-09-01T00:00:00+00:00"
+    assert written["folders"][0]["since"] == "2026-09-12T00:00:00+00:00"
+
+
+def test_no_since_anywhere_means_every_recording_is_in_scope(tmp_path):
+    config_file = tmp_path / "config.yml"
+    init_config(config_path=config_file)
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.run_since == ""
+    assert cfg.since_for("anything") == ""

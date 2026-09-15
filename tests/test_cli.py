@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
@@ -8,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from src import cli
+from src import change_cursor, cli
 from src.call_booking import CallBooking, append
 from src.config import EmployeeFolder
 from src.presets import Preset
@@ -19,6 +20,50 @@ from tests.test_main import make_config
 class _Telemetry:
     cost_usd: dict = field(default_factory=dict)
     usage: dict = field(default_factory=dict)
+
+
+@pytest.fixture(autouse=True)
+def _flat_folders_and_a_scratch_cursor(mocker, tmp_path):
+    """Every folder here is flat, and the changes cursor lives in a scratch file.
+
+    `run_once` and `process <folder>` now read a folder together with its meeting
+    subfolders, a cycle now saves where the changes feed got to, and a recording may
+    have a Meet transcript beside it. These fixtures describe none of that: the folder
+    is flat, the cursor is nobody's business here, and there is no transcript.
+
+    Both halves have teeth. Left alone, the real `list_subfolders` runs against a
+    MagicMock whose `nextPageToken` is truthy and the paging loop never ends; and the
+    cursor would be written under the default `data/` directory, inside the checkout.
+    Redirecting `path_for` keeps production code and these tests agreeing on one
+    throwaway path, so a test that does care about the cursor still reads what the
+    cycle wrote.
+    """
+    mocker.patch("src.drive.list_subfolders", return_value=[])
+    mocker.patch("src.drive.get_start_page_token", return_value="tok-sweep")
+    mocker.patch("src.drive.find_meet_transcript", return_value=None)
+    mocker.patch(
+        "src.change_cursor.path_for",
+        return_value=tmp_path / "cursor" / "changes_cursor.txt",
+    )
+    mocker.patch(
+        "src.change_cursor.folders_path_for",
+        return_value=tmp_path / "cursor" / "changes_folders.txt",
+    )
+
+
+def _save_cursor(cfg, token):
+    """Save a cursor the way a real cycle does: together with the folders it covers.
+
+    A cursor on its own cannot be vouched for, and an unvouched cursor makes the next
+    cycle sweep -- that is the whole point of `changes_folders.txt`. So a test that
+    wants the feed to be read has to set up both, exactly like `run_once` does.
+    """
+    change_cursor.write(change_cursor.path_for(cfg.data_dir), token)
+    change_cursor.write_folders(
+        change_cursor.folders_path_for(cfg.data_dir),
+        change_cursor.fingerprint(folder.folder_id for folder in cfg.folders),
+    )
+
 
 
 def _normalized_help(text: str) -> str:
@@ -251,14 +296,22 @@ def test_doctor_drive_check_lists_configured_folders(mocker, capsys, tmp_path):
     mocker.patch("src.cli.load_config", return_value=cfg)
     service = MagicMock()
     mocker.patch("src.cli.auth.build_drive_service", return_value=service)
-    list_mock = mocker.patch("src.cli.drive.list_folder_state", return_value=[])
+    list_mock = mocker.patch("src.cli.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.cli.drive.list_subfolders", return_value=[])
+    mocker.patch(
+        "src.cli.drive.describe_folder",
+        return_value={"id": "f1", "name": "Meet Recordings", "parents": ["mydrive"]},
+    )
 
     cli.main(["doctor", "--drive"])
 
     list_mock.assert_called_once_with(service, "f1")
     out = capsys.readouterr().out
     assert "Drive auth: OK" in out
-    assert "Folder f1: OK, 0 mp4 file(s)" in out
+    # Reachability alone is what let this read healthy for two months; the name and
+    # the date of the last file are the part that gives a moved folder away.
+    assert "Folder f1: 'Meet Recordings'" in out
+    assert "0 mp4 file(s)" in out
 
 
 def test_doctor_reports_stt_provider_without_pipeline_readiness(mocker, capsys, tmp_path):
@@ -340,9 +393,11 @@ def test_run_once_dispatch(mocker, tmp_path):
     run_once_mock.assert_called_once_with(
         service,
         cfg,
+        mode="auto",
         dry_run=False,
         max_size_bytes=None,
         confirm_large=False,
+        since="",
     )
 
 
@@ -358,9 +413,11 @@ def test_run_once_dispatches_safety_flags(mocker, tmp_path):
     run_once_mock.assert_called_once_with(
         service,
         cfg,
+        mode="auto",
         dry_run=True,
         max_size_bytes=50_000_000,
         confirm_large=True,
+            since="",
     )
 
 
@@ -1446,3 +1503,437 @@ def test_planfix_sent_reports_an_empty_log(tmp_path, monkeypatch, capsys):
     _run_sent(tmp_path, monkeypatch, [])
 
     assert "No recording carries a sent-comment marker." in capsys.readouterr().out
+
+
+# --- Subfolders and the changes feed from the operator's side ---------------------
+
+
+def _doctor_config(mocker, tmp_path, **overrides):
+    cfg = make_config(folders=["folderA"], data_dir=tmp_path, **overrides)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    return cfg
+
+
+def _folder_meta(name="Google Meet", parents=("mydrive",), trashed=False):
+    return {"id": "root", "name": name, "parents": list(parents), "trashed": trashed}
+
+
+def test_doctor_names_the_folder_so_a_moved_one_is_obvious(mocker, capsys, tmp_path):
+    """Counting files answered "can I reach it", and stayed yes for two months after
+    Google moved the recordings. The name is the whole diagnosis."""
+    _doctor_config(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch(
+        "src.cli.drive.describe_folder",
+        return_value=_folder_meta(name="Legacy Meet Recordings", parents=("gm",)),
+    )
+    mocker.patch("src.cli.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.cli.drive.list_subfolders", return_value=[])
+
+    cli.main(["doctor", "--drive"])
+
+    out = capsys.readouterr().out
+    assert "Legacy Meet Recordings" in out
+    assert "parent gm" in out
+
+
+def test_doctor_reports_when_a_folder_last_received_anything(mocker, capsys, tmp_path):
+    _doctor_config(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.cli.drive.describe_folder", return_value=_folder_meta())
+    mocker.patch(
+        "src.cli.drive.list_folder_tree_state",
+        return_value=[
+            {"file": {"id": "v1", "name": "a.mp4", "createdTime": "2026-09-09T18:53:00Z"}},
+        ],
+    )
+    mocker.patch("src.cli.drive.list_subfolders", return_value=[{"id": "d1"}])
+
+    cli.main(["doctor", "--drive"])
+
+    out = capsys.readouterr().out
+    assert "2026-09-09T18:53:00Z" in out
+    assert "1 subfolder(s)" in out
+
+
+def test_doctor_says_a_folder_that_never_received_anything_never_did(
+    mocker, capsys, tmp_path
+):
+    _doctor_config(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.cli.drive.describe_folder", return_value=_folder_meta())
+    mocker.patch("src.cli.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.cli.drive.list_subfolders", return_value=[])
+
+    cli.main(["doctor", "--drive"])
+
+    assert "newest never" in capsys.readouterr().out
+
+
+def test_doctor_reports_an_unreachable_folder_instead_of_crashing(
+    mocker, capsys, tmp_path
+):
+    """A diagnostic that raises is no diagnostic: the operator runs it precisely when
+    something is wrong."""
+    _doctor_config(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch(
+        "src.cli.drive.describe_folder", side_effect=RuntimeError("no access")
+    )
+
+    cli.main(["doctor", "--drive"])
+
+    assert "UNREACHABLE" in capsys.readouterr().out
+
+
+def test_doctor_reports_the_cursor(mocker, capsys, tmp_path):
+    _doctor_config(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.cli.drive.describe_folder", return_value=_folder_meta())
+    mocker.patch("src.cli.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.cli.drive.list_subfolders", return_value=[])
+
+    cli.main(["doctor", "--drive"])
+
+    assert "changes cursor" in capsys.readouterr().out
+
+
+def test_list_walks_subfolders_and_says_where_each_file_lives(mocker, capsys, tmp_path):
+    _doctor_config(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    tree_mock = mocker.patch(
+        "src.cli.drive.list_folder_tree_state",
+        return_value=[{
+            "file": {"id": "v1", "name": "a.mp4"},
+            "container_id": "meeting-1",
+            "has_mp3": False,
+            "has_txt": True,
+        }],
+    )
+
+    cli.main(["list"])
+
+    tree_mock.assert_called_once()
+    out = capsys.readouterr().out
+    assert "a.mp4" in out
+    assert "meeting-1" in out
+
+
+def test_latest_looks_inside_subfolders(mocker, tmp_path):
+    _doctor_config(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    newest_mock = mocker.patch(
+        "src.cli.drive.find_newest_mp4_in_tree", return_value=None
+    )
+
+    cli.main(["latest"])
+
+    newest_mock.assert_called_once()
+
+
+def test_changes_without_a_cursor_says_the_next_cycle_sweeps(mocker, capsys, tmp_path):
+    _doctor_config(mocker, tmp_path)
+
+    cli.main(["changes"])
+
+    assert "sweeps every folder" in capsys.readouterr().out
+
+
+def test_changes_never_moves_the_cursor(mocker, capsys, tmp_path):
+    """Looking into the feed must not consume it, or the cycle that follows finds
+    nothing and the recording is skipped."""
+    cfg = _doctor_config(mocker, tmp_path)
+    _save_cursor(cfg, "tok-1")
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.cli.drive.list_changes", return_value=([], "tok-2"))
+
+    cli.main(["changes"])
+
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) == "tok-1"
+    assert "not saved" in capsys.readouterr().out
+
+
+def test_changes_shows_our_videos_with_the_folder_they_belong_to(
+    mocker, capsys, tmp_path
+):
+    cfg = _doctor_config(mocker, tmp_path)
+    _save_cursor(cfg, "tok-1")
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch(
+        "src.cli.drive.list_changes",
+        return_value=(
+            [{
+                "fileId": "v1",
+                "file": {
+                    "id": "v1", "name": "call.mp4", "mimeType": "video/mp4",
+                    "parents": ["meeting-1"], "trashed": False,
+                },
+            }],
+            "tok-2",
+        ),
+    )
+    mocker.patch("src.cli.drive.find_configured_ancestor", return_value="folderA")
+
+    cli.main(["changes"])
+
+    out = capsys.readouterr().out
+    assert "call.mp4" in out
+    assert "meeting-1" in out
+    assert "folderA" in out
+
+
+def test_changes_raw_shows_entries_that_are_not_ours(mocker, capsys, tmp_path):
+    cfg = _doctor_config(mocker, tmp_path)
+    _save_cursor(cfg, "tok-1")
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch(
+        "src.cli.drive.list_changes",
+        return_value=(
+            [{
+                "fileId": "t1",
+                "file": {
+                    "id": "t1", "name": "call.txt", "mimeType": "text/plain",
+                    "parents": ["meeting-1"], "trashed": False,
+                },
+            }],
+            "tok-2",
+        ),
+    )
+
+    cli.main(["changes", "--raw"])
+
+    assert "call.txt" in capsys.readouterr().out
+
+
+def test_cursor_show_reports_an_absent_cursor(mocker, capsys, tmp_path):
+    _doctor_config(mocker, tmp_path)
+
+    cli.main(["cursor", "show"])
+
+    assert "absent" in capsys.readouterr().out
+
+
+def test_cursor_reset_forgets_it_and_says_so(mocker, capsys, tmp_path):
+    cfg = _doctor_config(mocker, tmp_path)
+    _save_cursor(cfg, "tok-1")
+
+    cli.main(["cursor", "reset"])
+
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) is None
+    assert "sweeps every folder" in capsys.readouterr().out
+
+
+def test_cursor_reset_is_harmless_when_there_is_nothing_to_reset(
+    mocker, capsys, tmp_path
+):
+    _doctor_config(mocker, tmp_path)
+
+    cli.main(["cursor", "reset"])
+
+    assert "already sweeps" in capsys.readouterr().out
+
+
+def test_run_once_walk_mode_leaves_the_cursor_where_it_was(mocker, tmp_path):
+    """A "check everything now" must not become a new starting point: the feed has to
+    pick up exactly where it was."""
+    cfg = _doctor_config(mocker, tmp_path)
+    _save_cursor(cfg, "tok-1")
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-9")
+
+    cli.main(["run-once", "--mode", "walk"])
+
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) == "tok-1"
+
+
+def test_run_once_changes_mode_refuses_without_a_cursor(mocker, tmp_path):
+    """Better a plain refusal than a silent full sweep when the operator asked to
+    exercise the feed."""
+    _doctor_config(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+
+    with pytest.raises(SystemExit):
+        cli.main(["run-once", "--mode", "changes"])
+
+
+# --- run-once without --mode follows the service, not a hardcoded default ------
+
+
+def test_run_once_without_a_mode_follows_the_configured_discovery(mocker, tmp_path):
+    """A deployment pinned to run.discovery=walk must not be silently exercised on
+    the other path just because the operator typed the command by hand."""
+    cfg = dataclasses.replace(make_config(data_dir=tmp_path), run_discovery="walk")
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    run_once_mock = mocker.patch("src.cli.main_module.run_once")
+
+    cli.main(["run-once"])
+
+    assert run_once_mock.call_args.kwargs["mode"] == "walk"
+
+
+def test_an_explicit_mode_still_wins_over_the_config(mocker, tmp_path):
+    cfg = dataclasses.replace(make_config(data_dir=tmp_path), run_discovery="walk")
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    run_once_mock = mocker.patch("src.cli.main_module.run_once")
+
+    cli.main(["run-once", "--mode", "changes"])
+
+    assert run_once_mock.call_args.kwargs["mode"] == "changes"
+
+
+def test_cursor_show_says_which_folders_the_cursor_covers(mocker, tmp_path, capsys):
+    cfg = make_config(data_dir=tmp_path, folders=["root"])
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    _save_cursor(cfg, "tok-1")
+
+    cli.main(["cursor", "show"])
+
+    out = capsys.readouterr().out
+    assert "cursor: tok-1" in out
+    assert "all covered" in out
+
+
+def test_cursor_show_names_a_folder_the_cursor_cannot_vouch_for(
+    mocker, tmp_path, capsys
+):
+    """The question an operator actually has after editing the config: does the
+    saved cursor still mean anything for the folder I just added?"""
+    cfg = make_config(data_dir=tmp_path, folders=["root"])
+    _save_cursor(cfg, "tok-1")
+    grown = make_config(data_dir=tmp_path, folders=["root", "new"])
+    mocker.patch("src.cli.load_config", return_value=grown)
+
+    cli.main(["cursor", "show"])
+
+    out = capsys.readouterr().out
+    assert "changed since the cursor was taken" in out
+    assert "added:   new" in out
+
+
+def test_cursor_reset_forgets_the_folder_set_too(mocker, tmp_path):
+    """Left behind, it would vouch for a cursor that no longer exists."""
+    cfg = make_config(data_dir=tmp_path, folders=["root"])
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    _save_cursor(cfg, "tok-1")
+
+    cli.main(["cursor", "reset"])
+
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) is None
+    assert (
+        change_cursor.read_folders(change_cursor.folders_path_for(cfg.data_dir))
+        is None
+    )
+
+
+# --- run-once --since ---------------------------------------------------------
+
+
+def test_run_once_passes_the_since_flag_through(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    run_once_mock = mocker.patch("src.cli.main_module.run_once")
+
+    cli.main(["run-once", "--since", "2026-09-12"])
+
+    assert run_once_mock.call_args.kwargs["since"] == "2026-09-12T00:00:00+00:00"
+
+
+def test_run_once_without_since_leaves_the_config_in_charge(mocker, tmp_path):
+    cfg = make_config(data_dir=tmp_path)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    run_once_mock = mocker.patch("src.cli.main_module.run_once")
+
+    cli.main(["run-once"])
+
+    assert run_once_mock.call_args.kwargs["since"] == ""
+
+
+def test_an_unreadable_since_fails_before_drive_is_touched(mocker, tmp_path):
+    """Parse-time, not cycle-time: a typo must not cost an authentication round trip
+    and then a confusing traceback halfway through a folder."""
+    build_mock = mocker.patch("src.cli.auth.build_drive_service")
+
+    with pytest.raises(SystemExit):
+        cli.main(["run-once", "--since", "last tuesday"])
+
+    build_mock.assert_not_called()
+
+
+def test_list_marks_recordings_a_cutoff_leaves_out(mocker, capsys, tmp_path):
+    """Otherwise the report and the service disagree: `list` would show a folder
+    full of recordings with no transcript while every cycle skipped all of them, and
+    the operator would have no way to tell which one was lying."""
+    cfg = dataclasses.replace(
+        make_config(data_dir=tmp_path, folders=["root"]), run_since="2026-10-01"
+    )
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch(
+        "src.cli.drive.list_folder_tree_state",
+        return_value=[
+            {
+                "file": {"id": "v1", "name": "exf-wxzm-uzk (2026-09-09 17_42 GMT+2).mp4"},
+                "container_id": "meeting-1",
+            },
+            {
+                "file": {"id": "v2", "name": "exf-wxzm-uzk (2026-11-20 17_42 GMT+2).mp4"},
+                "container_id": "meeting-2",
+            },
+        ],
+    )
+
+    cli.main(["list"])
+
+    out = capsys.readouterr().out
+    old_line = next(line for line in out.splitlines() if "2026-09-09" in line)
+    new_line = next(line for line in out.splitlines() if "2026-11-20" in line)
+    assert "before since, not processed" in old_line
+    assert "before since" not in new_line
+
+
+def test_doctor_says_how_many_attended_calls_this_folder_cannot_process(
+    mocker, capsys, tmp_path
+):
+    """Found on a real employee folder: two calls they attended existed only as
+    shortcuts to recordings the account could not open. Every other line of the
+    diagnosis read as healthy, so without this those calls were missing without a
+    trace."""
+    _doctor_config(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.cli.drive.describe_folder", return_value=_folder_meta())
+    mocker.patch("src.cli.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.cli.drive.list_subfolders", return_value=[])
+    mocker.patch(
+        "src.cli.drive.list_recording_shortcuts",
+        return_value=[
+            {"id": "s1", "name": "a.mp4", "container_id": "m1", "target_id": "t1"},
+            {"id": "s2", "name": "b.mp4", "container_id": "m2", "target_id": "t2"},
+        ],
+    )
+    mocker.patch("src.cli.drive.is_readable", side_effect=[False, True])
+
+    cli.main(["doctor", "--drive"])
+
+    out = capsys.readouterr().out
+    assert "2 shortcut(s) to recordings, not processed from this folder" in out
+    assert "1 not readable by this account" in out
+
+
+def test_doctor_stays_quiet_about_shortcuts_when_there_are_none(
+    mocker, capsys, tmp_path
+):
+    _doctor_config(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.cli.drive.describe_folder", return_value=_folder_meta())
+    mocker.patch("src.cli.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.cli.drive.list_subfolders", return_value=[])
+    mocker.patch("src.cli.drive.list_recording_shortcuts", return_value=[])
+
+    cli.main(["doctor", "--drive"])
+
+    assert "shortcut" not in capsys.readouterr().out

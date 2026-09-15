@@ -113,15 +113,113 @@ sibling `.txt`) — so a file already having an MP3 can still get transcribed on
 cycle. Idempotency comes from `drive.list_folder_state` reporting sibling presence by
 basename. All work happens in a per-item `TemporaryDirectory`.
 
+**Finding work** (`_discover` in `src/main.py`): a cycle either reads Drive's changes
+feed from a saved cursor (`_discover_by_changes`) or sweeps every configured folder and
+its subfolders (`_discover_by_walk`). Both return the same `(configured_folder_id,
+items)` pairs, so everything downstream is unaware of which ran. The feed only says
+*where* to look; the folder listing still decides *what* needs doing, which is what
+keeps siblings, `source_video_id`, booking markers and preset backfill working
+unchanged.
+
+The cursor (`src/change_cursor.py`, `<data-dir>/changes_cursor.txt`) is the service's
+only *discovery* state -- the booking journal and each artifact's appProperties are
+durable too -- and is deliberately disposable: absent, unreadable, deleted, or
+rejected by Drive with 404/410 all lead to the same branch — sweep, take a fresh
+cursor, continue. Three orderings are load-bearing and each has a test: the cursor is
+taken *before* a sweep (so a file landing mid-sweep is not stepped over), saved *after*
+the work (so a failed cycle re-reads the same changes), and never moved by `--dry-run`.
+
+`<data-dir>/changes_folders.txt` holds the folder ids the cursor was taken against and
+is written only where the cursor is, under the same `cycle_drained` guard. A cursor
+vouches for nothing outside that set: recordings already sitting in a folder added
+since were never a change after it, so the feed will never name that folder. A
+mismatch (or a missing file) therefore sweeps once -- `_cursor_covers_config`. That
+guard matters: a config edited before the folder is actually shared fails to list,
+which counts as a folder error, which holds both files where they are until the share
+lands. `--mode changes` refuses outright on a mismatch rather than warning and
+reading: that cycle would drain, and draining records the new folder set as vouched
+for without it ever having been swept, which loses the backlog permanently.
+
+`run.discovery` (`auto`|`walk`) picks the path the polling loop takes; the CLI's
+`--mode` defaults to it rather than to `auto`, so a deployment pinned to `walk` is not
+silently exercised on the other path. It exists because one assumption behind the feed
+is still unproven: discovery via `changes.list` has only been exercised on folders the
+account *owns*, and production watches folders shared *to* the service. Walking costs
+a request per folder per cycle and stays inside quota at a thousand subfolders, so
+`walk` is a real fallback, not a degraded mode.
+
+`since` (`run.since`, `folders[].since`, `run-once --since`) puts older recordings out
+of scope. Three things about it are load-bearing. It is compared against
+`parse_meeting_start` of the recording's name, falling back to Drive's `createdTime`,
+because the operator means the call and `createdTime` answers a different question.
+Meet's own lag measured 0-2 hours across eight real recordings -- enough to carry a
+late call past midnight -- and a copy or re-upload resets `createdTime` entirely. A recording neither
+can date stays in scope -- fail open. And `cycle_skipped_old` is deliberately absent
+from `cycle_drained`: an out-of-scope recording is a permanent skip like one over
+`--max-size`, and counting it would hold the cursor on a backlog that is never going
+to be processed. The filter runs before the settling check for the same reason -- an
+old video Drive never finished processing would otherwise count as `deferred`, which
+holds the cursor too. Absolute dates only; a rolling `max_age_days` would drop a
+still-pending recording out of scope overnight with nothing having happened.
+
+`_is_rejected_cursor` covers 404, 410 **and** a 400 whose error location is
+`pageToken`. The 400 case was found live, not by reading: a corrupt cursor file made
+Drive answer 400, which was handled as an ordinary feed failure, which held the
+cursor, which was the same bad token next cycle -- the service failed every cycle for
+good. Match the parameter, never 400 alone, or a genuinely broken request gets swept
+over quietly. In changes mode, listings are merged per configured folder; each item
+keeps its own `container_id`, so nothing about placement is lost.
+
+Neither path sees a **shortcut** to a recording: Drive reports the shortcut's own
+`application/vnd.google-apps.shortcut`, with the real type only in
+`shortcutDetails.targetMimeType`, so the `video/mp4` filter drops it in the listing and
+in the feed alike (verified live). Organizers get real files, which is whose folders
+are configured; a participant who only gets a shortcut is out of scope, and processing
+one would duplicate work the organizer's folder already did. A shortcut is a shortcut
+whatever the viewer's access: its own ACL comes from its folder, its target's from the
+organizer. On the first real employee folder checked, all five targets returned 404 to
+the account the folder was shared with -- a fact about that account, not a law; one the
+organizer shared recordings with can open them. `list_recording_shortcuts` +
+`is_readable` exist so `doctor --drive` can say how many calls a folder does not process
+and how many targets this account cannot open -- the rest of its diagnosis reads as
+healthy without that line.
+
+It is also held back entirely unless the cycle drained what it found. The feed names a
+folder once, when something happens in it, and a recording that failed writes no
+artifact -- so nothing there changes again and the feed never names it twice. A failed
+file, an unlistable folder, an unresolvable parent, or a video left to settle therefore
+all keep the cursor where it is. Deliberate permanent skips (no booking, over
+`--max-size`) are *not* counted: those would freeze the cursor for good.
+
+**Meeting subfolders** (`drive.list_folder_tree_state`): Google Meet files each meeting
+into its own subfolder, so a configured folder is read together with its direct
+subfolders — a union, not a mode, which is why a flat folder still behaves exactly as
+before. Each item carries `container_id`, the folder the video actually lives in.
+`folder_id` and `container_id` mean different things and must not be swapped: the
+configured folder identifies the employee (every `config.folder_by_id`, and the
+completion webhook's `file.folder_id`), the container is where artifacts are written.
+`drive.find_configured_ancestor` translates a container back to its configured folder
+for entry points that start from a file — `process_target` and the changes feed — and
+returns `None` for folders nobody configured, which is a skip rather than an error.
+
+Two rules that are easy to reintroduce, because each failed silently once. **Every
+write goes to `container_id`** — the `.txt`, each preset artifact, `.meta.yml`, `.stt`
+and the `.mp3`; the mp3 upload is its own call site and was the one left behind, which
+put every artifact a level above its recording. **Every folder listing an operator
+command makes reads the tree**, not one level: `list`, `latest`, `doctor --drive`,
+`planfix sent` and `bookings restore-dates` all go through a `*_in_tree` helper,
+because one level on a Meet root returns nothing and reads as "there is nothing here".
+
 `process_target` (`src/main.py`) is the on-demand entry the CLI's `process` command uses:
 it auto-detects file vs folder by `mimeType` (override with `is_folder`), then runs the same
 `process_item` over a single file or every pending file in a folder. The `gdstt` CLI
 (`src/cli.py`) wraps the same `load_config()`/Drive/STT layers behind argparse subcommands
 without duplicating business logic.
 
-**`latest` command** (`src/cli.py` + `drive.find_newest_mp4`): resolves a folder
-(arg or first configured `folders` entry), finds the newest mp4 by `createdTime desc`, and
-dispatches it through `process_target` (honoring `--dry-run`).
+**`latest` command** (`src/cli.py` + `drive.find_newest_mp4_in_tree`): resolves a folder
+(arg or first configured `folders` entry), finds the newest mp4 across it and its
+subfolders by `createdTime desc`, and dispatches it through `process_target` (honoring
+`--dry-run`).
 
 **Post-processing** runs in `process_item` after `transcribe_file` and before the
 artifact is written, gated by `stt_postprocess` (local path, `src/postprocess.py`):
@@ -132,6 +230,32 @@ splits on `,`/`&`/`and`/`и`/`х`/`x`, and discards Google Meet room codes and t
 `_ORG_TOKENS` org names. Two non-obvious rules: `_ORG_TOKENS` is a code constant, not
 config (an operator's own org name would be read as a person), and the latin `x`
 separator is matched case-sensitively so an uppercase `X` stays a middle initial.
+
+Names are looked for in Meet's own transcript first (`src/meet_transcript.py`): a
+Google Doc sits beside each recording with an `Attendees` block and `Name: turn` lines.
+Both are read — the block is complete but unordered and includes a shared screen as
+`<name>'s Presentation`, while the turns say who actually spoke but omit anyone silent.
+The result feeds `_resolve_speaker_names` as its `candidates`,
+together with the document text. Every failure path (no transcript, no access, an
+unfamiliar shape, fewer than two names) returns `None` and leaves file-name parsing in
+charge: losing the names is a worse transcript, losing the recording is an outage.
+
+`speaker_roles.resolve` gives the model everything at once: the candidates, the
+transcript from its first speech for `WINDOW_SECONDS` (consecutive lines of one
+speaker merged, capped by `MAX_*_CHARS`), Meet's turns for the blocks overlapping that
+window (`meet_transcript.turns`, each carrying its block's start), the folder owner,
+and the manager the calendar title marks (`postprocess.split_participants`). The
+window is time-based on purpose: `word_speaker` splits a line on every voice change,
+so the old 30-line sample was a minute of mic checks. A reply of `{}` means "cannot
+tell" and returns `None`, as does anything outside the candidates. **Once a model
+could be asked, no name is bound to a speaker by position**: `_resolve_speaker_names`
+returns `[]` for "asked, not answered", and the transcript keeps `Speaker N`. Neither
+Meet's speaking order nor the file name's is diarization's -- on a real call Meet's
+swapped the labels. `None` means the model was never asked (no key, fewer than two
+names) and keeps the old positional binding from the file name. `_run_preset_stage`
+still gets the names as `participant_names` (Meet's, or the file name's via `None`):
+`build_prompt` lists them "in no particular order", so they carry no swap there.
+Without an OpenAI key Meet's transcript is not read at all.
 
 **Preset DAG** (`src/presets.py` + `src/preset_pipeline.py`): after the transcript
 is written, `process_item` runs the enabled presets that are still missing an
@@ -233,7 +357,13 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   `deepgram`; set `stt.provider: disabled` (or empty) to skip transcription and only
   manage MP3 artifacts.
 - Bootstrap and Drive-only commands use `load_config(validate_providers=False)`:
-  `auth`, `doctor`, `list` / `status`, and `speakers set`.
+  `auth`, `doctor`, `list` / `status`, `changes`, `cursor`, and `speakers set`.
+- `gdstt changes` is read-only and must stay that way: consuming the feed there would
+  leave the next cycle with nothing to find. `gdstt cursor reset` is the supported way
+  to force a full sweep, and `run-once --mode walk` sweeps without moving the cursor.
+- A video with no `videoMediaMetadata` is left for a later cycle, but only within
+  `_MEDIA_SETTLING_GRACE`. The bound is the point: a video that never gets metadata
+  must still be transcribed rather than waited on forever.
 - Processing commands validate provider configuration and can spend credits:
   `run`, `run-once`, `process`, `reprocess`, `latest`, and `transcribe`.
 - `relabel` is a local file transform that touches no Drive and spends nothing.

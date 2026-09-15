@@ -5,12 +5,47 @@
 
 ### Features
 
+- Say how many attended calls a folder will never process
+- Let a shared folder's backlog stay out of scope
+- Let the service run without the changes feed
+- Take the speakers' names from Meet's own transcript
+- Give the operator both ways of finding work, and a diagnosis worth reading
+- Ask Drive what changed instead of re-reading every folder
+- Leave a video alone while Drive is still processing it
+- Tell apart the folder a file lives in from the folder it belongs to
+- Let `latest` see into meeting subfolders
+- Translate a file's own folder back to the configured one
+- Walk one level of subfolders and remember where each file lives
 - Post call summaries to a folder's Telegram chat
 
 ### Bug Fixes
 
 - Stop three booking tests from expiring on the calendar
 - Drop task checkboxes from the Telegram summary
+- Leave a call the model could not place numbered, not named by the file's order
+- Keep telling the presets who was on a call nobody could place
+- Decide who is who from the whole call, and never bind Meet's names by order
+- Stop a damaged cursor file from failing every cycle for good
+- Stop `list` from contradicting what a cycle will do
+- Find a newly watched folder's backlog instead of trusting the cursor
+- Let the operator reports see into meeting subfolders too
+- Put the mp3 beside its video, and actually take a changes cursor
+- Stop three booking tests from expiring on the calendar
+- Never step the cursor past work the cycle did not finish
+
+### Documentation
+
+- Say what a shortcut's target depends on, not that following it is futile
+- Document the behaviour an operator will actually meet
+- Write down the two rules that failed silently
+
+### Performance
+
+- Ask a folder for all four mime types in one query
+
+### Testing
+
+- Make the Drive fake answer by parent, not by guessing at the query
 
 ## v0.9.0 - 2026-08-14
 
