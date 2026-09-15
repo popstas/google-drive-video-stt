@@ -4051,6 +4051,19 @@ def test_telegram_summary_strips_markdown_to_plain_text():
     assert text.index("Виза O-1") < text.index("Задачи")
 
 
+def test_telegram_summary_drops_checkbox_markers_from_list_items():
+    """Telegram shows `- [ ] call back` literally, so a task keeps only its dash."""
+    text = main._telegram_summary(
+        {"keypoints": "## Задачи\n\n- [ ] Собрать документы\n  - [x] Отправить счёт"},
+        ("keypoints",),
+    )
+
+    assert "[ ]" not in text
+    assert "[x]" not in text
+    assert "- Собрать документы" in text
+    assert "  - Отправить счёт" in text
+
+
 def test_telegram_summary_is_blank_when_only_the_header_would_render():
     """Same guard as `_planfix_description`: a duration and a link are not a summary,
     and sending one would write the `telegram_sent_chat_id` marker and permanently
