@@ -20,7 +20,7 @@ from src.call_booking import append as append_booking
 from src.config import Config, EmployeeFolder, resolve_config_file_path
 from src.presets import BUILTIN_PRESETS, Preset
 from src.preset_pipeline import PresetResult
-from src.stt.base import STTError
+from src.stt.base import EmptyTranscriptError, STTError
 
 _KEYPOINTS_BUILTIN = next(p for p in BUILTIN_PRESETS if p.name == "keypoints")
 
@@ -1321,8 +1321,8 @@ def test_run_once_logs_folder_and_cycle_summary(mocker, caplog):
     assert (
         "Cycle summary [provider=deepgram, outcome=success, folders=1, pending=1, "
         "processed=1, failed=0, retry_total=0, skipped_size=0, skipped_unmatched=0, "
-        "skipped_old=0, folder_errors=0, deferred=0, cursor_moved=True, dry_run=False, "
-        "duration_s=1.250]"
+        "skipped_old=0, skipped_empty=0, folder_errors=0, deferred=0, cursor_moved=True, "
+        "dry_run=False, duration_s=1.250]"
     ) in caplog.text
 
 
@@ -2947,6 +2947,7 @@ def gate_item(
     file_id="v1",
     *,
     booking_match="",
+    transcript_empty="",
     planfix_comment_task_id="",
     telegram_sent_chat_id="",
 ):
@@ -2960,6 +2961,7 @@ def gate_item(
         "txt_id": None,
         "artifact_ids": {},
         "booking_match": booking_match,
+        "transcript_empty": transcript_empty,
         "planfix_comment_task_id": planfix_comment_task_id,
         "telegram_sent_chat_id": telegram_sent_chat_id,
     }
@@ -3098,6 +3100,71 @@ def test_run_once_processes_when_disable_recognition_is_off(monkeypatch, gate_co
 
     process_item.assert_called_once()
     assert marked == []
+
+
+def test_run_once_marks_a_recording_with_no_speech_instead_of_failing(
+    monkeypatch, gate_config, caplog
+):
+    """A silent call would otherwise be downloaded, sent to Deepgram and reported as
+    an error every cycle, and hold the changes cursor for good."""
+    patch_decision(monkeypatch, MATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    process_item = MagicMock(
+        side_effect=EmptyTranscriptError("deepgram returned an empty transcript")
+    )
+    monkeypatch.setattr(main, "process_item", process_item)
+    marked = []
+    monkeypatch.setattr(
+        main.drive,
+        "set_file_app_properties",
+        lambda svc, fid, props: marked.append((fid, props)),
+    )
+    notify_error = MagicMock()
+    monkeypatch.setattr(main.notify, "notify_error", notify_error)
+
+    with caplog.at_level(logging.INFO):
+        main.run_once(MagicMock(), gate_config)
+
+    assert marked == [("v1", {"transcript_empty": "true"})]
+    notify_error.assert_not_called()
+    assert "failed=0" in caplog.text
+    assert "skipped_empty=1" in caplog.text
+
+
+def test_run_once_survives_a_drive_failure_while_marking_empty(
+    monkeypatch, gate_config, caplog
+):
+    patch_decision(monkeypatch, MATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    monkeypatch.setattr(
+        main,
+        "process_item",
+        MagicMock(side_effect=EmptyTranscriptError("empty transcript")),
+    )
+
+    def raise_http_error(svc, fid, props):
+        raise HttpError(MagicMock(status=503), b"unavailable")
+
+    monkeypatch.setattr(main.drive, "set_file_app_properties", raise_http_error)
+
+    with caplog.at_level(logging.INFO):
+        main.run_once(MagicMock(), gate_config)
+
+    assert "Failed to mark" in caplog.text
+    assert "skipped_empty=1" in caplog.text
+
+
+def test_run_once_never_revisits_a_recording_with_no_speech(monkeypatch, gate_config):
+    resolve = MagicMock()
+    monkeypatch.setattr(main.booking_gate, "resolve", resolve)
+    patch_folder_items(monkeypatch, [gate_item("v1", transcript_empty="true")])
+    process_item = MagicMock()
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), gate_config)
+
+    process_item.assert_not_called()
+    resolve.assert_not_called()
 
 
 def test_process_target_ignores_the_mark_and_the_gate(monkeypatch, gate_config):

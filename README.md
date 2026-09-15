@@ -1210,6 +1210,10 @@ Writing the mark counts as an edit in Drive, so it moves the recording's
 whose date was moved that way, and the same command without the flag puts each
 one back to its creation time.
 
+A recording Deepgram hears no speech in (a call nobody joined, a muted screen share)
+is skipped the same way: it gets `transcript_empty=true` on Drive and the polling loop
+never picks it again, with no error notification. `gdstt process <file-id>` retries it.
+
 ### File-name rules
 
 Some recordings must always be transcribed and always land in one known task —
