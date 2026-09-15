@@ -9,6 +9,7 @@
 
 ### Bug Fixes
 
+- Stop three booking tests from expiring on the calendar
 - Drop task checkboxes from the Telegram summary
 
 ## v0.9.0 - 2026-08-14

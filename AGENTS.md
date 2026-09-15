@@ -312,6 +312,12 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   (`process`, `latest`, `transcribe`, `reprocess`) let `process_item` resolve its own
   decision, which yields the `task_id` without the gate. Processing a marked file by
   hand is the supported way to revive it, alongside `gdstt bookings rematch`.
+- A recording the STT provider returns no speech for (`EmptyTranscriptError`) is
+  not a failure in `run_once`: it gets `transcript_empty=true` on Drive, counts
+  `skipped_empty`, sends no error notification, and the pending filter never picks
+  it again. Otherwise a silent call is re-transcribed, re-alerted, and holds the
+  cycle every poll. Manual commands ignore the mark; `gdstt process <file-id>`
+  retries it.
 - `call_booking.name_rules` (`{regex, task_id}`, both required, compiled at load
   time so a broken pattern is a startup error) is checked at the very top of
   `booking_gate.resolve` — **before** the `call_booking_enabled` short-circuit and

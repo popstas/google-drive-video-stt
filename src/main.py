@@ -38,6 +38,7 @@ from src.config import Config, is_run_enabled, load_config
 from src.extractor import extract_m4a_copy, extract_mp3
 from src.openai_pipeline import OpenAIPipeline
 from src.presets import Preset
+from src.stt.base import EmptyTranscriptError
 from src.stt.transcribe import transcribe_file
 
 logger = logging.getLogger(__name__)
@@ -1594,6 +1595,7 @@ def run_once(
     cycle_retry_total = 0
     cycle_skipped_size = 0
     cycle_skipped_unmatched = 0
+    cycle_skipped_empty = 0
     cycle_folder_errors = 0
 
     for folder in config.folders:
@@ -1627,6 +1629,7 @@ def run_once(
         pending = [
             item for item in pending
             if item.get("booking_match") != drive.BOOKING_MATCH_NONE
+            and not item.get("transcript_empty")
         ]
         pending_before_size = len(pending)
         pending = _items_allowed_by_size(
@@ -1698,6 +1701,32 @@ def run_once(
                 cycle_retry_total += _retry_count_from_process_result(telemetry)
             except (RefreshError, AuthError):
                 raise
+            except EmptyTranscriptError:
+                # No speech is not a failure: the same audio comes back empty on every
+                # retry, so park it instead of alerting and holding the cycle forever.
+                cycle_skipped_empty += 1
+                file_name = item.get("file", {}).get("name")
+                try:
+                    drive.set_file_app_properties(
+                        service,
+                        item["file"]["id"],
+                        {drive.TRANSCRIPT_EMPTY_PROPERTY: "true"},
+                    )
+                except (RefreshError, AuthError):
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Failed to mark %s in folder %s as having no speech; will "
+                        "retry next cycle",
+                        file_name, folder_id,
+                    )
+                else:
+                    logger.info(
+                        "Skipping %s in folder %s: the transcript is empty (no "
+                        "speech); marked so it is not reconsidered (undo with "
+                        "`gdstt process <file-id>`)",
+                        file_name, folder_id,
+                    )
             except Exception as exc:
                 cycle_failed += 1
                 cycle_retry_total += _retry_count_from_exception(exc)
@@ -1715,7 +1744,8 @@ def run_once(
 
     logger.info(
         "Cycle summary [provider=%s, outcome=%s, folders=%d, pending=%d, processed=%d, failed=%d, "
-        "retry_total=%d, skipped_size=%d, skipped_unmatched=%d, folder_errors=%d, dry_run=%s, "
+        "retry_total=%d, skipped_size=%d, skipped_unmatched=%d, skipped_empty=%d, "
+        "folder_errors=%d, dry_run=%s, "
         "duration_s=%.3f]",
         config.stt_provider or "artifact-only",
         _cycle_outcome(
@@ -1730,6 +1760,7 @@ def run_once(
         cycle_retry_total,
         cycle_skipped_size,
         cycle_skipped_unmatched,
+        cycle_skipped_empty,
         cycle_folder_errors,
         dry_run,
         time.monotonic() - cycle_started_at,
