@@ -918,6 +918,7 @@ def _planfix_meta_lines(
 
 _MARKDOWN_LINK_RE = re.compile(r"\[(?P<text>[^\]]+)\]\((?P<url>[^)\s]+)\)")
 _MARKDOWN_BOLD_RE = re.compile(r"\*\*(?P<text>.+?)\*\*")
+_MARKDOWN_TASK_MARKER_RE = re.compile(r"^(?P<bullet>[ \t]*[-*+][ \t]+)\[[ xX]\][ \t]*", re.MULTILINE)
 
 
 def _summary_sections(
@@ -942,10 +943,12 @@ def _to_plain_text(markdown: str) -> str:
     in a transcript-derived document fails the whole ``sendMessage`` call, so the
     summary goes out unparsed and the markup has to come off here instead. Headings
     keep their title, links become "text: url", bold loses its asterisks; list dashes
-    stay, because they read fine as plain text.
+    stay, because they read fine as plain text, but a task's `[ ]` checkbox does not
+    render in Telegram and comes off.
     """
+    text = _MARKDOWN_TASK_MARKER_RE.sub(lambda m: m.group("bullet"), markdown)
     text = _MARKDOWN_LINK_RE.sub(
-        lambda m: f"{m.group('text')}: {m.group('url')}", markdown
+        lambda m: f"{m.group('text')}: {m.group('url')}", text
     )
     text = _MARKDOWN_HEADING_RE.sub(lambda m: m.group("title"), text)
     return _MARKDOWN_BOLD_RE.sub(lambda m: m.group("text"), text)

@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+
+### Features
+
+- Post call summaries to a folder's Telegram chat
+
 ## v0.9.0 - 2026-08-14
 
 ### Features
