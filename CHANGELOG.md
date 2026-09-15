@@ -7,6 +7,10 @@
 
 - Post call summaries to a folder's Telegram chat
 
+### Bug Fixes
+
+- Drop task checkboxes from the Telegram summary
+
 ## v0.9.0 - 2026-08-14
 
 ### Features
