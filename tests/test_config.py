@@ -2097,6 +2097,191 @@ def test_yaml_google_back_compat_data_dir_fallback(tmp_path):
     assert cfg.google_token_file is None
 
 
+# --- delegation: a service account, and folders that carry only an e-mail ----
+
+
+_SERVICE_ACCOUNT = {
+    "type": "service_account",
+    "client_email": "reader@project.iam.gserviceaccount.com",
+    "client_id": "123456789",
+    "private_key": "-----BEGIN PRIVATE KEY----- x -----END PRIVATE KEY-----",
+}
+
+
+def _delegated_config(folders, **google):
+    return {
+        "stt": {"provider": "disabled"},
+        "presets": _disabled_builtins(),
+        "folders": folders,
+        "google": google,
+    }
+
+
+def test_yaml_google_inline_service_account(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _delegated_config(
+            [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+        ),
+    )
+
+    assert cfg.google_service_account == _SERVICE_ACCOUNT
+    assert cfg.google_service_account_file is None
+    assert cfg.uses_delegation is True
+
+
+def test_yaml_google_service_account_file_resolves_relative(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _delegated_config(
+            [{"email": "one@example.com"}], service_account_file="secrets/sa.json"
+        ),
+    )
+
+    assert cfg.google_service_account is None
+    assert cfg.google_service_account_file == tmp_path / "secrets" / "sa.json"
+    assert cfg.uses_delegation is True
+
+
+def test_yaml_google_service_account_both_inline_and_file_fails(tmp_path):
+    with pytest.raises(ValueError, match="both set"):
+        _load_config(
+            tmp_path,
+            _delegated_config(
+                [{"email": "one@example.com"}],
+                service_account=_SERVICE_ACCOUNT,
+                service_account_file="sa.json",
+            ),
+        )
+
+
+def test_without_a_service_account_nothing_is_delegated(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": _disabled_builtins(),
+            "folders": [{"folder_id": "f1", "email": "one@example.com"}],
+        },
+    )
+
+    assert cfg.uses_delegation is False
+    assert cfg.google_service_account is None
+
+
+def test_a_folder_may_carry_only_an_email_when_delegating(tmp_path):
+    """The whole point: onboarding is one address, and the folder is found later."""
+    cfg = _load_config(
+        tmp_path,
+        _delegated_config(
+            [{"email": "one@example.com"}, {"email": "two@example.com", "name": "Two"}],
+            service_account=_SERVICE_ACCOUNT,
+        ),
+    )
+
+    assert [(f.folder_id, f.email, f.name) for f in cfg.folders] == [
+        ("", "one@example.com", ""),
+        ("", "two@example.com", "Two"),
+    ]
+
+
+def test_a_folder_without_an_id_needs_a_service_account(tmp_path):
+    """Without delegation there is no way to find the folder, so this must not load."""
+    with pytest.raises(ValueError, match="folder_id"):
+        _load_config(
+            tmp_path,
+            {
+                "stt": {"provider": "disabled"},
+                "presets": _disabled_builtins(),
+                "folders": [{"email": "one@example.com"}],
+            },
+        )
+
+
+def test_a_delegated_folder_without_an_id_needs_an_email(tmp_path):
+    with pytest.raises(ValueError, match="email"):
+        _load_config(
+            tmp_path,
+            _delegated_config([{"name": "No address"}], service_account=_SERVICE_ACCOUNT),
+        )
+
+
+def test_two_delegated_folders_may_not_repeat_an_email(tmp_path):
+    """Both would resolve to the same folder, and every file in it to one of them."""
+    with pytest.raises(ValueError, match="repeats"):
+        _load_config(
+            tmp_path,
+            _delegated_config(
+                [{"email": "one@example.com"}, {"email": "one@example.com"}],
+                service_account=_SERVICE_ACCOUNT,
+            ),
+        )
+
+
+def test_the_same_email_may_still_hold_two_pinned_folders(tmp_path):
+    """A pinned id says which folder is meant, so the address may repeat."""
+    cfg = _load_config(
+        tmp_path,
+        _delegated_config(
+            [
+                {"folder_id": "f1", "email": "one@example.com"},
+                {"folder_id": "f2", "email": "one@example.com"},
+            ],
+            service_account=_SERVICE_ACCOUNT,
+        ),
+    )
+
+    assert [f.folder_id for f in cfg.folders] == ["f1", "f2"]
+
+
+def test_meet_folder_names_default_to_the_one_meet_uses(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _delegated_config(
+            [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+        ),
+    )
+
+    assert cfg.meet_folder_names == ("Google Meet",)
+
+
+def test_meet_folder_names_can_be_overridden(tmp_path):
+    data = _delegated_config(
+        [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+    )
+    data["meet"] = {"folder_names": ["Записи Meet", "Google Meet"]}
+
+    cfg = _load_config(tmp_path, data)
+
+    assert cfg.meet_folder_names == ("Записи Meet", "Google Meet")
+
+
+def test_an_empty_meet_folder_names_list_is_rejected(tmp_path):
+    """An empty list would resolve every employee to nothing, silently."""
+    data = _delegated_config(
+        [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+    )
+    data["meet"] = {"folder_names": []}
+
+    with pytest.raises(ValueError, match="meet.folder_names"):
+        _load_config(tmp_path, data)
+
+
+def test_a_service_account_key_is_masked_in_a_config_dump(tmp_path):
+    """`config get` prints the whole config; a private key must not be in it."""
+    config_file = write_config(
+        tmp_path,
+        _delegated_config(
+            [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+        ),
+    )
+
+    dumped = config_get(None, config_path=config_file)
+
+    assert "BEGIN PRIVATE KEY" not in dumped
+    assert "reader@project.iam.gserviceaccount.com" in dumped
+
+
 def test_yaml_google_credentials_both_inline_and_file_fails(tmp_path):
     config_file = tmp_path / "config.yml"
     _write_yaml(

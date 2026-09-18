@@ -261,7 +261,30 @@ class Config:
     google_token: dict | None = None
     google_credentials_file: Path | None = None
     google_token_file: Path | None = None
+    # A service account key, inline or on disk. Its presence is what turns on
+    # delegation: each folder is then read while impersonating the employee that
+    # owns it, instead of through one shared user token. The OAuth keys above stay
+    # in use for every folder that is not delegated.
+    google_service_account: dict | None = None
+    google_service_account_file: Path | None = None
+    # The folder names Google Meet gives its recordings root. Only the current one by
+    # default: the legacy layouts (``Meet Recordings``, ``Meet <n> - <person>``) hold
+    # no meetings, so matching them would only add candidates to choose between.
+    meet_folder_names: tuple[str, ...] = ("Google Meet",)
     config_file: Path | None = None
+
+    @property
+    def uses_delegation(self) -> bool:
+        """Whether a service account is configured, i.e. folders may be resolved.
+
+        A property rather than a flag in the YAML: an operator who has supplied a key
+        has already said everything needed, and a second switch would only create the
+        state where the key is present and ignored.
+        """
+        return (
+            self.google_service_account is not None
+            or self.google_service_account_file is not None
+        )
 
     def folder_by_id(self, folder_id: str) -> EmployeeFolder | None:
         """Return the folder with ``folder_id``, or None when it isn't configured."""
@@ -317,11 +340,18 @@ def _parse_config_yaml(text: str) -> object:
     return yaml.load(text, Loader=UniqueKeyLoader)
 
 
-def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
+def _parse_folders(raw: object, *, delegated: bool = False) -> tuple[EmployeeFolder, ...]:
     """Parse the ``folders:`` block into ``EmployeeFolder`` entries.
 
-    Each entry must be a mapping carrying a non-empty, unique ``folder_id``; ``name``,
-    ``email`` and ``telegram`` are optional and default to empty strings.
+    An entry is a mapping; ``name``, ``email`` and ``telegram`` are optional and
+    default to empty strings.
+
+    ``folder_id`` is required unless a service account is configured (``delegated``),
+    in which case an entry may instead carry just an ``email``: the folder is then
+    resolved at run time by impersonating that employee, which is the only way to
+    survive Meet abandoning a shared recordings root (see
+    ``docs/meet-recordings-folder.md``). Such an entry keeps an empty ``folder_id``
+    until it is resolved.
     """
     if raw is None:
         return ()
@@ -338,9 +368,26 @@ def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
                 f"got: {entry!r}"
             )
         folder_id = _yaml_str(entry.get("folder_id"))
+        email = _yaml_str(entry.get("email"))
         if not folder_id:
-            raise ValueError(f"folders[{index}] must define a non-empty folder_id")
-        if any(folder.folder_id == folder_id for folder in folders):
+            if not delegated:
+                raise ValueError(f"folders[{index}] must define a non-empty folder_id")
+            if not email:
+                raise ValueError(
+                    f"folders[{index}] must define either a folder_id or an email; "
+                    "with a service account an email is enough, and the folder is "
+                    "found by impersonating that employee"
+                )
+            if any(
+                not folder.folder_id and folder.email == email for folder in folders
+            ):
+                # Both entries resolve to the same folder, and folder_by_id would
+                # attribute every file in it to whichever was listed first.
+                raise ValueError(
+                    f"folders[{index}] repeats email {email!r}; "
+                    "each employee must be listed once"
+                )
+        elif any(folder.folder_id == folder_id for folder in folders):
             # Otherwise the folder is polled once per entry and folder_by_id silently
             # attributes every file in it to whichever employee was listed first.
             raise ValueError(
@@ -351,7 +398,7 @@ def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
             EmployeeFolder(
                 folder_id=folder_id,
                 name=_yaml_str(entry.get("name")),
-                email=_yaml_str(entry.get("email")),
+                email=email,
                 telegram=_yaml_str(entry.get("telegram")),
                 since=_since_text(
                     entry.get("since"), source=f"folders[{index}].since"
@@ -690,6 +737,51 @@ def _resolve_relative_to(raw: str, base: Path) -> Path:
     return base / path
 
 
+def _parse_meet_folder_names(raw: object) -> tuple[str, ...]:
+    """Read ``meet.folder_names``, or the single name Meet uses today.
+
+    An empty list is refused rather than accepted as "match nothing": it would
+    resolve every delegated employee to no folder at all, and the cycle would keep
+    reporting success while transcribing nothing -- the exact failure this whole area
+    exists to remove.
+    """
+    meet = _as_mapping(raw, "meet")
+    value = meet.get("folder_names")
+    if value is None:
+        return ("Google Meet",)
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise ValueError(f"meet.folder_names must be a list of names, got: {value!r}")
+    names = tuple(name for name in (_yaml_str(item) for item in value) if name)
+    if not names:
+        raise ValueError("meet.folder_names must name at least one folder")
+    return names
+
+
+def _resolve_service_account(
+    google: dict,
+    base: Path | None,
+) -> tuple[dict | None, Path | None]:
+    """Resolve ``google.service_account`` / ``service_account_file``.
+
+    Same inline-first shape as the OAuth pair, and the same refusal to accept both:
+    a key that is read from one place while an operator edits the other is the kind
+    of ambiguity that only surfaces as an authorization failure in production.
+    """
+    inline = google.get("service_account")
+    if inline is not None and not isinstance(inline, dict):
+        raise ValueError("google.service_account must be a mapping in " + CONFIG_FILE_NAME)
+    path_raw = _yaml_str(google.get("service_account_file"))
+    if inline is not None and path_raw:
+        raise ValueError(
+            "google.service_account and google.service_account_file are both set; "
+            "use an inline key or a file, not both."
+        )
+    if not path_raw:
+        return inline, None
+    path = _resolve_relative_to(path_raw, base) if base is not None else Path(path_raw)
+    return None, path
+
+
 def _resolve_google_auth(
     google: dict,
     base: Path | None,
@@ -972,12 +1064,20 @@ def _config_from_yaml(
         google_credentials_file,
         google_token_file,
     ) = _resolve_google_auth(google, base)
+    google_service_account, google_service_account_file = _resolve_service_account(
+        google, base
+    )
+    meet_folder_names = _parse_meet_folder_names(raw.get("meet"))
 
     # Clean break: a config still on the old flat list must be rewritten by hand so
     # each folder gains its employee, rather than silently polling nameless folders.
     if "folder_ids" in raw:
         raise ValueError(FOLDER_IDS_MIGRATION_ERROR)
-    folders = _parse_folders(raw.get("folders"))
+    folders = _parse_folders(
+        raw.get("folders"),
+        delegated=google_service_account is not None
+        or google_service_account_file is not None,
+    )
     _validate_call_booking(
         enabled=call_booking_enabled,
         token=call_booking_token,
@@ -1175,6 +1275,9 @@ def _config_from_yaml(
         google_token=google_token,
         google_credentials_file=google_credentials_file,
         google_token_file=google_token_file,
+        google_service_account=google_service_account,
+        google_service_account_file=google_service_account_file,
+        meet_folder_names=meet_folder_names,
         config_file=config_file,
     )
 
@@ -1572,6 +1675,12 @@ def _google_to_yaml_dict(config: Config, config_file: Path | None) -> dict:
         block["token"] = config.google_token
     elif config.google_token_file is not None:
         block["token_file"] = _relpath_for_config(config.google_token_file, config_file)
+    if config.google_service_account is not None:
+        block["service_account"] = config.google_service_account
+    elif config.google_service_account_file is not None:
+        block["service_account_file"] = _relpath_for_config(
+            config.google_service_account_file, config_file
+        )
     return block
 
 
@@ -1691,6 +1800,7 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "task_url": config.planfix_task_url,
             "ignore_telegram_when_planfix": config.planfix_ignore_telegram_when_planfix,
         },
+        "meet": {"folder_names": list(config.meet_folder_names)},
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
         # the prompt text stays owned by the .md assets; disabled built-ins (e.g.
@@ -1863,6 +1973,10 @@ MASKED_LEAF_KEYS: frozenset[str] = frozenset(
         "api_key",
         "bot_token",
         "authorization_token",
+        # A service account key: whoever holds it can read every Drive the domain
+        # authorized it for, so it must never reach terminal scrollback or CI logs.
+        "private_key",
+        "private_key_id",
     }
 )
 MASK = "***"
