@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TextIO
 
@@ -15,6 +16,7 @@ from src import (
     change_cursor,
     delegation,
     drive,
+    meet_api,
     meet_mark,
     meta_doc,
 )
@@ -626,12 +628,72 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             f"an employee Meet refuses is {config.meet_fallback}"
         )
     print(f"since: run.since={config.run_since or 'unset, every recording in scope'}")
+    meet_since = _meet_window(config) if config.run_discovery == "meet" else None
     for folder in config.folders:
         folder_service = fleet.service_for(folder.folder_id)
         if folder.email:
             print(f"Employee {folder.email}: {_describe_employee(folder)}")
         _print_folder_diagnosis(folder_service, folder.folder_id)
         _print_root_sharing(folder_service, folder.folder_id)
+        if meet_since is not None and folder.email:
+            _print_meet_health(config, fleet, folder, meet_since)
+
+
+def _meet_window(config) -> datetime:
+    """The moment doctor asks Meet about: the saved mark, or the first-look window."""
+    mark = meet_mark.read(meet_mark.path_for(config.data_dir))
+    if mark is not None:
+        return mark
+    return datetime.now(timezone.utc) - timedelta(hours=config.meet_first_look_hours)
+
+
+def _print_meet_health(config, fleet, folder, since: datetime) -> None:
+    """Whether Meet answers for this employee, and what it has to say.
+
+    The counts are the whole diagnosis: conferences answered, how many recorded, how
+    many of those Meet has finished writing, and how many already have a call
+    document beside them. A mode that returns nothing looks exactly like a quiet
+    week, so "the API answered, and here is what it said" is the thing to print.
+    """
+    try:
+        service = auth.build_meet_service(config=config, subject=folder.email)
+        conferences = meet_api.conferences_since(service, since)
+    except (auth.AuthError, meet_api.MeetError) as exc:
+        print(f"  Meet: UNREACHABLE -- {exc}")
+        return
+    recorded = [c for c in conferences if c.recordings]
+    ready = [r for c in recorded for r in c.recordings if r.ready]
+    waiting = [r for c in recorded for r in c.recordings if not r.ready]
+    running = [c for c in conferences if not c.ended]
+    print(
+        f"  Meet: {len(conferences)} conference(s) since {since.isoformat(timespec='seconds')}, "
+        f"{len(recorded)} recorded, {len(ready)} file(s) ready, {len(waiting)} still being written"
+    )
+    if running:
+        print(f"  Meet: {len(running)} still in progress, holding the mark")
+    if not ready:
+        return
+    service = fleet.service_for(folder.folder_id)
+    done = 0
+    unreadable = 0
+    for recording in ready:
+        try:
+            parents, _ = drive.file_placement(service, recording.file_id)
+            items = [
+                item
+                for parent in parents
+                for item in drive.list_folder_state(service, parent)
+                if item["file"]["id"] == recording.file_id
+            ]
+        except Exception as exc:  # noqa: BLE001 - a diagnosis says what it could not see
+            unreadable += 1
+            logger.debug("Could not read a recording Meet named: %s", exc)
+            continue
+        if items and items[0].get("stt_id"):
+            done += 1
+    print(f"  Meet: {done} of {len(ready)} already processed")
+    if unreadable:
+        print(f"  Meet: {unreadable} recording(s) this account cannot open")
 
 
 def cmd_config_init(args: argparse.Namespace) -> None:

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from src import change_cursor, cli, meet_mark
+from src import change_cursor, cli, delegation, meet_mark
 from src.auth import AuthError
 from src.call_booking import CallBooking, append
 from src.config import EmployeeFolder
@@ -2139,3 +2139,103 @@ def test_run_once_accepts_the_meet_mode(mocker, tmp_path):
     cli.main(["run-once", "--mode", "meet"])
 
     assert run_once.call_args.kwargs["mode"] == "meet"
+
+
+def _meet_doctor(mocker, tmp_path, **overrides):
+    cfg = _meet_config(mocker, tmp_path, **overrides)
+    cfg = dataclasses.replace(
+        cfg, folders=(EmployeeFolder(folder_id="folderA", email="one@example.com"),)
+    )
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    mocker.patch("src.cli.delegation.shared_service", return_value=MagicMock())
+    mocker.patch(
+        "src.cli.delegation.resolve",
+        side_effect=lambda config, fallback, on_error=None: delegation.Fleet(
+            config=config, fallback=fallback, services={"folderA": MagicMock()}
+        ),
+    )
+    mocker.patch("src.cli._print_folder_diagnosis")
+    mocker.patch("src.cli._print_root_sharing")
+    return cfg
+
+
+def _meet_conference(recordings=(), ended=True):
+    return SimpleNamespace(
+        name="conferenceRecords/c1",
+        recordings=tuple(recordings),
+        ended=ended,
+    )
+
+
+def _meet_recording(ready=True, file_id="file-1"):
+    return SimpleNamespace(file_id=file_id, ready=ready, state="FILE_GENERATED")
+
+
+def test_doctor_counts_what_meet_answered(mocker, capsys, tmp_path):
+    """A mode that returns nothing looks like a quiet week; the counts are the diagnosis."""
+    _meet_doctor(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_meet_service", return_value=MagicMock())
+    mocker.patch(
+        "src.cli.meet_api.conferences_since",
+        return_value=[
+            _meet_conference([_meet_recording()]),
+            _meet_conference([_meet_recording(ready=False)]),
+            _meet_conference(),
+        ],
+    )
+    mocker.patch("src.cli.drive.file_placement", return_value=(["folder-1"], "one@example.com"))
+    mocker.patch(
+        "src.cli.drive.list_folder_state",
+        return_value=[{"file": {"id": "file-1"}, "stt_id": "s1"}],
+    )
+
+    cli.main(["doctor", "--drive"])
+
+    out = capsys.readouterr().out
+    assert "3 conference(s)" in out
+    assert "2 recorded" in out
+    assert "1 file(s) ready" in out
+    assert "1 still being written" in out
+    assert "1 of 1 already processed" in out
+
+
+def test_doctor_translates_a_meet_refusal(mocker, capsys, tmp_path):
+    _meet_doctor(mocker, tmp_path)
+    mocker.patch(
+        "src.cli.auth.build_meet_service",
+        side_effect=AuthError("authorize meetings.space.readonly"),
+    )
+
+    cli.main(["doctor", "--drive"])
+
+    out = capsys.readouterr().out
+    assert "UNREACHABLE" in out
+    assert "meetings.space.readonly" in out
+
+
+def test_doctor_says_where_the_meet_mark_stands(mocker, capsys, tmp_path):
+    cfg = _meet_doctor(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_meet_service", return_value=MagicMock())
+    mocker.patch("src.cli.meet_api.conferences_since", return_value=[])
+    meet_mark.write(
+        meet_mark.path_for(cfg.data_dir), datetime(2026, 9, 18, 9, 30, tzinfo=timezone.utc)
+    )
+
+    cli.main(["doctor", "--drive"])
+
+    out = capsys.readouterr().out
+    assert "Meet mark:" in out
+    assert "2026-09-18T09:30" in out
+    assert "waits 24h" in out
+
+
+def test_doctor_without_meet_mode_asks_meet_nothing(mocker, capsys, tmp_path):
+    """The diagnosis costs requests; a deployment that walks must not pay for them."""
+    cfg = _meet_doctor(mocker, tmp_path)
+    mocker.patch("src.cli.load_config", return_value=dataclasses.replace(cfg, run_discovery="walk"))
+    asked = mocker.patch("src.cli.auth.build_meet_service")
+
+    cli.main(["doctor", "--drive"])
+
+    asked.assert_not_called()
+    assert "Meet mark:" not in capsys.readouterr().out
