@@ -254,3 +254,222 @@ def test_one_conference_failing_does_not_lose_the_others():
     assert found[0].unreadable is True
     assert found[0].recordings == ()
     assert found[1].recordings[0].file_id == "file-1"
+
+
+# --- who was in the call ------------------------------------------------------
+
+
+def _attendance_service(
+    participants: list[dict],
+    sessions: dict[str, list[dict]] | None = None,
+    transcripts: list[dict] | None = None,
+    entries: dict[str, list[dict]] | None = None,
+) -> MagicMock:
+    sessions = sessions or {}
+    entries = entries or {}
+    service = MagicMock()
+    records = MagicMock()
+    service.conferenceRecords.return_value = records
+    calls: list[dict] = []
+    service.calls = calls
+
+    def paged(items_for, key):
+        def listing(**kwargs):
+            calls.append(dict(kwargs, resource=key))
+            request = MagicMock()
+            request.execute.return_value = {key: items_for(kwargs.get("parent", ""))}
+            return request
+
+        return listing
+
+    participants_resource = MagicMock()
+    records.participants.return_value = participants_resource
+    participants_resource.list.side_effect = paged(lambda _: participants, "participants")
+    sessions_resource = MagicMock()
+    participants_resource.participantSessions.return_value = sessions_resource
+    sessions_resource.list.side_effect = paged(
+        lambda parent: sessions.get(parent, []), "participantSessions"
+    )
+
+    transcripts_resource = MagicMock()
+    records.transcripts.return_value = transcripts_resource
+    transcripts_resource.list.side_effect = paged(lambda _: transcripts or [], "transcripts")
+    entries_resource = MagicMock()
+    transcripts_resource.entries.return_value = entries_resource
+    entries_resource.list.side_effect = paged(
+        lambda parent: entries.get(parent, []), "transcriptEntries"
+    )
+    return service
+
+
+def _participant(
+    name,
+    display="Someone",
+    *,
+    joined="2026-09-18T11:00:00Z",
+    left="2026-09-18T11:30:00Z",
+    kind="signed-in",
+    user="users/1",
+):
+    body = {"name": name, "earliestStartTime": joined, "latestEndTime": left}
+    if kind == "signed-in":
+        body["signedinUser"] = {"user": user, "displayName": display}
+    elif kind == "anonymous":
+        body["anonymousUser"] = {"displayName": display}
+    else:
+        body["phoneUser"] = {"displayName": display}
+    return body
+
+
+def test_one_participant_is_one_presence():
+    service = _attendance_service([_participant("conferenceRecords/c1/participants/p1")])
+
+    found = meet_api.attendance(service, "conferenceRecords/c1")
+
+    assert len(found.people) == 1
+    person = found.people[0]
+    assert person.display_name == "Someone"
+    assert person.user_id == "users/1"
+    assert person.windows == (
+        (
+            dt.datetime(2026, 9, 18, 11, 0, tzinfo=dt.timezone.utc),
+            dt.datetime(2026, 9, 18, 11, 30, tzinfo=dt.timezone.utc),
+        ),
+    )
+
+
+def test_a_latecomer_keeps_their_own_window():
+    """The whole point: a person who joined at minute 20 was not there at minute 5."""
+    service = _attendance_service(
+        [
+            _participant("conferenceRecords/c1/participants/p1", "Early"),
+            _participant(
+                "conferenceRecords/c1/participants/p2",
+                "Late",
+                joined="2026-09-18T11:20:00Z",
+                user="users/2",
+            ),
+        ]
+    )
+
+    found = meet_api.attendance(service, "conferenceRecords/c1")
+
+    late = next(p for p in found.people if p.display_name == "Late")
+    assert late.windows[0][0] == dt.datetime(2026, 9, 18, 11, 20, tzinfo=dt.timezone.utc)
+
+
+def test_one_session_costs_no_extra_request():
+    """A sessions call per participant per recording, for nothing, is the usual case."""
+    service = _attendance_service([_participant("conferenceRecords/c1/participants/p1")])
+
+    meet_api.attendance(service, "conferenceRecords/c1")
+
+    assert [call["resource"] for call in service.calls] == ["participants"]
+
+
+def test_a_rejoin_becomes_two_windows():
+    """Between the two they were not in the call, so nothing there can be theirs."""
+    service = _attendance_service(
+        [
+            {
+                "name": "conferenceRecords/c1/participants/p1",
+                "signedinUser": {"user": "users/1", "displayName": "In and out"},
+                "earliestStartTime": "2026-09-18T11:00:00Z",
+                "latestEndTime": "2026-09-18T11:30:00Z",
+            }
+        ],
+        sessions={
+            "conferenceRecords/c1/participants/p1": [
+                {"startTime": "2026-09-18T11:00:00Z", "endTime": "2026-09-18T11:05:00Z"},
+                {"startTime": "2026-09-18T11:25:00Z", "endTime": "2026-09-18T11:30:00Z"},
+            ]
+        },
+    )
+
+    found = meet_api.attendance(
+        service, "conferenceRecords/c1", sessions_for=lambda person: True
+    )
+
+    assert len(found.people[0].windows) == 2
+    assert found.people[0].windows[1][0] == dt.datetime(
+        2026, 9, 18, 11, 25, tzinfo=dt.timezone.utc
+    )
+
+
+def test_an_anonymous_guest_is_still_a_presence():
+    """They were in the room, which is the only question this answers."""
+    service = _attendance_service(
+        [_participant("conferenceRecords/c1/participants/p1", "Guest", kind="anonymous")]
+    )
+
+    found = meet_api.attendance(service, "conferenceRecords/c1")
+
+    assert found.people[0].kind == "anonymous"
+    assert found.people[0].user_id == ""
+    assert found.people[0].display_name == "Guest"
+
+
+def test_speech_is_not_read_unless_it_is_asked_for():
+    """The cycle only needs who was there; the words cost two more requests."""
+    service = _attendance_service([_participant("conferenceRecords/c1/participants/p1")])
+
+    found = meet_api.attendance(service, "conferenceRecords/c1")
+
+    assert all(call["resource"] != "transcripts" for call in service.calls)
+    assert found.people[0].spoke is False
+    assert found.speech_known is False
+
+
+def test_who_spoke_comes_from_the_entries_and_not_their_words():
+    service = _attendance_service(
+        [
+            _participant("conferenceRecords/c1/participants/p1", "Talker"),
+            _participant("conferenceRecords/c1/participants/p2", "Quiet", user="users/2"),
+        ],
+        transcripts=[{"name": "conferenceRecords/c1/transcripts/t1"}],
+        entries={
+            "conferenceRecords/c1/transcripts/t1": [
+                {
+                    "participant": "conferenceRecords/c1/participants/p1",
+                    "text": "words Meet heard wrong",
+                }
+            ]
+        },
+    )
+
+    found = meet_api.attendance(service, "conferenceRecords/c1", include_speech=True)
+
+    assert found.speech_known is True
+    assert {p.display_name: p.spoke for p in found.people} == {
+        "Talker": True,
+        "Quiet": False,
+    }
+
+
+def test_a_call_with_no_transcript_leaves_speech_unknown():
+    """Nobody spoke and nobody transcribed look alike; saying so is the difference."""
+    service = _attendance_service([_participant("conferenceRecords/c1/participants/p1")])
+
+    found = meet_api.attendance(service, "conferenceRecords/c1", include_speech=True)
+
+    assert found.speech_known is False
+    assert found.people[0].spoke is False
+
+
+def test_an_unreadable_conference_is_an_error_not_an_empty_room():
+    """Nobody was here and I could not find out lead to opposite decisions."""
+    service = _attendance_service([])
+    service.conferenceRecords.return_value.participants.return_value.list.side_effect = (
+        HttpError(MagicMock(status=403), b'{"error": {"message": "no"}}')
+    )
+
+    with pytest.raises(meet_api.MeetError):
+        meet_api.attendance(service, "conferenceRecords/c1")
+
+
+def test_an_empty_conference_is_an_empty_room():
+    service = _attendance_service([])
+
+    found = meet_api.attendance(service, "conferenceRecords/c1")
+
+    assert found.people == ()

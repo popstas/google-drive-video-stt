@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from googleapiclient.errors import HttpError
@@ -75,6 +76,192 @@ class MeetConference:
         anything. Only an ended conference with no recordings means nobody recorded.
         """
         return bool(self.end_time)
+
+
+@dataclass(frozen=True)
+class Presence:
+    """One participant, and when they were actually in the call.
+
+    ``windows`` is what makes this worth asking for: a person who joined twenty
+    minutes in was not there for the first twenty, so nothing said then can be
+    theirs. An open end (``None``) means the API did not say when they left, which
+    happens while a conference is still running.
+
+    The API gives a display name and an opaque user id, never an address -- there is
+    no scope here that maps one to the other. Matching a presence to a configured
+    employee is therefore done on the name, by the caller that knows the names.
+    """
+
+    display_name: str
+    user_id: str
+    windows: tuple[tuple[dt.datetime, dt.datetime | None], ...]
+    kind: str = "signed-in"
+    spoke: bool = False
+    # The participant resource, kept so speech can be matched back to them.
+    participant: str = ""
+
+
+@dataclass(frozen=True)
+class Attendance:
+    """Everyone the API says was in one conference.
+
+    ``speech_known`` is separate from every ``spoke`` flag on purpose: "nobody said
+    anything" and "nobody transcribed this call" look identical in a list of silent
+    people, and they mean opposite things to anything that decides on them.
+    """
+
+    conference: str
+    people: tuple[Presence, ...] = ()
+    speech_known: bool = False
+
+
+def _moment(text: str) -> dt.datetime | None:
+    """One of Meet's timestamps as an aware UTC datetime, or ``None``."""
+    if not text:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        logger.warning("Meet returned a time I cannot read: %r", text)
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def _identity(payload: dict) -> tuple[str, str, str]:
+    """Who this participant is: display name, user id, and what kind of join it was.
+
+    A dial-in or an anonymous guest has no account, and that is not a reason to leave
+    them out: they were in the room, which is the whole question here.
+    """
+    signed = payload.get("signedinUser") or {}
+    if signed:
+        return signed.get("displayName", "") or "", signed.get("user", "") or "", "signed-in"
+    anonymous = payload.get("anonymousUser") or {}
+    if anonymous:
+        return anonymous.get("displayName", "") or "", "", "anonymous"
+    phone = payload.get("phoneUser") or {}
+    return phone.get("displayName", "") or "", "", "phone"
+
+
+def _windows(
+    service, payload: dict, page_size: int, sessions_for: Callable[[dict], bool] | None
+) -> tuple[tuple[dt.datetime, dt.datetime | None], ...]:
+    """When this participant was in the call.
+
+    ``earliestStartTime`` and ``latestEndTime`` come free with the listing and are
+    right for anyone who joined once, which is the normal case. They are *generous*
+    for somebody who left and rejoined: the gap is inside the window. Asking for the
+    sessions closes the gap and costs one request per participant, so the caller
+    decides -- a decision that only tightens windows never makes a call look emptier
+    than it was, which is the direction a cost-saving rule must fail in.
+    """
+    if sessions_for is not None and sessions_for(payload):
+        sessions = _pages(
+            service.conferenceRecords().participants().participantSessions().list,
+            "participantSessions",
+            page_size,
+            parent=payload.get("name", ""),
+        )
+        found = []
+        for session in sessions:
+            start = _moment(session.get("startTime", ""))
+            if start is not None:
+                found.append((start, _moment(session.get("endTime", ""))))
+        if found:
+            return tuple(sorted(found))
+    start = _moment(payload.get("earliestStartTime", ""))
+    if start is None:
+        return ()
+    return ((start, _moment(payload.get("latestEndTime", ""))),)
+
+
+def _who_spoke(service, conference: str, page_size: int) -> tuple[set[str], bool]:
+    """The participants the transcript attributes speech to.
+
+    Only the ``participant`` of each entry is read. Meet's words are not trustworthy
+    -- measured on this domain, every Russian call came back tagged ``en-US`` -- but
+    which account a turn belongs to does not come from speech recognition at all.
+
+    Returns ``(speakers, known)``. ``known`` is false when there is no transcript, or
+    it holds no entries yet: Meet can report a transcript before its entries are
+    readable, and a confident empty answer there would name everybody as silent.
+    """
+    try:
+        transcripts = _pages(
+            service.conferenceRecords().transcripts().list,
+            "transcripts",
+            page_size,
+            parent=conference,
+        )
+        speakers: set[str] = set()
+        entries = 0
+        for transcript in transcripts:
+            for entry in _pages(
+                service.conferenceRecords().transcripts().entries().list,
+                "transcriptEntries",
+                page_size,
+                parent=transcript.get("name", ""),
+            ):
+                entries += 1
+                participant = entry.get("participant")
+                if participant:
+                    speakers.add(participant)
+        return speakers, entries > 0
+    except HttpError as exc:
+        # Who was there is the answer that matters; who spoke is a refinement, and
+        # losing it must not lose the rest.
+        logger.warning("Could not read who spoke in %s: %s", conference, _message(exc))
+        return set(), False
+
+
+def attendance(
+    service,
+    conference: str,
+    *,
+    include_speech: bool = False,
+    sessions_for: Callable[[dict], bool] | None = None,
+    page_size: int = PAGE_SIZE,
+) -> Attendance:
+    """Who was in ``conference``, and when.
+
+    One request in the normal case. ``include_speech`` costs two more and is only
+    worth it for a call being processed, not for every call in a cycle.
+
+    A failure to list the participants is raised, never returned as an empty room:
+    "nobody was here" and "I could not find out" lead to opposite decisions, and a
+    caller that cannot tell them apart will eventually skip a real call.
+    """
+    try:
+        payloads = _pages(
+            service.conferenceRecords().participants().list,
+            "participants",
+            page_size,
+            parent=conference,
+        )
+    except HttpError as exc:
+        raise _translate(exc) from exc
+
+    speakers: set[str] = set()
+    known = False
+    if include_speech:
+        speakers, known = _who_spoke(service, conference, page_size)
+
+    people = []
+    for payload in payloads:
+        display_name, user_id, kind = _identity(payload)
+        people.append(
+            Presence(
+                display_name=display_name,
+                user_id=user_id,
+                windows=_windows(service, payload, page_size, sessions_for),
+                kind=kind,
+                spoke=payload.get("name", "") in speakers,
+                participant=payload.get("name", "") or "",
+            )
+        )
+    return Attendance(conference=conference, people=tuple(people), speech_known=known)
 
 
 def _rfc3339(moment: dt.datetime) -> str:
