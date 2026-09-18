@@ -13,6 +13,7 @@ from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
+from googleapiclient.errors import HttpError
 
 from src import delegation, main, meet_api, meet_mark
 from src.auth import AuthError
@@ -598,3 +599,73 @@ def test_a_conference_still_running_inside_the_wait_still_holds(mocker, tmp_path
     found = main._discover_by_meet(_fleet(config), config)
 
     assert found.meet_mark == dt.datetime(2026, 9, 18, 11, 45, tzinfo=dt.timezone.utc)
+
+
+def test_a_recording_this_account_cannot_open_does_not_freeze_the_mark(mocker, tmp_path):
+    """Meet lists calls the employee only attended; some of those files are not ours.
+
+    A refusal that propagated would count as a folder error and hold the mark at that
+    conference every cycle, for work nobody here will ever do."""
+    _ask(mocker, [_conference(recordings=[_recording("file-1")])])
+    mocker.patch(
+        "src.main.drive.file_placement",
+        side_effect=HttpError(MagicMock(status=403), b'{"error": {"message": "no"}}'),
+    )
+    listed = mocker.patch("src.main.drive.list_folder_state")
+    config = _config(["one@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert found.folder_errors == 0
+    assert found.meet_mark == NOW
+    listed.assert_not_called()
+
+
+def test_a_refusal_that_is_not_about_access_is_still_a_failure(mocker, tmp_path):
+    """A 500 from Drive is not "not ours"; it is unfinished work and must hold."""
+    _ask(mocker, [_conference(recordings=[_recording("file-1")])])
+    mocker.patch(
+        "src.main.drive.file_placement",
+        side_effect=HttpError(MagicMock(status=500), b'{"error": {"message": "boom"}}'),
+    )
+    mocker.patch("src.main.notify.notify_error")
+    saved = dt.datetime(2026, 9, 18, 9, 30, tzinfo=dt.timezone.utc)
+    meet_mark.write(meet_mark.path_for(tmp_path), saved)
+    config = _config(["one@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert found.folder_errors == 1
+    assert found.meet_mark == saved
+
+
+def test_a_retry_does_not_lose_what_the_first_attempt_placed(mocker, tmp_path):
+    """Placement runs inside the retry wrapper, so it must be safe to run twice."""
+    _ask(
+        mocker,
+        [
+            _conference(name="conferenceRecords/a", recordings=[_recording("file-1")]),
+            _conference(name="conferenceRecords/b", recordings=[_recording("file-2")]),
+        ],
+    )
+    calls = {"n": 0}
+
+    def flaky(service, file_id):
+        calls["n"] += 1
+        if file_id == "file-2" and calls["n"] == 2:
+            raise HttpError(MagicMock(status=500), b'{"error": {"message": "boom"}}')
+        return (["folder-" + file_id[-1]], "one@example.com")
+
+    mocker.patch("src.main.drive.file_placement", side_effect=flaky)
+    listed = mocker.patch(
+        "src.main.drive.list_folder_state", side_effect=lambda svc, fid: [_item(fid, "a.mp4")]
+    )
+    config = _config(["one@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert found.folder_errors == 0
+    assert sorted(call.args[1] for call in listed.call_args_list) == [
+        "folder-1",
+        "folder-2",
+    ]

@@ -2016,7 +2016,7 @@ def _meet_placements(
     folder_id: str,
     file_ids: list[str],
     seen: set[str],
-) -> tuple[dict[str, set[str]], int]:
+) -> tuple[dict[str, set[str]], int, set[str]]:
     """Which folders hold this employee's new recordings, and whose work each is.
 
     A call between two watched employees is listed by both of their accounts, and Meet
@@ -2026,11 +2026,18 @@ def _meet_placements(
     employee is placed with its owner: that is the account whose Drive holds it, and
     whose artifacts should sit beside it.
 
-    A recording owned by nobody in the fleet is left alone and counted. The walk never
-    touches one either -- it reaches the employee only as a shortcut, and no path
-    follows shortcuts -- and processing it would mean writing artifacts into the Drive
-    of somebody this service was never given. Discovery finding more than the walk is
-    not a feature here; it is the difference the acceptance test exists to catch.
+    A recording owned by nobody in the fleet is left alone and counted. Meet lists the
+    conferences an employee attended as well as the ones they hosted (measured), so
+    these arrive routinely -- and the walk never touches one: it reaches the employee
+    only as a shortcut, and no path follows shortcuts. Processing it would mean
+    writing artifacts into the Drive of somebody this service was never given.
+    Discovery finding more than the walk is not a feature here; it is the difference
+    the acceptance test exists to catch.
+
+    ``seen`` is read, never written: this runs inside the transient-retry wrapper, and
+    a function that marked files as placed and then raised would lose them on the
+    retry that follows. The files it did place come back, and the caller records them
+    once the call as a whole succeeded.
     """
     owners = {
         folder.email.lower(): folder.folder_id
@@ -2039,19 +2046,31 @@ def _meet_placements(
     }
     service = fleet.service_for(folder_id)
     containers: dict[str, set[str]] = {}
+    placed: set[str] = set()
     outside = 0
     for file_id in file_ids:
-        if file_id in seen:
+        if file_id in seen or file_id in placed:
             continue
-        seen.add(file_id)
-        parents, owner = drive.file_placement(service, file_id)
+        try:
+            parents, owner = drive.file_placement(service, file_id)
+        except HttpError as exc:
+            if exc.resp.status not in (403, 404):
+                raise
+            # Refused outright: somebody else's recording of a call this employee was
+            # merely in, and not shared with them. Counting it as a failure would hold
+            # the mark at that conference every cycle, for work nobody here will ever
+            # do. It is deliberately not recorded as placed: another employee may be
+            # the one who owns it, and they can open it.
+            outside += 1
+            continue
+        placed.add(file_id)
         target = owners.get(owner.lower())
         if target is None:
             outside += 1
             continue
         for container in parents:
             containers.setdefault(target, set()).add(container)
-    return containers, outside
+    return containers, outside, placed
 
 
 def _meet_listing(fleet: delegation.Fleet, folder_id: str, containers: set[str]) -> list[dict]:
@@ -2130,7 +2149,7 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
         hold_at(unfinished)
         placement_retry_state = _RetryState()
         try:
-            placed, outside = _call_with_transient_retries(
+            placed, outside, newly_placed = _call_with_transient_retries(
                 lambda: _meet_placements(fleet, config, folder_id, files, seen_files),
                 description=f"find the folders Meet named for {folder_id}",
                 retry_state=placement_retry_state,
@@ -2144,6 +2163,7 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
             continue
         finally:
             retries += placement_retry_state.retry_count
+        seen_files |= newly_placed
         for target, containers in placed.items():
             wanted.setdefault(target, set()).update(containers)
         logger.info(
