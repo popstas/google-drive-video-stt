@@ -46,7 +46,11 @@
 
 ## Implementation steps
 
-### Task 1: the spike, read-only, before any code
+### Task 1: the spike, read-only, before any code -- DONE
+
+Answered in `docs/reports/2026-09-18-meet-api.md`: go as a mode, and the default only
+once question 2 below is measured and Task 7's comparison is equal. The questions it
+asked were:
 
 Against the real domain, once the admin authorizes the scope. Each question has an
 answer that decides part of the design:
@@ -65,8 +69,10 @@ answer that decides part of the design:
    when the scope is missing -- the message an operator will actually see?
 7. What are the quotas and page sizes?
 
-Output: `docs/reports/2026-XX-XX-meet-api.md`, and a go/no-go line at the top. A
-"no" here costs one afternoon and the plan stops.
+Question 2 is the one that came back unmeasured, and it is the one that decides
+whether this can ever be the default: a recording made by somebody outside the
+watched group reaches an employee only as a shortcut, which the walk finds and an
+API that lists only hosted conferences never would.
 
 ### Task 2: a client for the Meet API
 
@@ -80,10 +86,16 @@ Output: `docs/reports/2026-XX-XX-meet-api.md`, and a go/no-go line at the top. A
   the mark would move past a call whose recording was merely slow. The file id is
   either present or explicitly absent, so nothing downstream can mistake one for the
   other.
-- The same failure translation delegation already has: a missing scope names the
-  client id and the scope to authorize, not a raw 403.
-- Tests: the filter is built from `since`; paging; a recording still being written;
-  an employee with no conferences; the missing-scope message.
+- Pages of 100 (the documented maximum; the default is 25) until the token runs out.
+  Results arrive newest first, so in steady state that is one page.
+- Two failures translated, not one, because the spike hit both: a missing scope, which
+  fails at token time with `unauthorized_client` and must name the client id and the
+  scope to authorize; and the Meet API not being enabled in the service account's own
+  project, which fails with `403 SERVICE_DISABLED` and is what a new deployment meets
+  first. Neither may reach an operator as a raw error.
+- Tests: the filter is built from `since`; paging; a recording still being written
+  (`STARTED` and `ENDED` carry no destination, only `FILE_GENERATED` does); an
+  employee with no conferences; both failure messages.
 
 ### Task 3: a discovery mode
 
@@ -100,8 +112,14 @@ Output: `docs/reports/2026-XX-XX-meet-api.md`, and a go/no-go line at the top. A
   This is the rule the changes cursor already follows, for the same reason: a mark
   that advanced on "I looked" rather than "I finished" loses exactly the recordings
   that were slow to appear.
-- **But it may not be held for ever.** A conference with no recording at all -- nobody
-  pressed record -- holds nothing, there is no work to wait for. A recording whose
+- **A conference that has not ended yet holds the mark too.** It has no recording
+  because it is still happening, not because nobody recorded it: the spike measured
+  recordings starting some three seconds after the conference does, so "ended with no
+  recordings" is a reliable "nobody recorded", while "still open with no recordings"
+  means nothing yet. Releasing an open conference would move the mark past its start
+  time, and `start_time >= mark` would never return it again.
+- **But it may not be held for ever.** An *ended* conference with no recording at all
+  -- nobody pressed record -- holds nothing, there is no work to wait for. A recording whose
   file never materialises is waited for, and given up on after `meet.wait_hours`
   (default 24) with a line in the log, so a single failed recording cannot freeze
   discovery. This mirrors the bounded wait already applied to a video Drive never
@@ -122,8 +140,8 @@ Output: `docs/reports/2026-XX-XX-meet-api.md`, and a go/no-go line at the top. A
   archive.
 - Tests: nothing new costs one request per employee and returns nothing; a new
   recording becomes an item with its artifacts read; a conference whose file is not
-  ready holds the mark and is seen again next cycle; a conference with no recording
-  does not hold it; a recording still missing after `meet.wait_hours` releases it with
+  ready holds the mark and is seen again next cycle; a conference still in progress
+  holds it; an ended conference with no recording does not hold it; a recording still missing after `meet.wait_hours` releases it with
   a logged line; a missing mark starts from the first-look window and never earlier
   than `run.since`.
 
@@ -145,8 +163,13 @@ because only the organiser's folder holds the file.
 - `meet.fallback: walk | none`, default `walk`: when the API fails for an employee,
   that employee is walked this cycle. The failure is still logged and counted -- a
   fallback that hides the problem is how a service ends up silently paying twice.
+- **A failed employee holds the mark where it is.** The mark is one moment shared by
+  the whole fleet, so letting it advance on everybody else's work would put that
+  employee's conferences behind it for good -- the failure would cost recordings
+  rather than a cycle.
 - Tests: one employee's API failure walks only that employee; with `fallback: none`
-  it is an error and nothing else changes.
+  it is an error and nothing else changes; either way the mark does not move past the
+  moment that employee was last known good.
 
 ### Task 6: `doctor --drive` reports the new path
 
