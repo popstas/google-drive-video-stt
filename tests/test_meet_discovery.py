@@ -85,10 +85,9 @@ def _ask(mocker, conferences, *, error=None):
     )
 
 
-def _drive(mocker, *, parents=("folder-1",), items=None):
+def _drive(mocker, *, parents=("folder-1",), items=None, owner="one@example.com"):
     mocker.patch(
-        "src.main.drive.get_file_metadata",
-        return_value={"id": "file-1", "parents": list(parents)},
+        "src.main.drive.file_placement", return_value=(list(parents), owner)
     )
     return mocker.patch(
         "src.main.drive.list_folder_state",
@@ -374,7 +373,7 @@ def test_a_folder_that_cannot_be_listed_holds_the_mark(mocker, tmp_path):
     """The conferences were read, but their folders were not: that is unfinished work."""
     _ask(mocker, [_conference(recordings=[_recording()])])
     mocker.patch(
-        "src.main.drive.get_file_metadata", side_effect=RuntimeError("no access")
+        "src.main.drive.file_placement", side_effect=RuntimeError("no access")
     )
     mocker.patch("src.main.notify.notify_error")
     saved = dt.datetime(2026, 9, 18, 9, 30, tzinfo=dt.timezone.utc)
@@ -448,3 +447,96 @@ def test_a_dry_run_never_moves_the_mark(mocker, tmp_path):
     main.run_once(MagicMock(), config, mode="meet", dry_run=True)
 
     assert meet_mark.read(meet_mark.path_for(tmp_path)) is None
+
+
+# --- one conference, one piece of work ----------------------------------------
+#
+# A call between two watched employees is listed by both of their accounts, and Meet
+# hands both the same Drive file: the organiser's. Processing it twice would
+# transcribe one conversation twice and race two uploads into the same folder.
+
+
+def _placements(mocker, by_file):
+    """Drive answering "where does this file live, and whose is it"."""
+    return mocker.patch(
+        "src.main.drive.file_placement", side_effect=lambda service, file_id: by_file[file_id]
+    )
+
+
+def test_the_same_conference_from_two_employees_is_one_item(mocker, tmp_path):
+    _ask(mocker, [_conference(recordings=[_recording("file-1")])])
+    placed = _placements(mocker, {"file-1": (["folder-1"], "one@example.com")})
+    listed = mocker.patch(
+        "src.main.drive.list_folder_state", return_value=[_item("file-1", "call.mp4")]
+    )
+    config = _config(["one@example.com", "two@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert placed.call_count == 1
+    assert listed.call_count == 1
+    assert [(fid, [i["file"]["id"] for i in items]) for fid, items in found.listings] == [
+        ("f1", ["file-1"]),
+        ("f2", []),
+    ]
+
+
+def test_a_recording_is_attributed_to_whoever_owns_it(mocker, tmp_path):
+    """The owner's Drive is where the file lives, and where its artifacts must go."""
+    _ask(mocker, [_conference(recordings=[_recording("file-1")])])
+    _placements(mocker, {"file-1": (["folder-1"], "two@example.com")})
+    listed = mocker.patch(
+        "src.main.drive.list_folder_state", return_value=[_item("file-1", "call.mp4")]
+    )
+    config = _config(["one@example.com", "two@example.com"], tmp_path)
+    fleet = _fleet(config)
+    fleet.services["f2"] = MagicMock()
+
+    found = main._discover_by_meet(fleet, config)
+
+    assert [(fid, [i["file"]["id"] for i in items]) for fid, items in found.listings] == [
+        ("f1", []),
+        ("f2", ["file-1"]),
+    ]
+    assert listed.call_args.args == (fleet.service_for("f2"), "folder-1")
+
+
+def test_a_recording_owned_by_nobody_configured_stays_with_the_employee(mocker, tmp_path):
+    """Still one piece of work, attributed to the account that could see it."""
+    _ask(mocker, [_conference(recordings=[_recording("file-1")])])
+    _placements(mocker, {"file-1": (["folder-1"], "client@elsewhere.example")})
+    mocker.patch(
+        "src.main.drive.list_folder_state", return_value=[_item("file-1", "call.mp4")]
+    )
+    config = _config(["one@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert [(fid, [i["file"]["id"] for i in items]) for fid, items in found.listings] == [
+        ("f1", ["file-1"])
+    ]
+
+
+def test_an_owner_who_is_also_being_walked_is_not_listed_twice(mocker, tmp_path):
+    """The walk reads that whole folder; listing it here too would duplicate the work."""
+    mocker.patch("src.main.build_meet_service", return_value=MagicMock())
+    mocker.patch(
+        "src.main.meet_api.conferences_since",
+        side_effect=[
+            meet_api.MeetError("refused"),
+            [_conference(recordings=[_recording("file-1")])],
+        ],
+    )
+    _placements(mocker, {"file-1": (["folder-1"], "one@example.com")})
+    listed = mocker.patch("src.main.drive.list_folder_state")
+    walked = mocker.patch(
+        "src.main.drive.list_folder_tree_state", return_value=[_item("file-1", "call.mp4")]
+    )
+    mocker.patch("src.main.notify.notify_error")
+    config = _config(["one@example.com", "two@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    listed.assert_not_called()
+    assert [call.args[1] for call in walked.call_args_list] == ["f1"]
+    assert [fid for fid, _ in found.listings] == ["f2", "f1"]

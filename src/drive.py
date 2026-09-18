@@ -73,6 +73,28 @@ def get_file_metadata(service: Any, file_id: str) -> dict:
     )
 
 
+def file_placement(service: Any, file_id: str) -> tuple[list[str], str]:
+    """Where a file sits, and whose Drive it sits in.
+
+    Both answers in one request, because they are asked together: Meet hands back a
+    file id, and discovery needs the folder around it to read the artifacts and the
+    owner to decide whose recording it is. A call between two watched employees is
+    listed by both of their accounts, and the owner is what makes it one piece of
+    work instead of two.
+    """
+    metadata = (
+        service.files()
+        .get(
+            fileId=file_id,
+            fields="parents, owners(emailAddress)",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
+    owner = (metadata.get("owners") or [{}])[0].get("emailAddress", "") or ""
+    return list(metadata.get("parents") or []), owner
+
+
 def _next_page_token(response: Any) -> str | None:
     """The next page token, or ``None`` when there is not one.
 

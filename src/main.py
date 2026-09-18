@@ -2000,9 +2000,37 @@ def _meet_work(
     return files, held
 
 
-def _meet_listing(
-    fleet: delegation.Fleet, folder_id: str, file_ids: list[str]
-) -> list[dict]:
+def _meet_placements(
+    fleet: delegation.Fleet,
+    config: Config,
+    folder_id: str,
+    file_ids: list[str],
+    seen: set[str],
+) -> dict[str, set[str]]:
+    """Which folders hold this employee's new recordings, and whose work each is.
+
+    A call between two watched employees is listed by both of their accounts, and
+    Meet gives both the same Drive file -- the organiser's. Processing it twice would
+    transcribe one conversation twice and race two uploads into the same folder, so a
+    file already placed this cycle is skipped, and a file owned by another watched
+    employee is placed with its owner: that is the account whose Drive holds it, and
+    whose artifacts should sit beside it.
+    """
+    owners = {folder.email: folder.folder_id for folder in config.folders if folder.email}
+    service = fleet.service_for(folder_id)
+    containers: dict[str, set[str]] = {}
+    for file_id in file_ids:
+        if file_id in seen:
+            continue
+        seen.add(file_id)
+        parents, owner = drive.file_placement(service, file_id)
+        target = owners.get(owner, folder_id)
+        for container in parents:
+            containers.setdefault(target, set()).add(container)
+    return containers
+
+
+def _meet_listing(fleet: delegation.Fleet, folder_id: str, containers: set[str]) -> list[dict]:
     """The state of every meeting folder Meet says holds a new recording.
 
     Meet answers with a file, and everything downstream is keyed on the folder that
@@ -2012,14 +2040,8 @@ def _meet_listing(
     """
     service = fleet.service_for(folder_id)
     items: list[dict] = []
-    seen: set[str] = set()
-    for file_id in file_ids:
-        metadata = drive.get_file_metadata(service, file_id)
-        for container in metadata.get("parents") or []:
-            if container in seen:
-                continue
-            seen.add(container)
-            items.extend(drive.list_folder_state(service, container))
+    for container in sorted(containers):
+        items.extend(drive.list_folder_state(service, container))
     return items
 
 
@@ -2051,6 +2073,12 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
     retries = 0
     held: datetime | None = None
     fall_back_to_walk: list[EmployeeFolder] = []
+    # Which folders each employee's work lives in, and every recording already placed
+    # this cycle. Both are fleet-wide: one conference between two employees must
+    # become one piece of work, not two.
+    wanted: dict[str, set[str]] = {}
+    seen_files: set[str] = set()
+    asked: list[str] = []
 
     def hold_at(moment: datetime | None) -> None:
         nonlocal held
@@ -2076,30 +2104,66 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
             continue
         files, unfinished = _meet_work(conferences, config, now)
         hold_at(unfinished)
+        placement_retry_state = _RetryState()
+        try:
+            placed = _call_with_transient_retries(
+                lambda: _meet_placements(fleet, config, folder_id, files, seen_files),
+                description=f"find the folders Meet named for {folder_id}",
+                retry_state=placement_retry_state,
+            )
+        except Exception as exc:  # noqa: BLE001 - counted and reported, never swallowed
+            folder_errors += 1
+            # The conferences were read but their files were not placed, so this
+            # employee has unfinished work whatever the conferences said.
+            hold_at(mark)
+            _notify_listing_failure(f"the recordings of {folder.email}", exc, config)
+            continue
+        finally:
+            retries += placement_retry_state.retry_count
+        for target, containers in placed.items():
+            wanted.setdefault(target, set()).update(containers)
+        logger.info(
+            "Meet named %d conference(s) for %s [files=%d, folders=%d]",
+            len(conferences),
+            folder_id,
+            len(files),
+            sum(len(ids) for ids in placed.values()),
+        )
+        asked.append(folder_id)
+
+    for folder_id in asked:
+        containers = wanted.pop(folder_id, set())
         listing_retry_state = _RetryState()
         try:
             items = _call_with_transient_retries(
-                lambda: _meet_listing(fleet, folder_id, files),
+                lambda: _meet_listing(fleet, folder_id, containers),
                 description=f"list the folders Meet named for {folder_id}",
                 retry_state=listing_retry_state,
             )
         except Exception as exc:  # noqa: BLE001 - counted and reported, never swallowed
             folder_errors += 1
-            # The conferences were read but their folders were not, so this employee
-            # has unfinished work whatever the conferences said.
             hold_at(mark)
             _notify_listing_failure(f"folder {folder_id}", exc, config)
             continue
         finally:
             retries += listing_retry_state.retry_count
-        logger.info(
-            "Meet named %d conference(s) for %s [files=%d, listed=%d]",
-            len(conferences),
-            folder_id,
-            len(files),
-            len(items),
-        )
         listings.append((folder_id, items))
+
+    # A recording owned by somebody nobody asked for -- an employee configured but
+    # not reached this cycle. Their folder is still listed, because the work is real
+    # and the file is theirs. Unless they are about to be walked: the walk reads that
+    # whole folder, and listing it here as well would hand the cycle the same
+    # recording twice.
+    walking = {folder.folder_id for folder in fall_back_to_walk}
+    for folder_id, containers in wanted.items():
+        if folder_id in walking:
+            continue
+        try:
+            listings.append((folder_id, _meet_listing(fleet, folder_id, containers)))
+        except Exception as exc:  # noqa: BLE001 - counted and reported, never swallowed
+            folder_errors += 1
+            hold_at(mark)
+            _notify_listing_failure(f"folder {folder_id}", exc, config)
 
     if fall_back_to_walk:
         walked = _discover_by_walk(
