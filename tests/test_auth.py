@@ -729,3 +729,70 @@ def test_without_a_service_account_a_subject_changes_nothing(tmp_path, mocker):
     build_mock.assert_called_once_with(
         "drive", "v3", credentials=fake_creds, cache_discovery=False
     )
+
+
+# --- delegation: asking Meet what was recorded --------------------------------
+
+
+def test_meet_is_asked_as_the_employee_with_the_read_only_scope(tmp_path, mocker):
+    """The wider `meetings.space.created` would let this service change meetings."""
+    cfg = _delegating_config(tmp_path)
+    base = MagicMock()
+    delegated = MagicMock()
+    base.with_subject.return_value = delegated
+    from_info = mocker.patch(
+        "src.auth.service_account.Credentials.from_service_account_info",
+        return_value=base,
+    )
+    build_mock = mocker.patch("src.auth.build", return_value="meet service")
+
+    result = auth.build_meet_service(config=cfg, subject="one@example.com")
+
+    assert result == "meet service"
+    from_info.assert_called_once_with(
+        SERVICE_ACCOUNT_INFO,
+        scopes=["https://www.googleapis.com/auth/meetings.space.readonly"],
+    )
+    base.with_subject.assert_called_once_with("one@example.com")
+    build_mock.assert_called_once_with(
+        "meet", "v2", credentials=delegated, cache_discovery=False
+    )
+
+
+def test_meet_without_delegation_is_refused_with_the_reason(tmp_path, mocker):
+    """An empty listing would look like a quiet week instead of a missing key."""
+    cfg = MagicMock()
+    cfg.data_dir = tmp_path
+    cfg.uses_delegation = False
+    build_mock = mocker.patch("src.auth.build")
+
+    with pytest.raises(auth.AuthError) as excinfo:
+        auth.build_meet_service(config=cfg, subject="one@example.com")
+
+    assert "service account" in str(excinfo.value)
+    assert "meetings.space.readonly" in str(excinfo.value)
+    build_mock.assert_not_called()
+
+
+def test_an_unauthorized_meet_scope_names_the_meet_scope(tmp_path, mocker):
+    """Naming the Drive scope here would send an admin to authorize the wrong thing."""
+    cfg = _delegating_config(tmp_path)
+    base = MagicMock()
+    delegated = MagicMock()
+    delegated.refresh.side_effect = RefreshError(
+        "('unauthorized_client: Client is unauthorized to retrieve access tokens', ...)"
+    )
+    base.with_subject.return_value = delegated
+    mocker.patch(
+        "src.auth.service_account.Credentials.from_service_account_info",
+        return_value=base,
+    )
+    mocker.patch("src.auth.build", return_value="meet service")
+
+    with pytest.raises(auth.AuthError) as excinfo:
+        auth.build_meet_service(config=cfg, subject="one@example.com")
+
+    message = str(excinfo.value)
+    assert "meetings.space.readonly" in message
+    assert "auth/drive" not in message
+    assert "123456789" in message

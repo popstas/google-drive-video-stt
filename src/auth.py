@@ -24,6 +24,13 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+# Reading conferences, recordings and transcripts. The read-only member of the
+# family on purpose: `meetings.space.created` would also let this service create and
+# change meetings, which it never needs and an admin should never have to grant.
+MEET_SCOPES = [
+    "https://www.googleapis.com/auth/meetings.space.readonly",
+]
+
 
 class AuthError(Exception):
     pass
@@ -291,7 +298,9 @@ def _service_account_info(config: Config) -> dict:
     return info
 
 
-def _delegation_failure(exc: Exception, info: dict, subject: str) -> AuthError:
+def _delegation_failure(
+    exc: Exception, info: dict, subject: str, scopes: list[str] | None = None
+) -> AuthError:
     """Turn Google's two-word refusal into the sentence that names the fix.
 
     Both failures are configuration, not code, and both are opaque as delivered:
@@ -302,7 +311,7 @@ def _delegation_failure(exc: Exception, info: dict, subject: str) -> AuthError:
     """
     text = str(exc)
     client_id = info.get("client_id", "unknown")
-    scopes = " ".join(SCOPES)
+    scopes = " ".join(scopes or SCOPES)
     if "unauthorized_client" in text:
         return AuthError(
             f"Domain-wide delegation is not authorized for client id {client_id} "
@@ -318,7 +327,7 @@ def _delegation_failure(exc: Exception, info: dict, subject: str) -> AuthError:
     return AuthError(f"Could not act as {subject}: {text}")
 
 
-def _delegated_credentials(config: Config, subject: str):
+def _delegated_credentials(config: Config, subject: str, scopes: list[str] | None = None):
     """Credentials that act as ``subject``, refreshed eagerly so failures are early.
 
     The refresh costs one token request per employee per cycle and buys the
@@ -326,9 +335,10 @@ def _delegated_credentials(config: Config, subject: str):
     somewhere inside the first listing.
     """
     info = _service_account_info(config)
+    scopes = scopes or SCOPES
     try:
         creds = service_account.Credentials.from_service_account_info(
-            info, scopes=SCOPES
+            info, scopes=scopes
         )
     except ValueError as exc:
         raise AuthError(
@@ -339,7 +349,7 @@ def _delegated_credentials(config: Config, subject: str):
     try:
         delegated.refresh(Request())
     except Exception as exc:  # noqa: BLE001 - every failure is reported, none swallowed
-        raise _delegation_failure(exc, info, subject) from exc
+        raise _delegation_failure(exc, info, subject, scopes) from exc
     return delegated
 
 
@@ -365,6 +375,25 @@ def build_drive_service(
     else:
         creds = load_credentials(data_dir)
     return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+def build_meet_service(*, config: Config, subject: str):
+    """A Meet client acting as ``subject``.
+
+    Delegation only, and deliberately so: the Meet API answers for the account that
+    asks, so there is no "shared" way to read an employee's conferences. A deployment
+    without a service account is told that rather than left with an empty listing
+    that looks like a quiet week.
+    """
+    if not config.uses_delegation:
+        raise AuthError(
+            "Reading conferences from the Meet API needs a service account with "
+            "domain-wide delegation: the API answers only for the account that asks. "
+            "Configure google.service_account (or google.service_account_file) and "
+            f"authorize {' '.join(MEET_SCOPES)}, or use run.discovery: walk."
+        )
+    creds = _delegated_credentials(config, subject, scopes=MEET_SCOPES)
+    return build("meet", "v2", credentials=creds, cache_discovery=False)
 
 
 def run_interactive_flow(
