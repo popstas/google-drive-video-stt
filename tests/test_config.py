@@ -2267,6 +2267,39 @@ def test_an_empty_meet_folder_names_list_is_rejected(tmp_path):
         _load_config(tmp_path, data)
 
 
+def test_asking_for_the_changes_feed_while_delegating_is_refused(tmp_path):
+    """The feed is one account's journal; delegation reads each folder as its owner."""
+    data = _delegated_config(
+        [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+    )
+    data["run"] = {"enabled": True, "discovery": "auto"}
+
+    with pytest.raises(ValueError, match="run.discovery: auto"):
+        _load_config(tmp_path, data)
+
+
+def test_a_delegated_config_that_never_mentions_discovery_loads(tmp_path):
+    """"Just an address" must stay a working config, and it walks."""
+    cfg = _load_config(
+        tmp_path,
+        _delegated_config(
+            [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+        ),
+    )
+
+    assert cfg.run_discovery == "auto"
+    assert cfg.uses_delegation is True
+
+
+def test_walking_while_delegating_is_fine(tmp_path):
+    data = _delegated_config(
+        [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+    )
+    data["run"] = {"enabled": True, "discovery": "walk"}
+
+    assert _load_config(tmp_path, data).run_discovery == "walk"
+
+
 def test_a_service_account_key_is_masked_in_a_config_dump(tmp_path):
     """`config get` prints the whole config; a private key must not be in it."""
     config_file = write_config(

@@ -1180,6 +1180,19 @@ def _config_from_yaml(
         raise ValueError(
             f"run.discovery must be one of {DISCOVERY_MODES!r}, got: {run_discovery!r}"
         )
+    if (
+        google_service_account is not None or google_service_account_file is not None
+    ) and "discovery" in run and run_discovery == "auto":
+        # The cursor is a position in one account's journal, and delegation reads
+        # every folder as a different account. Asking for the feed here would be
+        # answered by a walk anyway, so say so instead of quietly disagreeing. Only
+        # an explicit `auto` is refused: a config that never mentions discovery is
+        # simply walked.
+        raise ValueError(
+            "run.discovery: auto cannot be used with google.service_account: the "
+            "changes feed belongs to a single account, while delegation reads each "
+            "folder as its owner. Use 'walk', or drop the key and let it default."
+        )
 
     if validate_providers:
         if presets and not openai_api_key:

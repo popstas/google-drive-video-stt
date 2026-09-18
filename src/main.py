@@ -20,6 +20,7 @@ from src import (
     booking_gate,
     booking_server,
     change_cursor,
+    delegation,
     drive,
     meet_transcript as meet_transcript_module,
     meta as meta_module,
@@ -1845,7 +1846,7 @@ def _notify_listing_failure(what: str, exc: Exception, config: Config) -> None:
     )
 
 
-def _discover_by_walk(service: Any, config: Config) -> _Discovery:
+def _discover_by_walk(fleet: delegation.Fleet, config: Config) -> _Discovery:
     """Read every configured folder and its meeting subfolders.
 
     The complete answer, and the expensive one: a request per folder per cycle. It
@@ -1855,31 +1856,46 @@ def _discover_by_walk(service: Any, config: Config) -> _Discovery:
     The cursor is taken *before* the sweep. Anything that lands while the sweep is
     running then shows up in the next feed read; taking it afterwards would open a
     window whose files no cycle ever looks at again.
+
+    Under delegation no cursor is taken at all: a cursor is a position in one
+    account's journal, and here every folder is read as a different account. Walking
+    is the whole discovery path until there is a cursor per employee.
     """
     cursor: str | None = None
     retries = 0
-    try:
-        cursor = drive.get_start_page_token(service)
-    except (RefreshError, AuthError):
-        raise
-    except Exception:
-        # A sweep with no cursor still processes everything; it just has to sweep
-        # again next time. Refusing to sweep would be the worse trade.
-        logger.exception("Could not take a changes cursor; this cycle will sweep again")
+    if not config.uses_delegation:
+        try:
+            cursor = drive.get_start_page_token(fleet.fallback)
+        except (RefreshError, AuthError):
+            raise
+        except Exception:
+            # A sweep with no cursor still processes everything; it just has to sweep
+            # again next time. Refusing to sweep would be the worse trade.
+            logger.exception(
+                "Could not take a changes cursor; this cycle will sweep again"
+            )
 
     listings: list[tuple[str, list[dict]]] = []
     folder_errors = 0
     for folder in config.folders:
         folder_id = folder.folder_id
         listing_retry_state = _RetryState()
+        folder_service = fleet.service_for(folder_id)
         try:
             items = _call_with_transient_retries(
-                lambda: drive.list_folder_tree_state(service, folder_id),
+                lambda: drive.list_folder_tree_state(folder_service, folder_id),
                 description=f"list folder state for {folder_id}",
                 retry_state=listing_retry_state,
             )
-        except (RefreshError, AuthError):
-            raise
+        except (RefreshError, AuthError) as exc:
+            # One employee's credentials must not end everybody's cycle, and under
+            # delegation that is exactly what re-raising would do. With one shared
+            # token there is nothing left to read anyway, so it still ends the cycle.
+            if not config.uses_delegation:
+                raise
+            folder_errors += 1
+            _notify_listing_failure(f"folder {folder_id}", exc, config)
+            continue
         except Exception as exc:
             folder_errors += 1
             _notify_listing_failure(f"folder {folder_id}", exc, config)
@@ -2027,7 +2043,9 @@ def _cursor_covers_config(config: Config, *, mode: str) -> bool:
     return False
 
 
-def _discover(service: Any, config: Config, *, mode: str = "auto") -> _Discovery:
+def _discover(
+    fleet: delegation.Fleet, config: Config, *, mode: str = "auto"
+) -> _Discovery:
     """Take the cheap path when a cursor says where to resume, the full one otherwise.
 
     ``walk`` forces the sweep and leaves the cursor where it is, which is what makes
@@ -2035,9 +2053,16 @@ def _discover(service: Any, config: Config, *, mode: str = "auto") -> _Discovery
     exactly where it was, and anything the sweep already handled is simply found
     done. ``changes`` refuses to fall back, so it can answer whether the feed itself
     works without waiting for a cycle.
+
+    Delegation always walks: the journal belongs to one account, and each folder here
+    is read as a different one. The config refuses ``discovery: auto`` alongside a
+    service account, so this is the last line of that defence rather than a silent
+    downgrade.
     """
+    if config.uses_delegation:
+        return replace(_discover_by_walk(fleet, config), cursor=None)
     if mode == "walk":
-        found = _discover_by_walk(service, config)
+        found = _discover_by_walk(fleet, config)
         # Leave the saved cursor alone: this was a look, not a new starting point.
         return replace(found, cursor=None)
 
@@ -2050,7 +2075,7 @@ def _discover(service: Any, config: Config, *, mode: str = "auto") -> _Discovery
     if saved is not None and not _cursor_covers_config(config, mode=mode):
         saved = None
     if saved is not None:
-        found = _discover_by_changes(service, config, saved)
+        found = _discover_by_changes(fleet.fallback, config, saved)
         if found is not None:
             return found
         if mode == "changes":
@@ -2058,7 +2083,7 @@ def _discover(service: Any, config: Config, *, mode: str = "auto") -> _Discovery
                 "The saved changes cursor is no longer valid; a normal cycle would "
                 "sweep and take a fresh one."
             )
-    return _discover_by_walk(service, config)
+    return _discover_by_walk(fleet, config)
 
 
 def run_once(
@@ -2084,11 +2109,25 @@ def run_once(
     cycle_skipped_old = 0
     settle_check_time = _utcnow()
 
-    discovery = _discover(service, config, mode=mode)
+    # Delegation is resolved here, once: from here on every entry carries a folder id
+    # and the rest of the cycle is the cycle it always was. An employee who cannot be
+    # resolved is dropped with an error counted, so the cycle cannot look drained.
+    fleet = delegation.resolve(
+        config,
+        service,
+        on_error=lambda folder, exc: _notify_listing_failure(
+            f"the Meet folder of {folder.email}", exc, config
+        ),
+    )
+    config = fleet.config
+    cycle_folder_errors += fleet.errors
+
+    discovery = _discover(fleet, config, mode=mode)
     cycle_retry_total += discovery.retries
     cycle_folder_errors += discovery.folder_errors
 
     for folder_id, items in discovery.listings:
+        folder_service = fleet.service_for(folder_id)
         _apply_local_output_state(items, config)
         total_seen = len(items)
         items, skipped_old = _items_in_date_scope(
@@ -2146,7 +2185,9 @@ def run_once(
                     # Permanent by design: the booking arrives before the call, so a
                     # recording with no booking is not a client call.
                     try:
-                        booking_gate.mark_unmatched(service, item["file"]["id"])
+                        booking_gate.mark_unmatched(
+                            folder_service, item["file"]["id"]
+                        )
                     except (RefreshError, AuthError):
                         raise
                     except Exception:
@@ -2174,7 +2215,7 @@ def run_once(
                 continue
             try:
                 telemetry = process_item(
-                    service, item, folder_id, config, booking_decision=decision
+                    folder_service, item, folder_id, config, booking_decision=decision
                 )
                 cycle_processed += 1
                 cycle_retry_total += _retry_count_from_process_result(telemetry)
@@ -2187,7 +2228,7 @@ def run_once(
                 file_name = item.get("file", {}).get("name")
                 try:
                     drive.set_file_app_properties(
-                        service,
+                        folder_service,
                         item["file"]["id"],
                         {drive.TRANSCRIPT_EMPTY_PROPERTY: "true"},
                     )

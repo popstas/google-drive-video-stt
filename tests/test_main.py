@@ -5874,3 +5874,137 @@ def test_a_recording_drive_never_processes_is_held_only_within_the_grace(
 
     assert main._is_still_settling(fresh, now) is True
     assert main._is_still_settling(stale, now) is False
+
+
+# --- a cycle that acts as each employee ---------------------------------------
+#
+# Delegation is resolved into an effective config before the cycle starts, so the
+# cycle itself is unchanged -- except for which client reads and writes each folder.
+
+
+def _delegated_config(emails, tmp_path, **extra):
+    cfg = make_config(folders=["placeholder"], data_dir=tmp_path, **extra)
+    return replace(
+        cfg,
+        folders=tuple(EmployeeFolder(folder_id="", email=email) for email in emails),
+        google_service_account={"client_email": "reader@project.iam.gserviceaccount.com"},
+    )
+
+
+def test_a_delegated_cycle_reads_each_folder_as_its_owner(mocker, tmp_path):
+    services = {"one@example.com": MagicMock(), "two@example.com": MagicMock()}
+    mocker.patch(
+        "src.delegation.auth.build_drive_service",
+        side_effect=lambda config, subject: services[subject],
+    )
+    roots = {services["one@example.com"]: "f1", services["two@example.com"]: "f2"}
+    mocker.patch(
+        "src.delegation.meet_root.resolve",
+        side_effect=lambda service, names: SimpleNamespace(
+            folder_id=roots[service], name="Google Meet", created_time="", candidates=1
+        ),
+    )
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Owner")
+    listings = {"f1": [_item("v1", "a.mp4")], "f2": [_item("v2", "b.mp4")]}
+    tree_mock = mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        side_effect=lambda svc, fid: listings[fid],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), _delegated_config(["one@example.com", "two@example.com"], tmp_path))
+
+    listed = {call.args[1]: call.args[0] for call in tree_mock.call_args_list}
+    assert listed == {"f1": services["one@example.com"], "f2": services["two@example.com"]}
+    processed = {call.args[2]: call.args[0] for call in process_mock.call_args_list}
+    assert processed == {"f1": services["one@example.com"], "f2": services["two@example.com"]}
+
+
+def test_the_resolved_name_reaches_the_pipeline(mocker, tmp_path):
+    """A config that carries only an address still tells speaker_roles who is who."""
+    mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch(
+        "src.delegation.meet_root.resolve",
+        return_value=SimpleNamespace(
+            folder_id="f1", name="Google Meet", created_time="", candidates=1
+        ),
+    )
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Real Name")
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state", return_value=[_item("v1", "a.mp4")]
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), _delegated_config(["one@example.com"], tmp_path))
+
+    config_used = process_mock.call_args.args[3]
+    assert config_used.folder_by_id("f1").name == "Real Name"
+
+
+def test_one_employee_the_domain_refuses_does_not_end_the_cycle(mocker, tmp_path):
+    working = MagicMock()
+
+    def build(config, subject):
+        if subject == "gone@example.com":
+            raise AuthError("gone@example.com is not a user in this domain")
+        return working
+
+    mocker.patch("src.delegation.auth.build_drive_service", side_effect=build)
+    mocker.patch(
+        "src.delegation.meet_root.resolve",
+        return_value=SimpleNamespace(
+            folder_id="f2", name="Google Meet", created_time="", candidates=1
+        ),
+    )
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Owner")
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state", return_value=[_item("v2", "b.mp4")]
+    )
+    mocker.patch("src.main.notify.notify_error")
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(
+        MagicMock(), _delegated_config(["gone@example.com", "two@example.com"], tmp_path)
+    )
+
+    assert [call.args[2] for call in process_mock.call_args_list] == ["f2"]
+
+
+def test_an_employee_who_cannot_be_read_is_an_error_not_a_drained_cycle(
+    mocker, tmp_path, caplog
+):
+    """A skipped employee must show up in the summary, or the cycle lies about itself."""
+    mocker.patch(
+        "src.delegation.auth.build_drive_service",
+        side_effect=AuthError("delegation is not authorized"),
+    )
+    mocker.patch("src.main.notify.notify_error")
+
+    with caplog.at_level(logging.INFO):
+        main.run_once(MagicMock(), _delegated_config(["one@example.com"], tmp_path))
+
+    summary = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Cycle summary")
+    )
+    assert "folder_errors=1" in summary
+
+
+def test_a_delegated_cycle_takes_no_changes_cursor(mocker, tmp_path):
+    """The journal belongs to one account; here every folder is a different one."""
+    mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch(
+        "src.delegation.meet_root.resolve",
+        return_value=SimpleNamespace(
+            folder_id="f1", name="Google Meet", created_time="", candidates=1
+        ),
+    )
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Owner")
+    mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    token_mock = mocker.patch("src.main.drive.get_start_page_token")
+
+    main.run_once(MagicMock(), _delegated_config(["one@example.com"], tmp_path))
+
+    token_mock.assert_not_called()
+    assert not (tmp_path / "changes_cursor.txt").exists()
