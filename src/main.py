@@ -1959,44 +1959,54 @@ def _meet_work(
     while it could not be read at all -- and each of those holds the mark at its own
     start time, which is exactly what brings it back next cycle.
 
-    The one thing that may not hold the mark for ever is a recording whose file never
-    arrives. After ``meet.wait_hours`` it is let go with a line in the log, because a
-    single failed recording must not freeze discovery for everybody.
+    Every one of those holds is bounded by ``meet.wait_hours``. Anything else would
+    let a single stuck conference -- a record Meet never closes, a recording whose
+    file never arrives, a conference whose recordings are refused for good -- pin the
+    mark for ever, and every later cycle would re-read everything since it for the
+    whole fleet. That is the growth this mode exists to remove.
     """
     files: list[str] = []
     held: datetime | None = None
+    wait = timedelta(hours=config.meet_wait_hours)
 
-    def hold(conference: meet_api.MeetConference) -> None:
+    def hold(conference: meet_api.MeetConference, since: datetime | None, why: str) -> None:
+        """Hold the mark at this conference, unless waiting has gone on too long."""
         nonlocal held
         start = _moment(conference.start_time)
-        if start is not None and (held is None or start < held):
+        if start is None:
+            return
+        if since is not None and now - since >= wait:
+            logger.warning(
+                "Meet has said nothing new about %s for %dh (%s); discovery will "
+                "stop waiting for it",
+                conference.name,
+                config.meet_wait_hours,
+                why,
+            )
+            return
+        if held is None or start < held:
             held = start
 
     for conference in conferences:
+        start = _moment(conference.start_time)
+        ended = _moment(conference.end_time)
         if conference.unreadable:
-            hold(conference)
+            hold(conference, ended or start, "its recordings could not be listed")
             continue
         if not conference.ended:
             # No recordings *yet* -- the call is still going. Letting the mark past
             # its start time would mean never seeing this conference again.
-            hold(conference)
+            hold(conference, start, "it has still not ended")
             continue
         for recording in conference.recordings:
             if recording.ready:
                 files.append(recording.file_id)
                 continue
-            ended = _moment(conference.end_time) or _moment(conference.start_time)
-            waited = now - ended if ended is not None else timedelta(0)
-            if waited < timedelta(hours=config.meet_wait_hours):
-                hold(conference)
-            else:
-                logger.warning(
-                    "Meet has not produced the file for a recording of %s after %dh "
-                    "(state %s); discovery will stop waiting for it",
-                    conference.name,
-                    config.meet_wait_hours,
-                    recording.state or "unknown",
-                )
+            hold(
+                conference,
+                ended or start,
+                f"a recording is still in state {recording.state or 'unknown'}",
+            )
     return files, held
 
 
@@ -2006,28 +2016,42 @@ def _meet_placements(
     folder_id: str,
     file_ids: list[str],
     seen: set[str],
-) -> dict[str, set[str]]:
+) -> tuple[dict[str, set[str]], int]:
     """Which folders hold this employee's new recordings, and whose work each is.
 
-    A call between two watched employees is listed by both of their accounts, and
-    Meet gives both the same Drive file -- the organiser's. Processing it twice would
+    A call between two watched employees is listed by both of their accounts, and Meet
+    gives both the same Drive file -- the organiser's. Processing it twice would
     transcribe one conversation twice and race two uploads into the same folder, so a
     file already placed this cycle is skipped, and a file owned by another watched
     employee is placed with its owner: that is the account whose Drive holds it, and
     whose artifacts should sit beside it.
+
+    A recording owned by nobody in the fleet is left alone and counted. The walk never
+    touches one either -- it reaches the employee only as a shortcut, and no path
+    follows shortcuts -- and processing it would mean writing artifacts into the Drive
+    of somebody this service was never given. Discovery finding more than the walk is
+    not a feature here; it is the difference the acceptance test exists to catch.
     """
-    owners = {folder.email: folder.folder_id for folder in config.folders if folder.email}
+    owners = {
+        folder.email.lower(): folder.folder_id
+        for folder in config.folders
+        if folder.email
+    }
     service = fleet.service_for(folder_id)
     containers: dict[str, set[str]] = {}
+    outside = 0
     for file_id in file_ids:
         if file_id in seen:
             continue
         seen.add(file_id)
         parents, owner = drive.file_placement(service, file_id)
-        target = owners.get(owner, folder_id)
+        target = owners.get(owner.lower())
+        if target is None:
+            outside += 1
+            continue
         for container in parents:
             containers.setdefault(target, set()).add(container)
-    return containers
+    return containers, outside
 
 
 def _meet_listing(fleet: delegation.Fleet, folder_id: str, containers: set[str]) -> list[dict]:
@@ -2106,7 +2130,7 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
         hold_at(unfinished)
         placement_retry_state = _RetryState()
         try:
-            placed = _call_with_transient_retries(
+            placed, outside = _call_with_transient_retries(
                 lambda: _meet_placements(fleet, config, folder_id, files, seen_files),
                 description=f"find the folders Meet named for {folder_id}",
                 retry_state=placement_retry_state,
@@ -2123,12 +2147,21 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
         for target, containers in placed.items():
             wanted.setdefault(target, set()).update(containers)
         logger.info(
-            "Meet named %d conference(s) for %s [files=%d, folders=%d]",
+            "Meet named %d conference(s) for %s [files=%d, folders=%d, outside=%d]",
             len(conferences),
             folder_id,
             len(files),
             sum(len(ids) for ids in placed.values()),
+            outside,
         )
+        if outside:
+            logger.info(
+                "%d recording(s) Meet named for %s belong to someone outside the "
+                "configured employees; they are left to their owner, exactly as the "
+                "walk leaves them",
+                outside,
+                folder.email,
+            )
         asked.append(folder_id)
 
     for folder_id in asked:

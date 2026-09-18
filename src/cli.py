@@ -676,11 +676,16 @@ def _print_meet_health(config, fleet, folder, since: datetime) -> None:
     if not ready:
         return
     service = fleet.service_for(folder.folder_id)
+    owners = {f.email.lower() for f in config.folders if f.email}
     done = 0
     unreadable = 0
+    outside = 0
     for recording in ready:
         try:
-            parents, _ = drive.file_placement(service, recording.file_id)
+            parents, owner = drive.file_placement(service, recording.file_id)
+            if owner.lower() not in owners:
+                outside += 1
+                continue
             items = [
                 item
                 for parent in parents
@@ -693,7 +698,12 @@ def _print_meet_health(config, fleet, folder, since: datetime) -> None:
             continue
         if items and items[0].get("stt_id"):
             done += 1
-    print(f"  Meet: {done} of {len(ready)} already processed")
+    print(f"  Meet: {done} of {len(ready) - outside} already processed")
+    if outside:
+        print(
+            f"  Meet: {outside} recording(s) owned outside the fleet, left to their "
+            "owner -- the walk leaves them too"
+        )
     if unreadable:
         print(f"  Meet: {unreadable} recording(s) this account cannot open")
 

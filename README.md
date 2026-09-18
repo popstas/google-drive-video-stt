@@ -317,9 +317,14 @@ opaque cursor, because Meet filters conferences by their start time. **It never 
 past unfinished work.** Meet names a conference as soon as it ends, while its recording
 file appears five to eight minutes later (measured), so a conference still running, a
 recording with no file yet, and a conference whose recordings could not be read all
-hold the mark where it is. An ended conference nobody recorded holds nothing. A file
-that never arrives is let go after `meet.wait_hours`, with a line in the log, so one
-failed recording cannot freeze discovery for everybody.
+hold the mark where it is. An ended conference nobody recorded holds nothing, and
+every other hold is released after `meet.wait_hours` with a line in the log, so one
+stuck conference cannot freeze discovery for everybody.
+
+A recording owned by nobody in `folders:` is left to its owner and counted. The walk
+leaves it too -- it reaches the employee only as a shortcut to somebody else's file --
+and the two modes finding the same recordings is the property the acceptance test
+checks.
 
 Losing the file costs one longer listing and nothing else: discovery then looks back
 `meet.first_look_hours`, and never further than `run.since`. What is in scope stays

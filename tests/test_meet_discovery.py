@@ -501,10 +501,27 @@ def test_a_recording_is_attributed_to_whoever_owns_it(mocker, tmp_path):
     assert listed.call_args.args == (fleet.service_for("f2"), "folder-1")
 
 
-def test_a_recording_owned_by_nobody_configured_stays_with_the_employee(mocker, tmp_path):
-    """Still one piece of work, attributed to the account that could see it."""
+def test_a_recording_owned_outside_the_fleet_is_left_alone(mocker, tmp_path, caplog):
+    """The walk never touches one either: it reaches the employee only as a shortcut,
+    and no path follows shortcuts. Processing it would mean writing artifacts into the
+    Drive of somebody this service was never given."""
     _ask(mocker, [_conference(recordings=[_recording("file-1")])])
     _placements(mocker, {"file-1": (["folder-1"], "client@elsewhere.example")})
+    listed = mocker.patch("src.main.drive.list_folder_state")
+    config = _config(["one@example.com"], tmp_path)
+
+    with caplog.at_level(logging.INFO):
+        found = main._discover_by_meet(_fleet(config), config)
+
+    listed.assert_not_called()
+    assert found.listings == [("f1", [])]
+    assert any("outside the configured" in r.getMessage() for r in caplog.records)
+
+
+def test_an_address_in_another_case_is_still_the_same_employee(mocker, tmp_path):
+    """Google addresses are case-insensitive; a capital would look like an outsider."""
+    _ask(mocker, [_conference(recordings=[_recording("file-1")])])
+    _placements(mocker, {"file-1": (["folder-1"], "One@Example.com")})
     mocker.patch(
         "src.main.drive.list_folder_state", return_value=[_item("file-1", "call.mp4")]
     )
@@ -512,9 +529,7 @@ def test_a_recording_owned_by_nobody_configured_stays_with_the_employee(mocker, 
 
     found = main._discover_by_meet(_fleet(config), config)
 
-    assert [(fid, [i["file"]["id"] for i in items]) for fid, items in found.listings] == [
-        ("f1", ["file-1"])
-    ]
+    assert [i["file"]["id"] for _, items in found.listings for i in items] == ["file-1"]
 
 
 def test_an_owner_who_is_also_being_walked_is_not_listed_twice(mocker, tmp_path):
@@ -540,3 +555,46 @@ def test_an_owner_who_is_also_being_walked_is_not_listed_twice(mocker, tmp_path)
     listed.assert_not_called()
     assert [call.args[1] for call in walked.call_args_list] == ["f1"]
     assert [fid for fid, _ in found.listings] == ["f2", "f1"]
+
+
+# --- no hold lasts for ever ---------------------------------------------------
+
+
+def test_a_conference_that_never_ends_is_released_after_the_wait(mocker, tmp_path, caplog):
+    """A record Meet never closes would otherwise pin the mark and re-read everything."""
+    _ask(mocker, [_conference(start="2026-09-15T11:00:00Z", end=None)])
+    _drive(mocker)
+    config = _config(["one@example.com"], tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        found = main._discover_by_meet(_fleet(config), config)
+
+    assert found.meet_mark == NOW
+    assert any("stop waiting" in r.getMessage() for r in caplog.records)
+
+
+def test_a_conference_that_stays_unreadable_is_released_after_the_wait(mocker, tmp_path):
+    _ask(
+        mocker,
+        [
+            _conference(
+                start="2026-09-15T11:00:00Z", end="2026-09-15T11:30:00Z", unreadable=True
+            )
+        ],
+    )
+    _drive(mocker)
+    config = _config(["one@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert found.meet_mark == NOW
+
+
+def test_a_conference_still_running_inside_the_wait_still_holds(mocker, tmp_path):
+    _ask(mocker, [_conference(start="2026-09-18T11:45:00Z", end=None)])
+    _drive(mocker)
+    config = _config(["one@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert found.meet_mark == dt.datetime(2026, 9, 18, 11, 45, tzinfo=dt.timezone.utc)

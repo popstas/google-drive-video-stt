@@ -84,7 +84,7 @@ def test_skill_is_a_single_compact_file():
     # A compactness guard, not a budget to spend: raise it only when a real feature
     # adds operator surface, and pay for the raise by keeping the new section tight.
     # Last raised for `run.discovery: meet`: a mode, a mark and a command.
-    assert len(SKILL_PATH.read_text(encoding="utf-8").splitlines()) <= 515
+    assert len(SKILL_PATH.read_text(encoding="utf-8").splitlines()) <= 517
 
     assert not (CANONICAL_SKILL_ROOT / "references").exists()
     assert not (CANONICAL_SKILL_ROOT / "examples").exists()

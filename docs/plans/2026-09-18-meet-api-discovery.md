@@ -118,12 +118,13 @@ API that lists only hosted conferences never would.
   recordings" is a reliable "nobody recorded", while "still open with no recordings"
   means nothing yet. Releasing an open conference would move the mark past its start
   time, and `start_time >= mark` would never return it again.
-- **But it may not be held for ever.** An *ended* conference with no recording at all
-  -- nobody pressed record -- holds nothing, there is no work to wait for. A recording whose
-  file never materialises is waited for, and given up on after `meet.wait_hours`
-  (default 24) with a line in the log, so a single failed recording cannot freeze
-  discovery. This mirrors the bounded wait already applied to a video Drive never
-  finishes processing.
+- **Nothing is held for ever.** An *ended* conference with no recording at all --
+  nobody pressed record -- holds nothing, there is no work to wait for. Every other
+  hold is bounded by `meet.wait_hours` (default 24) and released with a line in the
+  log: a recording whose file never materialises, a conference Meet never closes, a
+  conference whose recordings are refused for good. An unbounded hold would pin the
+  mark and make every later cycle re-read everything since it, for the whole fleet --
+  which is the growth this mode exists to remove.
 - **A missing timestamp costs one long listing, never a backlog.** With no file --
   first run, a wiped data dir, a new machine -- discovery starts from
   `meet.first_look_hours` (default 168) or from `run.since`, whichever is later. What
@@ -151,10 +152,16 @@ A call between two employees is listed by both. Today the walk produces it once,
 because only the organiser's folder holds the file.
 
 - Deduplicate by Drive file id inside a cycle.
-- Attribute it to the employee who owns the file when one of the configured
-  employees does; otherwise to the employee whose API listed it.
+- Attribute it to the employee who owns the file.
+- **A recording owned by nobody configured is left alone**, counted and logged. This
+  reverses what this plan first said, and the reason is the acceptance test in Task 7:
+  the walk never processes such a recording either -- it reaches the employee only as
+  a shortcut, and no path follows shortcuts -- so processing it would make `meet` find
+  more than `walk`, and would mean writing artifacts into the Drive of somebody this
+  service was never given.
 - Tests: the same conference from two employees yields one item, attributed to the
-  owner; a conference whose file belongs to nobody configured is still processed once.
+  owner; a recording owned outside the fleet is listed by nobody and says so; an
+  address in another case is still the same employee.
 
 ### Task 5: falling back rather than falling over -- DONE
 
