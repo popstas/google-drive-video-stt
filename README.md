@@ -244,6 +244,12 @@ Two things this changes for an operator:
   notice a configured id now pointing at `Legacy Meet Recordings`: it stays readable
   and reports zero errors while every new recording lands somewhere else.
 
+A recordings root that gets shared with anyone is abandoned by Meet: from the next
+recording on, a second folder of the same name appears beside it and everything lands
+there instead, while the configured id keeps resolving and keeps finding nothing. What
+is safe to share, what is not, and how to tell a live root from a dead one is written
+down in [docs/meet-recordings-folder.md](docs/meet-recordings-folder.md).
+
 ### How new recordings are found
 
 A cycle asks Drive's changes feed what has happened since the last cycle, and lists

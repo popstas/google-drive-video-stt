@@ -202,6 +202,15 @@ completion webhook's `file.folder_id`), the container is where artifacts are wri
 for entry points that start from a file — `process_target` and the changes feed — and
 returns `None` for folders nobody configured, which is a skip rather than an error.
 
+**A shared recordings root is a dead one.** Meet stops writing into a `Google Meet`
+root as soon as it carries any permission beyond its owner, and creates a second root
+of the same name beside it; the abandoned one keeps its id and stays readable, so the
+configured folder resolves, the cycle reports success and nothing new is ever found.
+Sharing a meeting subfolder is safe, un-sharing does not undo the move, and the
+measurements behind both statements are in `docs/meet-recordings-folder.md`. Anything
+that grants access must therefore target a meeting subfolder, and discovery must not
+assume one configured id is still where the recordings are.
+
 Two rules that are easy to reintroduce, because each failed silently once. **Every
 write goes to `container_id`** — the `.txt`, each preset artifact, `.meta.yml`, `.stt`
 and the `.mp3`; the mp3 upload is its own call site and was the one left behind, which
