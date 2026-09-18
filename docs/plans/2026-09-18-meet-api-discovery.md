@@ -207,9 +207,16 @@ Run against the real domain on 2026-09-18, one delegated employee with a Meet ar
 - The mark is written by a cycle that finished and not by a dry run, checked against
   the live file rather than only in tests.
 
-Still open, and the reason this is not yet the default: whether
-`conferenceRecords.list` returns conferences an employee only attended. See
+The question that was open when this plan was written -- whether the API returns
+conferences an employee only attended -- has since been measured: it does, and the
+attendee gets 404 from Drive for the recording. Coverage is therefore exactly the
+walk's, which is what the comparison above shows. See
 `docs/reports/2026-09-18-meet-api.md`.
+
+The mode is still turned on explicitly rather than becoming the default for every
+delegated deployment. It needs a scope an admin grants and an API enabled in one
+cloud project; a deployment with delegation and neither would fail every cycle if the
+default changed underneath it.
 
 ## What stays as it is
 
