@@ -202,6 +202,18 @@ completion webhook's `file.folder_id`), the container is where artifacts are wri
 for entry points that start from a file — `process_target` and the changes feed — and
 returns `None` for folders nobody configured, which is a skip rather than an error.
 
+**Delegation is resolved before the pipeline, never inside it.** With a service
+account configured (`config.uses_delegation`), `delegation.resolve` turns every entry
+that carries only an address into an ordinary entry carrying the id of the folder Meet
+writes into now, plus the Drive client that owns it; `main.run_once` and each CLI
+command work from that effective config. Nothing downstream learns about e-mails or
+impersonation -- `folder_by_id`, `since_for`, the folder's Telegram chat, the booking
+gate and the webhook stay keyed on `folder_id`. The id is re-resolved every cycle and
+never written back to the config, while the client and the owner's display name are
+cached for the life of the process (`delegation.forget_clients` drops them). One
+employee failing is a counted folder error, not an aborted cycle, which is why the
+listing no longer re-raises an auth failure while delegating.
+
 **A shared recordings root is a dead one.** Meet stops writing into a `Google Meet`
 root as soon as it carries any permission beyond its owner, and creates a second root
 of the same name beside it; the abandoned one keeps its id and stays readable, so the

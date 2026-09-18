@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import pytest
 
+from src import delegation
+
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch, tmp_path):
@@ -27,3 +29,17 @@ def clean_env(monkeypatch, tmp_path):
     """
     monkeypatch.setenv("GDSTT_HOME", str(tmp_path))
     yield
+
+
+@pytest.fixture(autouse=True)
+def forget_delegated_clients():
+    """Keep one test's impersonated clients out of the next one's cache.
+
+    ``delegation`` keeps a client per employee for the life of the process, which is
+    right for a daemon and wrong for a suite: without this, a test that patches the
+    builder would be served the previous test's MagicMock and pass for the wrong
+    reason.
+    """
+    delegation.forget_clients()
+    yield
+    delegation.forget_clients()

@@ -24,6 +24,33 @@ from src.config import Config, EmployeeFolder
 
 logger = logging.getLogger(__name__)
 
+# One client and one display name per employee, kept for the life of the process.
+# Both are answers that do not change between cycles -- the credentials refresh
+# themselves, and nobody renames themselves hourly -- while rebuilding them would
+# cost a token request and an `about.get` per employee per cycle. The folder id is
+# deliberately *not* cached: that is the one answer that goes stale, and re-asking
+# for it every cycle is the whole point of resolving at all.
+_CLIENTS: dict[tuple[str, str], Any] = {}
+_NAMES: dict[tuple[str, str], str] = {}
+
+
+def forget_clients() -> None:
+    """Drop the cached clients and names (tests, and a config reload)."""
+    _CLIENTS.clear()
+    _NAMES.clear()
+
+
+def _key(config: Config, subject: str) -> tuple[str, str]:
+    """Cache key: which key is acting, and for whom.
+
+    The key's identity is part of it so that rotating the service account, or
+    pointing the config at a different one, does not keep serving clients built
+    from the old one.
+    """
+    account = config.google_service_account or {}
+    source = account.get("client_email") or str(config.google_service_account_file or "")
+    return (source, subject)
+
 
 @dataclass(frozen=True)
 class Fleet:
@@ -73,8 +100,12 @@ def resolve(
             # A folder pinned by id with nobody attached: read it the old way.
             resolved.append(folder)
             continue
+        cache_key = _key(config, folder.email)
         try:
-            service = build(config=config, subject=folder.email)
+            service = _CLIENTS.get(cache_key)
+            if service is None:
+                service = build(config=config, subject=folder.email)
+                _CLIENTS[cache_key] = service
         except Exception as exc:  # noqa: BLE001 - reported, never swallowed
             errors += 1
             logger.error("Could not act as %s: %s", folder.email, exc)
@@ -100,7 +131,7 @@ def resolve(
             if on_error is not None:
                 on_error(folder, LookupError("no Meet folder"))
             continue
-        name = folder.name or _owner_name(service, folder.email)
+        name = folder.name or _cached_owner_name(service, cache_key, folder.email)
         if candidates > 1:
             logger.warning(
                 "%s owns %d Meet folders; reading the newest (%s). The others were "
@@ -130,6 +161,13 @@ def _folder_for(
     if root is None:
         return None, 0
     return root.folder_id, root.candidates
+
+
+def _cached_owner_name(service: Any, cache_key: tuple[str, str], email: str) -> str:
+    """The owner's name, asked for once per process rather than once per cycle."""
+    if cache_key not in _NAMES:
+        _NAMES[cache_key] = _owner_name(service, email)
+    return _NAMES[cache_key]
 
 
 def _owner_name(service: Any, email: str) -> str:

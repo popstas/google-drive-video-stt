@@ -539,9 +539,17 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     # token / refresh_token stay masked; only the source kind/location is shown).
     print(f"Google credentials: {_describe_google_credentials(config)}")
     print(f"Google token: {_describe_google_token(config)}")
+    if config.uses_delegation:
+        # Otherwise the two lines above read as a broken setup, when in fact a
+        # delegated deployment needs no user token at all.
+        print(
+            "  (a service account is configured; the OAuth token above is only "
+            "needed for folders with no employee attached)"
+        )
     print(f"folders: {len(config.folders)} configured")
     for folder in config.folders:
-        print(f"  {folder.folder_id}: {_describe_employee(folder)}")
+        where = folder.folder_id or "(found at run time)"
+        print(f"  {where}: {_describe_employee(folder)}")
     print(f"stt.provider: {config.stt_provider or 'not configured'}")
     _print_preset_dag(config)
     print(
@@ -591,7 +599,10 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     if config.uses_delegation:
         state = "not used: each folder is read as its owner, so every cycle walks"
     print(f"changes cursor: {cursor_path} ({state})")
-    print(f"discovery: run.discovery={config.run_discovery}")
+    discovery = config.run_discovery
+    if config.uses_delegation:
+        discovery = f"{discovery}, but delegation always walks"
+    print(f"discovery: run.discovery={discovery}")
     print(f"since: run.since={config.run_since or 'unset, every recording in scope'}")
     for folder in config.folders:
         folder_service = fleet.service_for(folder.folder_id)

@@ -225,6 +225,64 @@ Copy the returned `id` into `config.yml` as an entry under `folders:` (see
 the last path segment in the browser URL:
 `https://drive.google.com/drive/folders/<folder-id>`.
 
+### Reading each employee's own Drive
+
+The alternative to being given access to folders is acting as the people who own
+them. With a service account that the Workspace admin has authorized for
+domain-wide delegation, a watched folder is configured by address alone:
+
+```yaml
+google:
+  service_account_file: /secrets/sa.json   # or service_account: {...} inline
+folders:
+  - email: name@company.example
+  - email: other@company.example
+```
+
+The service then impersonates each employee, finds the folder Meet is writing into
+right now, and reads it as its owner. No sharing is involved, which matters more than
+convenience: sharing a recordings root is what makes Meet abandon it (see
+[docs/meet-recordings-folder.md](docs/meet-recordings-folder.md)), so the arrangement
+that grants access is also the one that breaks the folder.
+
+What the admin authorizes, once, in Google Admin Console -> Security -> Access and
+data control -> API controls -> Manage Domain-Wide Delegation -> Add new:
+
+| field | value |
+| --- | --- |
+| Client ID | the service account's numeric client id (in its key file as `client_id`) |
+| OAuth scopes | `https://www.googleapis.com/auth/drive` |
+
+The full `drive` scope is needed because artifacts are written next to each
+recording, in the employee's own Drive. `drive.readonly` is enough only for a
+deployment that writes its artifacts somewhere else. Either way, delegation grants
+the service account access to every Drive in the domain within that scope: Google
+offers no way to limit it to some people, and "only the Meet folders" is a property
+of this config, not of the grant.
+
+What changes when delegation is on:
+
+- `folder_id` becomes optional. Setting it anyway pins that folder for that employee
+  and skips the lookup.
+- `name` becomes optional; it is read from the employee's own Drive profile, and
+  still decides which speaker the transcript calls the manager.
+- The id is resolved **every cycle**, never written back to the config. That is the
+  whole point: a folder id in a file is a photograph of where Meet wrote that day.
+- The changes feed is not used: a cursor is a position in one account's journal,
+  while each folder here is read as a different account. Every cycle walks, which
+  costs one listing per folder plus one per meeting subfolder.
+- One employee failing -- an address the domain does not know, a Drive with no Meet
+  folder -- is reported and counted as a folder error; the rest of the fleet is
+  processed as usual.
+- `gdstt process`, `reprocess` and `speakers set` take a file id rather than a
+  folder, so they ask each configured employee in turn and work as whoever can open
+  the file.
+
+`gdstt doctor --drive` is the acceptance test: it says whether each employee could be
+impersonated, which folder was resolved for them, what is in it, and -- the line worth
+watching -- whether that folder carries access beyond its owner, which means Meet will
+abandon it at the next recording.
+
 ### Meeting subfolders
 
 Google Meet files each meeting into its own subfolder of a `Google Meet` folder in the

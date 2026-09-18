@@ -187,3 +187,61 @@ def test_an_unreadable_name_does_not_lose_the_folder(tmp_path, mocker):
 
     assert [(f.folder_id, f.name) for f in fleet.config.folders] == [("f1", "")]
     assert fleet.errors == 0
+
+
+def test_a_client_is_built_once_and_reused_by_later_cycles(tmp_path, mocker):
+    """Rebuilding per cycle would cost a token request per employee, for nothing."""
+    build = mocker.patch(
+        "src.delegation.auth.build_drive_service", return_value=MagicMock()
+    )
+    mocker.patch("src.delegation.meet_root.resolve", return_value=_root("f1"))
+    name_mock = mocker.patch("src.delegation.meet_root.owner_name", return_value="Name")
+    config = _delegating(
+        [EmployeeFolder(folder_id="", email="one@example.com")], tmp_path
+    )
+
+    first = delegation.resolve(config, MagicMock())
+    second = delegation.resolve(config, MagicMock())
+
+    assert build.call_count == 1
+    assert name_mock.call_count == 1
+    assert second.service_for("f1") is first.service_for("f1")
+
+
+def test_the_folder_itself_is_asked_for_again_every_time(tmp_path, mocker):
+    """The id is the one answer that goes stale, so it is never cached."""
+    mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
+    resolve_mock = mocker.patch(
+        "src.delegation.meet_root.resolve", side_effect=[_root("f1"), _root("f2")]
+    )
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Name")
+    config = _delegating(
+        [EmployeeFolder(folder_id="", email="one@example.com")], tmp_path
+    )
+
+    delegation.resolve(config, MagicMock())
+    second = delegation.resolve(config, MagicMock())
+
+    assert resolve_mock.call_count == 2
+    assert [f.folder_id for f in second.config.folders] == ["f2"]
+
+
+def test_a_different_key_does_not_reuse_the_old_clients(tmp_path, mocker):
+    services = [MagicMock(), MagicMock()]
+    build = mocker.patch(
+        "src.delegation.auth.build_drive_service", side_effect=services
+    )
+    mocker.patch("src.delegation.meet_root.resolve", return_value=_root("f1"))
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Name")
+    config = _delegating(
+        [EmployeeFolder(folder_id="", email="one@example.com")], tmp_path
+    )
+    rotated = dataclasses.replace(
+        config, google_service_account={"client_email": "other@project.iam.gserviceaccount.com"}
+    )
+
+    delegation.resolve(config, MagicMock())
+    after = delegation.resolve(rotated, MagicMock())
+
+    assert build.call_count == 2
+    assert after.service_for("f1") is services[1]
