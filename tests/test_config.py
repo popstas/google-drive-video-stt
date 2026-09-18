@@ -3275,3 +3275,92 @@ def test_no_since_anywhere_means_every_recording_is_in_scope(tmp_path):
     cfg = load_config(config_path=config_file, validate_providers=False)
     assert cfg.run_since == ""
     assert cfg.since_for("anything") == ""
+
+
+# --- meet discovery: the settings the mode needs -------------------------------
+
+
+def _meet_config(folders, meet=None, run=None):
+    body = _delegated_config(folders, service_account=_SERVICE_ACCOUNT)
+    if meet is not None:
+        body["meet"] = meet
+    if run is not None:
+        body["run"] = run
+    return body
+
+
+def test_meet_settings_have_defaults_that_never_read_the_archive(tmp_path):
+    cfg = _load_config(tmp_path, _meet_config([{"email": "one@example.com"}]))
+
+    assert cfg.meet_wait_hours == 24
+    assert cfg.meet_first_look_hours == 168
+    assert cfg.meet_fallback == "walk"
+
+
+def test_meet_settings_can_be_set(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _meet_config(
+            [{"email": "one@example.com"}],
+            meet={"wait_hours": 6, "first_look_hours": 48, "fallback": "none"},
+        ),
+    )
+
+    assert (cfg.meet_wait_hours, cfg.meet_first_look_hours) == (6, 48)
+    assert cfg.meet_fallback == "none"
+
+
+def test_a_meet_window_of_zero_is_refused(tmp_path):
+    """Zero would mean "give up immediately", which loses every slow recording."""
+    with pytest.raises(ValueError, match="meet.wait_hours"):
+        _load_config(
+            tmp_path, _meet_config([{"email": "one@example.com"}], meet={"wait_hours": 0})
+        )
+
+
+def test_an_unknown_meet_fallback_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="meet.fallback"):
+        _load_config(
+            tmp_path,
+            _meet_config([{"email": "one@example.com"}], meet={"fallback": "shrug"}),
+        )
+
+
+def test_meet_discovery_needs_a_service_account(tmp_path):
+    """Without one the mode would find nothing at all, and look like a quiet week."""
+    with pytest.raises(ValueError, match="run.discovery: meet"):
+        _load_config(
+            tmp_path,
+            {
+                "stt": {"provider": "disabled"},
+                "presets": _disabled_builtins(),
+                "folders": [{"folder_id": "f1"}],
+                "run": {"discovery": "meet"},
+            },
+        )
+
+
+def test_meet_discovery_loads_with_delegation(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _meet_config([{"email": "one@example.com"}], run={"discovery": "meet"}),
+    )
+
+    assert cfg.run_discovery == "meet"
+
+
+def test_the_meet_block_survives_a_rewrite(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _meet_config(
+            [{"email": "one@example.com"}],
+            meet={"wait_hours": 6, "first_look_hours": 48, "fallback": "none"},
+        ),
+    )
+
+    written = _config_to_yaml_dict(cfg, tmp_path / "config.yml")
+
+    assert written["meet"]["wait_hours"] == 6
+    assert written["meet"]["first_look_hours"] == 48
+    assert written["meet"]["fallback"] == "none"
+    assert written["meet"]["folder_names"] == ["Google Meet"]

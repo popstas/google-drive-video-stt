@@ -40,7 +40,9 @@ SUPPORTED_STT_PROVIDERS = ("", "deepgram")
 # How the polling loop finds work. The CLI has a third, ``changes``, which only
 # makes sense as a one-off diagnostic -- a service that refuses to fall back would
 # stop finding recordings the moment a cursor went stale.
-DISCOVERY_MODES = ("auto", "walk")
+DISCOVERY_MODES = ("auto", "walk", "meet")
+# What an employee whose Meet query failed falls back to for that cycle.
+MEET_FALLBACKS = ("walk", "none")
 OUTPUT_TARGETS = ("drive", "folder")
 DEEPGRAM_DIARIZE_MODELS = ("latest", "v1")
 DEEPGRAM_AUDIO_SOURCES = ("m4a_copy", "mp3_96k", "mp3_192k")
@@ -271,6 +273,19 @@ class Config:
     # default: the legacy layouts (``Meet Recordings``, ``Meet <n> - <person>``) hold
     # no meetings, so matching them would only add candidates to choose between.
     meet_folder_names: tuple[str, ...] = ("Google Meet",)
+    # How long a recording Meet has named but not yet written is waited for. Meet
+    # takes minutes; a day is the point at which one recording that will never
+    # arrive stops holding discovery still.
+    meet_wait_hours: int = 24
+    # How far back to look when there is no mark: a first run, a wiped data dir, a
+    # new machine. A week is enough to cover a restart without turning a lost file
+    # into a re-reading of the archive; what is in *scope* is still run.since alone.
+    meet_first_look_hours: int = 168
+    # What happens to an employee whose Meet query fails: ``walk`` reads their
+    # folders the old way this cycle, ``none`` counts the error and moves on. The
+    # failure is logged either way -- a fallback that hides the problem is how a
+    # service ends up quietly paying twice.
+    meet_fallback: str = "walk"
     config_file: Path | None = None
 
     @property
@@ -757,6 +772,27 @@ def _parse_meet_folder_names(raw: object) -> tuple[str, ...]:
     return names
 
 
+def _parse_meet_wait(raw: object) -> tuple[int, int]:
+    """Read ``meet.wait_hours`` and ``meet.first_look_hours``."""
+    meet = _as_mapping(raw, "meet")
+    return (
+        _parse_positive_int(meet.get("wait_hours"), default=24, name="meet.wait_hours"),
+        _parse_positive_int(
+            meet.get("first_look_hours"), default=168, name="meet.first_look_hours"
+        ),
+    )
+
+
+def _parse_meet_fallback(raw: object) -> str:
+    meet = _as_mapping(raw, "meet")
+    value = (_yaml_str(meet.get("fallback"), "walk") or "walk").lower()
+    if value not in MEET_FALLBACKS:
+        raise ValueError(
+            f"meet.fallback must be one of {MEET_FALLBACKS!r}, got: {value!r}"
+        )
+    return value
+
+
 def _resolve_service_account(
     google: dict,
     base: Path | None,
@@ -1068,6 +1104,8 @@ def _config_from_yaml(
         google, base
     )
     meet_folder_names = _parse_meet_folder_names(raw.get("meet"))
+    meet_wait_hours, meet_first_look_hours = _parse_meet_wait(raw.get("meet"))
+    meet_fallback = _parse_meet_fallback(raw.get("meet"))
 
     # Clean break: a config still on the old flat list must be rewritten by hand so
     # each folder gains its employee, rather than silently polling nameless folders.
@@ -1193,6 +1231,17 @@ def _config_from_yaml(
             "changes feed belongs to a single account, while delegation reads each "
             "folder as its owner. Use 'walk', or drop the key and let it default."
         )
+    if run_discovery == "meet" and not (
+        google_service_account is not None or google_service_account_file is not None
+    ):
+        # The Meet API answers for the account that asks, so there is no shared way
+        # to read an employee's conferences. Without a key this mode would return
+        # nothing at all, which looks exactly like a quiet week.
+        raise ValueError(
+            "run.discovery: meet needs google.service_account (or "
+            "google.service_account_file): the Meet API answers only for the account "
+            "that asks, so each employee's conferences are read as that employee."
+        )
 
     if validate_providers:
         if presets and not openai_api_key:
@@ -1291,6 +1340,9 @@ def _config_from_yaml(
         google_service_account=google_service_account,
         google_service_account_file=google_service_account_file,
         meet_folder_names=meet_folder_names,
+        meet_wait_hours=meet_wait_hours,
+        meet_first_look_hours=meet_first_look_hours,
+        meet_fallback=meet_fallback,
         config_file=config_file,
     )
 
@@ -1813,7 +1865,12 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "task_url": config.planfix_task_url,
             "ignore_telegram_when_planfix": config.planfix_ignore_telegram_when_planfix,
         },
-        "meet": {"folder_names": list(config.meet_folder_names)},
+        "meet": {
+            "folder_names": list(config.meet_folder_names),
+            "wait_hours": config.meet_wait_hours,
+            "first_look_hours": config.meet_first_look_hours,
+            "fallback": config.meet_fallback,
+        },
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
         # the prompt text stays owned by the .md assets; disabled built-ins (e.g.

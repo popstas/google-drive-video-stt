@@ -8,7 +8,16 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
-from src import auth, booking_gate, call_booking, change_cursor, delegation, drive, meta_doc
+from src import (
+    auth,
+    booking_gate,
+    call_booking,
+    change_cursor,
+    delegation,
+    drive,
+    meet_mark,
+    meta_doc,
+)
 from src import main as main_module
 from src import preset_pipeline, relabel_transcript
 from src.config import (
@@ -600,9 +609,22 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         state = "not used: each folder is read as its owner, so every cycle walks"
     print(f"changes cursor: {cursor_path} ({state})")
     discovery = config.run_discovery
-    if config.uses_delegation:
+    if config.uses_delegation and discovery != "meet":
         discovery = f"{discovery}, but delegation always walks"
     print(f"discovery: run.discovery={discovery}")
+    if config.run_discovery == "meet":
+        mark_path = meet_mark.path_for(config.data_dir)
+        mark = meet_mark.read(mark_path)
+        where = (
+            mark.isoformat()
+            if mark is not None
+            else f"absent, the next cycle looks back {config.meet_first_look_hours}h"
+        )
+        print(f"Meet mark: {mark_path} ({where})")
+        print(
+            f"Meet waits {config.meet_wait_hours}h for a recording's file; "
+            f"an employee Meet refuses is {config.meet_fallback}"
+        )
     print(f"since: run.since={config.run_since or 'unset, every recording in scope'}")
     for folder in config.folders:
         folder_service = fleet.service_for(folder.folder_id)
@@ -886,6 +908,43 @@ def cmd_changes(args: argparse.Namespace) -> None:
     print(f"cursor would move to {next_cursor}; not saved")
 
 
+def cmd_meet_mark_show(args: argparse.Namespace) -> None:
+    """Print where Meet discovery has finished, and what an absent mark would mean."""
+    config = load_config(validate_providers=False, config_path=args.config)
+    path = meet_mark.path_for(config.data_dir)
+    mark = meet_mark.read(path)
+    print(f"path: {path}")
+    if mark is None:
+        print(
+            "mark: absent -- the next cycle looks back "
+            f"{config.meet_first_look_hours}h, and never further than run.since"
+        )
+        return
+    print(f"mark: {mark.isoformat()}")
+    print(
+        "Everything that started before this has been processed. A conference that is "
+        "still running, or whose recording has no file yet, holds the mark here until "
+        "it is done."
+    )
+
+
+def cmd_meet_mark_reset(args: argparse.Namespace) -> None:
+    """Forget the mark so the next cycle looks back over the first-look window.
+
+    Deliberately not "start from the beginning": what is in scope is run.since's job,
+    and a reset that re-read the whole archive would be a bill rather than a check.
+    """
+    config = load_config(validate_providers=False, config_path=args.config)
+    path = meet_mark.path_for(config.data_dir)
+    if meet_mark.clear(path):
+        print(
+            f"Forgot the Meet mark at {path}; the next cycle looks back "
+            f"{config.meet_first_look_hours}h."
+        )
+    else:
+        print(f"No Meet mark at {path}; the next cycle already looks back.")
+
+
 def cmd_cursor_show(args: argparse.Namespace) -> None:
     config = load_config(validate_providers=False, config_path=args.config)
     path = change_cursor.path_for(config.data_dir)
@@ -1093,12 +1152,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run_once.add_argument(
         "--mode",
-        choices=("auto", "walk", "changes"),
+        choices=("auto", "walk", "changes", "meet"),
         default=None,
         help=(
             "How to find work: 'auto' reads the changes feed when a cursor exists and "
             "sweeps otherwise; 'walk' sweeps every folder without touching the cursor; "
-            "'changes' only reads the feed and fails when there is no cursor. "
+            "'changes' only reads the feed and fails when there is no cursor; "
+            "'meet' asks each employee's Meet what they have been in, which needs a "
+            "service account. "
             "Defaults to run.discovery from the config, which the service itself uses"
         ),
     )
@@ -1415,6 +1476,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show every entry, not just the videos in configured folders",
     )
     p_changes.set_defaults(func=cmd_changes)
+
+    p_meet = sub.add_parser(
+        "meet",
+        help="Inspect or forget the Meet discovery mark",
+        description=(
+            "Where discovery by the Meet API has finished. Unlike the changes cursor "
+            "it is a readable moment, and it never moves past a conference whose "
+            "recording has not been processed yet."
+        ),
+    )
+    meet_sub = p_meet.add_subparsers(dest="meet_command", required=True)
+    p_meet_mark = meet_sub.add_parser("mark", help="Inspect or forget the mark")
+    meet_mark_sub = p_meet_mark.add_subparsers(dest="meet_mark_command", required=True)
+    p_meet_mark_show = meet_mark_sub.add_parser("show", help="Print the mark and its path")
+    p_meet_mark_show.set_defaults(func=cmd_meet_mark_show)
+    p_meet_mark_reset = meet_mark_sub.add_parser(
+        "reset", help="Forget the mark so the next cycle looks back"
+    )
+    p_meet_mark_reset.set_defaults(func=cmd_meet_mark_reset)
 
     p_cursor = sub.add_parser(
         "cursor",

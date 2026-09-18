@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from src import change_cursor, cli
+from src import change_cursor, cli, meet_mark
 from src.auth import AuthError
 from src.call_booking import CallBooking, append
 from src.config import EmployeeFolder
@@ -2071,3 +2071,71 @@ def test_doctor_names_an_employee_it_could_not_act_as(mocker, capsys, tmp_path):
     out = capsys.readouterr().out
     assert "UNREACHABLE one@example.com" in out
     assert "client id 123" in out
+
+
+# --- the Meet mark, from an operator's side -----------------------------------
+
+
+def _meet_config(mocker, tmp_path, **overrides):
+    cfg = dataclasses.replace(
+        make_config(folders=["folderA"], data_dir=tmp_path),
+        google_service_account={"client_email": "reader@project.iam.gserviceaccount.com"},
+        run_discovery="meet",
+        **overrides,
+    )
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    return cfg
+
+
+def test_meet_mark_show_explains_an_absent_mark(mocker, capsys, tmp_path):
+    _meet_config(mocker, tmp_path)
+
+    cli.main(["meet", "mark", "show"])
+
+    out = capsys.readouterr().out
+    assert "absent" in out
+    assert "168h" in out
+    assert "run.since" in out
+
+
+def test_meet_mark_show_prints_the_saved_moment(mocker, capsys, tmp_path):
+    cfg = _meet_config(mocker, tmp_path)
+    meet_mark.write(
+        meet_mark.path_for(cfg.data_dir),
+        datetime(2026, 9, 18, 9, 30, tzinfo=timezone.utc),
+    )
+
+    cli.main(["meet", "mark", "show"])
+
+    assert "2026-09-18T09:30" in capsys.readouterr().out
+
+
+def test_meet_mark_reset_forgets_it_and_says_so(mocker, capsys, tmp_path):
+    cfg = _meet_config(mocker, tmp_path)
+    meet_mark.write(
+        meet_mark.path_for(cfg.data_dir),
+        datetime(2026, 9, 18, 9, 30, tzinfo=timezone.utc),
+    )
+
+    cli.main(["meet", "mark", "reset"])
+
+    assert meet_mark.read(meet_mark.path_for(cfg.data_dir)) is None
+    assert "looks back" in capsys.readouterr().out
+
+
+def test_meet_mark_reset_on_nothing_says_that_too(mocker, capsys, tmp_path):
+    _meet_config(mocker, tmp_path)
+
+    cli.main(["meet", "mark", "reset"])
+
+    assert "already looks back" in capsys.readouterr().out
+
+
+def test_run_once_accepts_the_meet_mode(mocker, tmp_path):
+    _meet_config(mocker, tmp_path)
+    run_once = mocker.patch("src.main.run_once")
+    mocker.patch("src.cli.auth.build_drive_service", return_value=MagicMock())
+
+    cli.main(["run-once", "--mode", "meet"])
+
+    assert run_once.call_args.kwargs["mode"] == "meet"

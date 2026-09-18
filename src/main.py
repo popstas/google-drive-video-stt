@@ -22,6 +22,8 @@ from src import (
     change_cursor,
     delegation,
     drive,
+    meet_api,
+    meet_mark,
     meet_transcript as meet_transcript_module,
     meta as meta_module,
     meta_doc,
@@ -36,8 +38,14 @@ from src import (
     stt_document,
     webhook,
 )
-from src.auth import AuthError, build_drive_service
-from src.config import Config, is_run_enabled, load_config, parse_since
+from src.auth import AuthError, build_drive_service, build_meet_service
+from src.config import (
+    Config,
+    EmployeeFolder,
+    is_run_enabled,
+    load_config,
+    parse_since,
+)
 from src.meeting_time import parse_meeting_start
 from src.extractor import extract_m4a_copy, extract_mp3
 from src.openai_pipeline import OpenAIPipeline
@@ -1834,6 +1842,10 @@ class _Discovery:
     cursor: str | None
     retries: int = 0
     folder_errors: int = 0
+    # Where Meet discovery has finished, when that is the mode. Like the cursor
+    # it is only saved by a cycle that drained what it found, and for the same
+    # reason: a mark that moved on "I looked" would lose the slow recordings.
+    meet_mark: datetime | None = None
 
 
 def _notify_listing_failure(what: str, exc: Exception, config: Config) -> None:
@@ -1905,6 +1917,205 @@ def _discover_by_walk(fleet: delegation.Fleet, config: Config) -> _Discovery:
         listings.append((folder_id, items))
     return _Discovery(listings, cursor, retries, folder_errors)
 
+
+
+def _moment(text: str) -> datetime | None:
+    """One of Meet's timestamps as an aware UTC datetime, or ``None``."""
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        logger.warning("Meet returned a time I cannot read: %r", text)
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _meet_floor(config: Config, now: datetime) -> datetime:
+    """Where to start when there is no mark: a first run, or a wiped data dir.
+
+    The later of the first-look window and ``run.since``, so losing the file costs one
+    longer listing rather than a reading of the whole archive. What is in *scope*
+    stays ``run.since``'s job alone: if the mark also decided scope, losing it would
+    silently mean transcribing everything, which is a bill rather than a bug.
+    """
+    look_back = now - timedelta(hours=config.meet_first_look_hours)
+    since = parse_since(config.run_since or None, source="run.since")
+    if since is None:
+        return look_back
+    return max(look_back, since.astimezone(timezone.utc))
+
+
+def _meet_work(
+    conferences: list[meet_api.MeetConference], config: Config, now: datetime
+) -> tuple[list[str], datetime | None]:
+    """The Drive files to process, and the earliest moment still unfinished.
+
+    The mark may not move past work that is not done, and Meet names a conference as
+    soon as it ends while its recording appears minutes later. So a conference is
+    unfinished while it is still running, while a recording of it has no file yet, and
+    while it could not be read at all -- and each of those holds the mark at its own
+    start time, which is exactly what brings it back next cycle.
+
+    The one thing that may not hold the mark for ever is a recording whose file never
+    arrives. After ``meet.wait_hours`` it is let go with a line in the log, because a
+    single failed recording must not freeze discovery for everybody.
+    """
+    files: list[str] = []
+    held: datetime | None = None
+
+    def hold(conference: meet_api.MeetConference) -> None:
+        nonlocal held
+        start = _moment(conference.start_time)
+        if start is not None and (held is None or start < held):
+            held = start
+
+    for conference in conferences:
+        if conference.unreadable:
+            hold(conference)
+            continue
+        if not conference.ended:
+            # No recordings *yet* -- the call is still going. Letting the mark past
+            # its start time would mean never seeing this conference again.
+            hold(conference)
+            continue
+        for recording in conference.recordings:
+            if recording.ready:
+                files.append(recording.file_id)
+                continue
+            ended = _moment(conference.end_time) or _moment(conference.start_time)
+            waited = now - ended if ended is not None else timedelta(0)
+            if waited < timedelta(hours=config.meet_wait_hours):
+                hold(conference)
+            else:
+                logger.warning(
+                    "Meet has not produced the file for a recording of %s after %dh "
+                    "(state %s); discovery will stop waiting for it",
+                    conference.name,
+                    config.meet_wait_hours,
+                    recording.state or "unknown",
+                )
+    return files, held
+
+
+def _meet_listing(
+    fleet: delegation.Fleet, folder_id: str, file_ids: list[str]
+) -> list[dict]:
+    """The state of every meeting folder Meet says holds a new recording.
+
+    Meet answers with a file, and everything downstream is keyed on the folder that
+    holds it -- so that folder is listed exactly as the walk lists it, and the same
+    artifacts beside the video decide what still needs doing. This is the only place
+    the two paths differ: which folders get listed, never what listing one means.
+    """
+    service = fleet.service_for(folder_id)
+    items: list[dict] = []
+    seen: set[str] = set()
+    for file_id in file_ids:
+        metadata = drive.get_file_metadata(service, file_id)
+        for container in metadata.get("parents") or []:
+            if container in seen:
+                continue
+            seen.add(container)
+            items.extend(drive.list_folder_state(service, container))
+    return items
+
+
+def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
+    """Ask each employee's Meet what they have been in, instead of reading Drive.
+
+    One request answers "anything new?" however large the archive, which is the whole
+    point: the walk costs a request per meeting folder per cycle and grows with every
+    call ever held.
+
+    An employee whose Meet query fails is a counted folder error, and their folders
+    are walked this cycle when ``meet.fallback`` says so. Either way the mark stays
+    where it is, because a mark that advanced on everybody else's work would put that
+    employee's conferences behind it for good.
+    """
+    if not config.uses_delegation:
+        raise SystemExit(
+            "run.discovery: meet needs a service account: the Meet API answers only "
+            "for the account that asks. Use `--mode walk`."
+        )
+    now = datetime.now(timezone.utc)
+    mark = meet_mark.read(meet_mark.path_for(config.data_dir))
+    if mark is None:
+        mark = _meet_floor(config, now)
+        logger.info("No Meet mark saved; looking back to %s", mark.isoformat())
+
+    listings: list[tuple[str, list[dict]]] = []
+    folder_errors = 0
+    retries = 0
+    held: datetime | None = None
+    fall_back_to_walk: list[EmployeeFolder] = []
+
+    def hold_at(moment: datetime | None) -> None:
+        nonlocal held
+        if moment is not None and (held is None or moment < held):
+            held = moment
+
+    for folder in config.folders:
+        folder_id = folder.folder_id
+        if not folder.email:
+            # A folder pinned by id with nobody attached: there is no account to ask,
+            # so it is read the way it always was.
+            fall_back_to_walk.append(folder)
+            continue
+        try:
+            service = build_meet_service(config=config, subject=folder.email)
+            conferences = meet_api.conferences_since(service, mark)
+        except (AuthError, meet_api.MeetError, HttpError) as exc:
+            folder_errors += 1
+            hold_at(mark)
+            _notify_listing_failure(f"the conferences of {folder.email}", exc, config)
+            if config.meet_fallback == "walk":
+                fall_back_to_walk.append(folder)
+            continue
+        files, unfinished = _meet_work(conferences, config, now)
+        hold_at(unfinished)
+        listing_retry_state = _RetryState()
+        try:
+            items = _call_with_transient_retries(
+                lambda: _meet_listing(fleet, folder_id, files),
+                description=f"list the folders Meet named for {folder_id}",
+                retry_state=listing_retry_state,
+            )
+        except Exception as exc:  # noqa: BLE001 - counted and reported, never swallowed
+            folder_errors += 1
+            # The conferences were read but their folders were not, so this employee
+            # has unfinished work whatever the conferences said.
+            hold_at(mark)
+            _notify_listing_failure(f"folder {folder_id}", exc, config)
+            continue
+        finally:
+            retries += listing_retry_state.retry_count
+        logger.info(
+            "Meet named %d conference(s) for %s [files=%d, listed=%d]",
+            len(conferences),
+            folder_id,
+            len(files),
+            len(items),
+        )
+        listings.append((folder_id, items))
+
+    if fall_back_to_walk:
+        walked = _discover_by_walk(
+            fleet, replace(config, folders=tuple(fall_back_to_walk))
+        )
+        listings.extend(walked.listings)
+        folder_errors += walked.folder_errors
+        retries += walked.retries
+
+    return _Discovery(
+        listings,
+        cursor=None,
+        retries=retries,
+        folder_errors=folder_errors,
+        meet_mark=held or now,
+    )
 
 def _discover_by_changes(service: Any, config: Config, cursor: str) -> _Discovery | None:
     """Read Drive's own journal and look only where something happened.
@@ -2059,6 +2270,8 @@ def _discover(
     service account, so this is the last line of that defence rather than a silent
     downgrade.
     """
+    if mode == "meet":
+        return _discover_by_meet(fleet, config)
     if config.uses_delegation:
         return replace(_discover_by_walk(fleet, config), cursor=None)
     if mode == "walk":
@@ -2289,6 +2502,20 @@ def run_once(
         logger.info(
             "Holding the changes cursor [failed=%d, folder_errors=%d, deferred=%d]; "
             "the next cycle reads the same changes again",
+            cycle_failed, cycle_folder_errors, cycle_deferred,
+        )
+
+    # The Meet mark follows the same rule as the cursor, for the same reason: it says
+    # "everything that started before this is dealt with", so a cycle that failed on
+    # something, deferred it, or could not read a folder has not earned the move.
+    # Discovery has already held it at the earliest conference it did not finish;
+    # this guard covers what went wrong *after* discovery.
+    if not dry_run and discovery.meet_mark and cycle_drained:
+        meet_mark.write(meet_mark.path_for(config.data_dir), discovery.meet_mark)
+    elif not dry_run and discovery.meet_mark:
+        logger.info(
+            "Holding the Meet mark [failed=%d, folder_errors=%d, deferred=%d]; "
+            "the next cycle asks for the same conferences again",
             cycle_failed, cycle_folder_errors, cycle_deferred,
         )
 
