@@ -100,3 +100,16 @@ Everything above is visible through read-only Drive calls, as the folder's owner
   root is the one still gaining subfolders;
 - `permissions.list` on each root: anything beyond the owner is the warning sign
   above.
+
+## Finding recordings without knowing the folder
+
+Everything above is about which folder Meet writes into, because searching Drive means
+starting from a folder. `run.discovery: meet` does not start there: the Meet API names
+the conference and the Drive file it produced, and the folder is whatever that file's
+parent turns out to be. A root Meet abandoned after being shared therefore costs that
+path nothing -- the new root is found by following the file, not by recognising the
+folder.
+
+That does not make the rule below harmless. The recordings are still written into a
+root somebody may have shared, the walk is still the fallback, and every artifact is
+still written beside the video. Do not share a recordings root.

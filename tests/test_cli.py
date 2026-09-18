@@ -2239,3 +2239,16 @@ def test_doctor_without_meet_mode_asks_meet_nothing(mocker, capsys, tmp_path):
 
     asked.assert_not_called()
     assert "Meet mark:" not in capsys.readouterr().out
+
+
+def test_doctor_does_not_blame_the_walk_in_meet_mode(mocker, capsys, tmp_path):
+    """In meet mode the cursor is unused because Meet answers, not because it walks."""
+    _meet_doctor(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_meet_service", return_value=MagicMock())
+    mocker.patch("src.cli.meet_api.conferences_since", return_value=[])
+
+    cli.main(["doctor", "--drive"])
+
+    out = capsys.readouterr().out
+    assert "Meet is asked what was recorded instead" in out
+    assert "every cycle walks" not in out

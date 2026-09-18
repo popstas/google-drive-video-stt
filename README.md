@@ -283,6 +283,55 @@ impersonated, which folder was resolved for them, what is in it, and -- the line
 watching -- whether that folder carries access beyond its owner, which means Meet will
 abandon it at the next recording.
 
+### Asking Meet instead of reading Drive
+
+Walking costs one request per meeting folder per cycle, so it grows with every call
+ever held: measured on a real fleet of ten people, 171 meetings meant 211 requests a
+cycle, while the number of new calls a day stayed at about five. The Meet API answers
+the same question -- "anything new?" -- in one request per employee, whatever the size
+of the archive, and names the Drive file each recording produced.
+
+```yaml
+run:
+  discovery: meet
+meet:
+  wait_hours: 24          # how long a named recording without a file is waited for
+  first_look_hours: 168   # how far back to look when there is no mark
+  fallback: walk          # or none: what an employee Meet refuses falls back to
+```
+
+Two things have to be true before it works, and they fail differently:
+
+| what | where | the failure it prevents |
+| --- | --- | --- |
+| `https://www.googleapis.com/auth/meetings.space.readonly` authorized for the same client id | Google Admin Console, beside the `drive` scope | `unauthorized_client` when the token is requested |
+| the Google Meet API enabled in the service account's own project | Google Cloud Console | `403 SERVICE_DISABLED` on the first call |
+
+The read-only scope is deliberate: `meetings.space.created` is the alternative and it
+also allows creating and changing meetings, which this service never does. The `drive`
+scope is still needed -- Meet returns only the id of the file, which is still
+downloaded from Drive, with the artifacts still written beside it.
+
+Where discovery has finished is a moment in `<data-dir>/meet_checked_at.txt`, not an
+opaque cursor, because Meet filters conferences by their start time. **It never moves
+past unfinished work.** Meet names a conference as soon as it ends, while its recording
+file appears five to eight minutes later (measured), so a conference still running, a
+recording with no file yet, and a conference whose recordings could not be read all
+hold the mark where it is. An ended conference nobody recorded holds nothing. A file
+that never arrives is let go after `meet.wait_hours`, with a line in the log, so one
+failed recording cannot freeze discovery for everybody.
+
+Losing the file costs one longer listing and nothing else: discovery then looks back
+`meet.first_look_hours`, and never further than `run.since`. What is in scope stays
+`run.since`'s job alone -- if the mark decided that too, losing it would mean
+transcribing the whole archive.
+
+`gdstt meet mark show` prints where it stands, `gdstt meet mark reset` forgets it, and
+`gdstt doctor --drive` says, per employee, whether Meet answers at all and what it
+answered. Walking remains fully supported and is what `meet.fallback: walk` uses for
+an employee whose query failed: `gdstt run-once --mode meet` and `--mode walk` at the
+same moment must find the same recordings.
+
 ### Meeting subfolders
 
 Google Meet files each meeting into its own subfolder of a `Google Meet` folder in the

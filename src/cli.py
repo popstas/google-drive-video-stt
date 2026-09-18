@@ -607,7 +607,9 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         state = "set, covers the configured folders"
     else:
         state = "set, but the configured folders changed -- next cycle sweeps once"
-    if config.uses_delegation:
+    if config.run_discovery == "meet":
+        state = "not used: Meet is asked what was recorded instead"
+    elif config.uses_delegation:
         state = "not used: each folder is read as its owner, so every cycle walks"
     print(f"changes cursor: {cursor_path} ({state})")
     discovery = config.run_discovery

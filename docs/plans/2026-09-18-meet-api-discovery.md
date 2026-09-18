@@ -74,7 +74,7 @@ whether this can ever be the default: a recording made by somebody outside the
 watched group reaches an employee only as a shortcut, which the walk finds and an
 API that lists only hosted conferences never would.
 
-### Task 2: a client for the Meet API
+### Task 2: a client for the Meet API -- DONE (`src/meet_api.py`)
 
 `src/meet_api.py`, knowing nothing about folders or the pipeline:
 
@@ -97,7 +97,7 @@ API that lists only hosted conferences never would.
   (`STARTED` and `ENDED` carry no destination, only `FILE_GENERATED` does); an
   employee with no conferences; both failure messages.
 
-### Task 3: a discovery mode
+### Task 3: a discovery mode -- DONE (`_discover_by_meet`, `src/meet_mark.py`)
 
 - `run.discovery: meet`, alongside `auto` and `walk`. Refused without delegation,
   because the API is queried as each employee.
@@ -145,7 +145,7 @@ API that lists only hosted conferences never would.
   a logged line; a missing mark starts from the first-look window and never earlier
   than `run.since`.
 
-### Task 4: one conference, one piece of work
+### Task 4: one conference, one piece of work -- DONE (`_meet_placements`)
 
 A call between two employees is listed by both. Today the walk produces it once,
 because only the organiser's folder holds the file.
@@ -156,7 +156,7 @@ because only the organiser's folder holds the file.
 - Tests: the same conference from two employees yields one item, attributed to the
   owner; a conference whose file belongs to nobody configured is still processed once.
 
-### Task 5: falling back rather than falling over
+### Task 5: falling back rather than falling over -- DONE
 
 - An employee whose Meet query fails is a counted folder error, exactly as an
   unreadable folder is today, and the rest of the fleet proceeds.
@@ -171,13 +171,13 @@ because only the organiser's folder holds the file.
   it is an error and nothing else changes; either way the mark does not move past the
   moment that employee was last known good.
 
-### Task 6: `doctor --drive` reports the new path
+### Task 6: `doctor --drive` reports the new path -- DONE
 
 Per employee: whether the Meet API answers, how many conferences it saw in the
 window, how many of those produced a recording, and how many of those are already
 processed. Plus the scope failure, translated.
 
-### Task 7: documentation and live verification
+### Task 7: documentation and live verification -- DONE
 
 - README: the mode, the scope to authorize, the window, and the fallback.
 - AGENTS: that discovery has two sources and one item shape.
@@ -187,6 +187,22 @@ processed. Plus the scope failure, translated.
   a comparison with `--mode walk` on the same moment -- they must find the same
   recordings. That comparison is the acceptance test; a difference is a bug in this
   plan, not a curiosity.
+
+## What the live verification found
+
+Run against the real domain on 2026-09-18, one delegated employee with a Meet archive:
+
+- `doctor --drive`: Meet answered for the employee -- 12 conferences in the window, 9
+  recorded, 9 files ready, 0 still being written, 1 of 9 already processed. The walk
+  saw 9 mp4 files in 9 meeting subfolders: the same 9.
+- The acceptance test: `run-once --dry-run --mode meet` and `--mode walk` at the same
+  moment each found **the same 8 pending recordings**, by file id, with no difference.
+- The mark is written by a cycle that finished and not by a dry run, checked against
+  the live file rather than only in tests.
+
+Still open, and the reason this is not yet the default: whether
+`conferenceRecords.list` returns conferences an employee only attended. See
+`docs/reports/2026-09-18-meet-api.md`.
 
 ## What stays as it is
 

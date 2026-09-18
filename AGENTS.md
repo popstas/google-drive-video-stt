@@ -214,6 +214,12 @@ cached for the life of the process (`delegation.forget_clients` drops them). One
 employee failing is a counted folder error, not an aborted cycle, which is why the
 listing no longer re-raises an auth failure while delegating.
 
+**Discovery has more than one source and exactly one shape.** Walking Drive, reading
+the changes feed and asking Meet all end in the same `_Discovery`: folders paired with
+the listing of what is in them. Whether a recording is done is still read from the
+artifacts beside it, never from what discovery remembered -- which is why losing a
+cursor or a mark costs requests and never work.
+
 **A shared recordings root is a dead one.** Meet stops writing into a `Google Meet`
 root as soon as it carries any permission beyond its owner, and creates a second root
 of the same name beside it; the abandoned one keeps its id and stays readable, so the
