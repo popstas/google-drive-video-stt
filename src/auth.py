@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import yaml
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
@@ -270,14 +271,96 @@ def load_credentials(
     return _credentials_from_token_file(token_file)
 
 
+def _service_account_info(config: Config) -> dict:
+    """The service account key, from the config or from the file it points at."""
+    if config.google_service_account is not None:
+        return dict(config.google_service_account)
+    path = config.google_service_account_file
+    assert path is not None  # uses_delegation guarantees one of the two
+    try:
+        info = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        raise AuthError(
+            f"Service account key at {path} could not be read: {exc}. "
+            "Download a fresh key for the service account in Google Cloud Console."
+        ) from exc
+    if not isinstance(info, dict):
+        raise AuthError(
+            f"Service account key at {path} is malformed: expected a JSON object."
+        )
+    return info
+
+
+def _delegation_failure(exc: Exception, info: dict, subject: str) -> AuthError:
+    """Turn Google's two-word refusal into the sentence that names the fix.
+
+    Both failures are configuration, not code, and both are opaque as delivered:
+    ``unauthorized_client`` reads like a broken key when it means the admin has not
+    authorized this client id for this scope, and ``invalid_grant`` reads like an
+    expired token when it means the address does not exist in the domain. The key
+    itself is never part of the message -- only the two identifiers an admin needs.
+    """
+    text = str(exc)
+    client_id = info.get("client_id", "unknown")
+    scopes = " ".join(SCOPES)
+    if "unauthorized_client" in text:
+        return AuthError(
+            f"Domain-wide delegation is not authorized for client id {client_id} "
+            f"and scope {scopes}. In Google Admin Console: Security -> Access and "
+            "data control -> API controls -> Manage Domain-Wide Delegation -> Add "
+            "new, with that client id and that scope."
+        )
+    if "invalid_grant" in text:
+        return AuthError(
+            f"{subject} could not be impersonated: the domain does not know this "
+            "address, or the account is suspended."
+        )
+    return AuthError(f"Could not act as {subject}: {text}")
+
+
+def _delegated_credentials(config: Config, subject: str):
+    """Credentials that act as ``subject``, refreshed eagerly so failures are early.
+
+    The refresh costs one token request per employee per cycle and buys the
+    difference between a named configuration error at startup and a traceback from
+    somewhere inside the first listing.
+    """
+    info = _service_account_info(config)
+    try:
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=SCOPES
+        )
+    except ValueError as exc:
+        raise AuthError(
+            f"Service account key is malformed: {exc}. "
+            "Download a fresh key in Google Cloud Console."
+        ) from exc
+    delegated = creds.with_subject(subject)
+    try:
+        delegated.refresh(Request())
+    except Exception as exc:  # noqa: BLE001 - every failure is reported, none swallowed
+        raise _delegation_failure(exc, info, subject) from exc
+    return delegated
+
+
 def build_drive_service(
     data_dir: Path | None = None,
     *,
     config: Config | None = None,
+    subject: str | None = None,
 ):
+    """A Drive client, optionally acting as ``subject``.
+
+    With a service account configured, a subject means "read this employee's own
+    Drive as the employee". Without one the subject is ignored: a folder pinned by
+    id is read through the user token exactly as before, which is what keeps every
+    existing deployment working.
+    """
     if config is None and data_dir is None:
         config = load_config(validate_providers=False)
-    if config is not None:
+    if config is not None and subject and config.uses_delegation:
+        creds = _delegated_credentials(config, subject)
+    elif config is not None:
         creds = load_credentials(config=config)
     else:
         creds = load_credentials(data_dir)

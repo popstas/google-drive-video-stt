@@ -582,3 +582,150 @@ def test_run_interactive_flow_inline_credentials_file_token_writes_file(tmp_path
 
     assert token_file.read_text() == '{"new": "tok"}'
     persist.assert_not_called()
+
+
+# --- delegation: acting as the employee who owns the folder -------------------
+
+
+SERVICE_ACCOUNT_INFO = {
+    "type": "service_account",
+    "client_email": "reader@project.iam.gserviceaccount.com",
+    "client_id": "123456789",
+    "private_key": "-----BEGIN PRIVATE KEY----- x -----END PRIVATE KEY-----",
+}
+
+
+def _delegating_config(tmp_path, *, inline=True):
+    cfg = MagicMock()
+    cfg.data_dir = tmp_path
+    cfg.uses_delegation = True
+    if inline:
+        cfg.google_service_account = dict(SERVICE_ACCOUNT_INFO)
+        cfg.google_service_account_file = None
+    else:
+        path = tmp_path / "sa.json"
+        path.write_text(json.dumps(SERVICE_ACCOUNT_INFO), encoding="utf-8")
+        cfg.google_service_account = None
+        cfg.google_service_account_file = path
+    return cfg
+
+
+def test_a_subject_is_impersonated_with_the_service_account(tmp_path, mocker):
+    cfg = _delegating_config(tmp_path)
+    base = MagicMock()
+    delegated = MagicMock()
+    base.with_subject.return_value = delegated
+    from_info = mocker.patch(
+        "src.auth.service_account.Credentials.from_service_account_info",
+        return_value=base,
+    )
+    build_mock = mocker.patch("src.auth.build", return_value="service")
+
+    result = auth.build_drive_service(config=cfg, subject="one@example.com")
+
+    assert result == "service"
+    from_info.assert_called_once_with(SERVICE_ACCOUNT_INFO, scopes=auth.SCOPES)
+    base.with_subject.assert_called_once_with("one@example.com")
+    build_mock.assert_called_once_with(
+        "drive", "v3", credentials=delegated, cache_discovery=False
+    )
+
+
+def test_the_key_may_live_in_a_file(tmp_path, mocker):
+    cfg = _delegating_config(tmp_path, inline=False)
+    base = MagicMock()
+    from_info = mocker.patch(
+        "src.auth.service_account.Credentials.from_service_account_info",
+        return_value=base,
+    )
+    mocker.patch("src.auth.build", return_value="service")
+
+    auth.build_drive_service(config=cfg, subject="one@example.com")
+
+    from_info.assert_called_once_with(SERVICE_ACCOUNT_INFO, scopes=auth.SCOPES)
+
+
+def test_a_missing_key_file_says_so(tmp_path):
+    cfg = MagicMock()
+    cfg.data_dir = tmp_path
+    cfg.uses_delegation = True
+    cfg.google_service_account = None
+    cfg.google_service_account_file = tmp_path / "absent.json"
+
+    with pytest.raises(auth.AuthError, match="absent.json"):
+        auth.build_drive_service(config=cfg, subject="one@example.com")
+
+
+def test_delegation_that_was_never_authorized_names_what_to_authorize(tmp_path, mocker):
+    """`unauthorized_client` means the admin has not added this client id and scope."""
+    cfg = _delegating_config(tmp_path)
+    base = MagicMock()
+    delegated = MagicMock()
+    delegated.refresh.side_effect = RefreshError(
+        "('unauthorized_client: Client is unauthorized to retrieve access tokens', ...)"
+    )
+    base.with_subject.return_value = delegated
+    mocker.patch(
+        "src.auth.service_account.Credentials.from_service_account_info",
+        return_value=base,
+    )
+    mocker.patch("src.auth.build", return_value="service")
+
+    with pytest.raises(auth.AuthError) as excinfo:
+        auth.build_drive_service(config=cfg, subject="one@example.com")
+
+    message = str(excinfo.value)
+    assert "123456789" in message
+    assert "https://www.googleapis.com/auth/drive" in message
+    assert "domain-wide delegation" in message.lower()
+
+
+def test_an_address_the_domain_does_not_know_says_so(tmp_path, mocker):
+    cfg = _delegating_config(tmp_path)
+    base = MagicMock()
+    delegated = MagicMock()
+    delegated.refresh.side_effect = RefreshError("('invalid_grant: Invalid email', ...)")
+    base.with_subject.return_value = delegated
+    mocker.patch(
+        "src.auth.service_account.Credentials.from_service_account_info",
+        return_value=base,
+    )
+    mocker.patch("src.auth.build", return_value="service")
+
+    with pytest.raises(auth.AuthError, match="gone@example.com"):
+        auth.build_drive_service(config=cfg, subject="gone@example.com")
+
+
+def test_a_failure_never_prints_the_key(tmp_path, mocker):
+    cfg = _delegating_config(tmp_path)
+    base = MagicMock()
+    delegated = MagicMock()
+    delegated.refresh.side_effect = RefreshError("('unauthorized_client', ...)")
+    base.with_subject.return_value = delegated
+    mocker.patch(
+        "src.auth.service_account.Credentials.from_service_account_info",
+        return_value=base,
+    )
+    mocker.patch("src.auth.build", return_value="service")
+
+    with pytest.raises(auth.AuthError) as excinfo:
+        auth.build_drive_service(config=cfg, subject="one@example.com")
+
+    assert "PRIVATE KEY" not in str(excinfo.value)
+
+
+def test_without_a_service_account_a_subject_changes_nothing(tmp_path, mocker):
+    """A pinned folder with an email is still read through the user's own token."""
+    cfg = MagicMock()
+    cfg.data_dir = tmp_path
+    cfg.uses_delegation = False
+    fake_creds = MagicMock()
+    load_mock = mocker.patch("src.auth.load_credentials", return_value=fake_creds)
+    build_mock = mocker.patch("src.auth.build", return_value="service")
+
+    auth.build_drive_service(config=cfg, subject="one@example.com")
+
+    load_mock.assert_called_once_with(config=cfg)
+    build_mock.assert_called_once_with(
+        "drive", "v3", credentials=fake_creds, cache_discovery=False
+    )
