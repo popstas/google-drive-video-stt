@@ -293,6 +293,32 @@ def export_document_text(service: Any, file_id: str) -> str:
     return str(data)
 
 
+def shared_with(service: Any, file_id: str) -> list[str]:
+    """Everyone but the owner who has access, as ``role:whoever`` strings.
+
+    Sharing a Meet recordings root is what makes Meet abandon it (see
+    ``docs/meet-recordings-folder.md``), so a root with anything in this list is one
+    recording away from going quiet. The owner is left out: it is the one permission
+    that is always there and never the problem.
+    """
+    permissions = (
+        service.permissions()
+        .list(
+            fileId=file_id,
+            fields="permissions(type,role,emailAddress,domain)",
+            supportsAllDrives=True,
+        )
+        .execute()
+        .get("permissions", [])
+    )
+    return [
+        f"{entry.get('role')}:"
+        f"{entry.get('emailAddress') or entry.get('domain') or entry.get('type')}"
+        for entry in permissions
+        if entry.get("role") != "owner"
+    ]
+
+
 def describe_folder(service: Any, folder_id: str) -> dict:
     """Return ``{id, name, parents, trashed}`` for a folder.
 

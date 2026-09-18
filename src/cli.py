@@ -8,10 +8,11 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
-from src import auth, booking_gate, call_booking, change_cursor, drive, meta_doc
+from src import auth, booking_gate, call_booking, change_cursor, delegation, drive, meta_doc
 from src import main as main_module
 from src import preset_pipeline, relabel_transcript
 from src.config import (
+    Config,
     config_get,
     config_set,
     config_unset,
@@ -203,9 +204,32 @@ def _since_argument(value: str) -> str:
     return parsed.isoformat() if parsed is not None else ""
 
 
+def _fleet(config: Config) -> delegation.Fleet:
+    """Resolve the config a command is about to work with.
+
+    A command sees the same effective config a cycle does: every entry carrying an
+    id, and the client each folder must be read with. Without delegation this is the
+    shared client and the config as written, which is what every command did before.
+    """
+    return delegation.resolve(config, delegation.shared_service(config))
+
+
+def _service_for_file(fleet: delegation.Fleet, file_id: str):
+    """The client that can open ``file_id``, or exit saying nobody can."""
+    service = delegation.service_for_file(fleet, file_id)
+    if service is None:
+        logger.error(
+            "%s is not visible to any configured employee; check the id, or add the "
+            "employee whose Drive it lives in to folders:",
+            file_id,
+        )
+        raise SystemExit(1)
+    return service
+
+
 def cmd_run_once(args: argparse.Namespace) -> None:
     config = load_config(config_path=args.config)
-    service = auth.build_drive_service(config=config)
+    service = delegation.shared_service(config)
     main_module.run_once(
         service,
         config,
@@ -221,7 +245,9 @@ def cmd_run_once(args: argparse.Namespace) -> None:
 
 def cmd_process(args: argparse.Namespace) -> None:
     config = load_config(config_path=args.config)
-    service = auth.build_drive_service(config=config)
+    fleet = _fleet(config)
+    config = fleet.config
+    service = _service_for_file(fleet, args.target)
     is_folder = True if args.folder else None
     telemetry = main_module.process_target(
         service,
@@ -238,16 +264,21 @@ def cmd_process(args: argparse.Namespace) -> None:
 
 def cmd_latest(args: argparse.Namespace) -> None:
     config = load_config(config_path=args.config)
+    if not args.folder and not config.folders:
+        logger.error("No folder to inspect; configure folders or pass --folder")
+        raise SystemExit(1)
+    fleet = _fleet(config)
+    config = fleet.config
     folder_id = args.folder or (config.folders[0].folder_id if config.folders else None)
     if not folder_id:
-        logger.error("No folder to inspect; configure folders or pass --folder")
+        logger.error("No folder to inspect; no configured employee could be resolved")
         raise SystemExit(1)
     if not args.folder and len(config.folders) > 1:
         logger.info(
             "%d folders configured; using the first (%s). Pass --folder to pick another.",
             len(config.folders), folder_id,
         )
-    service = auth.build_drive_service(config=config)
+    service = _service_for_file(fleet, folder_id)
     newest = drive.find_newest_mp4_in_tree(service, folder_id)
     if newest is None:
         logger.info("Folder %s has no mp4 files", folder_id)
@@ -351,7 +382,9 @@ def cmd_reprocess(args: argparse.Namespace) -> None:
         raise SystemExit(1)
     plan = "transcript + all presets" if reprocess_txt else ", ".join(preset_names)
     print(f"Reprocess plan for {args.target}: {plan}")
-    service = auth.build_drive_service(config=config)
+    fleet = _fleet(config)
+    config = fleet.config
+    service = _service_for_file(fleet, args.target)
     is_folder = True if args.folder else None
     telemetry = main_module.process_target(
         service,
@@ -407,6 +440,28 @@ def _describe_employee(folder) -> str:
     if folder.name and folder.email:
         return f"{folder.name} <{folder.email}>"
     return folder.name or folder.email or "(no employee configured)"
+
+
+def _print_root_sharing(service, folder_id: str) -> None:
+    """Say so when a recordings root is shared, because Meet is about to leave it.
+
+    Measured, not guessed: a root that carries any access beyond its owner keeps
+    every recording it already has and receives no new one, from the next call on.
+    Reporting it while the next call has not happened yet is the only moment when
+    removing the share still saves the folder.
+    """
+    try:
+        others = drive.shared_with(service, folder_id)
+    except Exception as exc:  # noqa: BLE001 -- a diagnostic reports, it does not raise
+        print(f"  sharing: could not be read ({exc})")
+        return
+    if not others:
+        return
+    print(
+        f"  WARNING: shared with {', '.join(others)} -- Meet abandons a shared "
+        "recordings folder at the next recording and starts a new one. Remove the "
+        "access to keep this folder alive; share single meeting subfolders instead."
+    )
 
 
 def _print_folder_diagnosis(service, folder_id: str) -> None:
@@ -507,8 +562,20 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         print("Drive auth: not checked (use --drive)")
         return
 
-    service = auth.build_drive_service(config=config)
+    if config.uses_delegation:
+        account = (config.google_service_account or {}).get("client_email", "")
+        source = account or str(config.google_service_account_file or "")
+        print(f"delegation: on, acting as each employee via {source or 'a key'}")
+    failures: list[str] = []
+    fleet = delegation.resolve(
+        config,
+        delegation.shared_service(config),
+        on_error=lambda folder, exc: failures.append(f"{folder.email}: {exc}"),
+    )
+    config = fleet.config
     print("Drive auth: OK")
+    for failure in failures:
+        print(f"  UNREACHABLE {failure}")
     cursor_path = change_cursor.path_for(config.data_dir)
     saved_cursor = change_cursor.read(cursor_path)
     if not saved_cursor:
@@ -521,11 +588,17 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         state = "set, covers the configured folders"
     else:
         state = "set, but the configured folders changed -- next cycle sweeps once"
+    if config.uses_delegation:
+        state = "not used: each folder is read as its owner, so every cycle walks"
     print(f"changes cursor: {cursor_path} ({state})")
     print(f"discovery: run.discovery={config.run_discovery}")
     print(f"since: run.since={config.run_since or 'unset, every recording in scope'}")
     for folder in config.folders:
-        _print_folder_diagnosis(service, folder.folder_id)
+        folder_service = fleet.service_for(folder.folder_id)
+        if folder.email:
+            print(f"Employee {folder.email}: {_describe_employee(folder)}")
+        _print_folder_diagnosis(folder_service, folder.folder_id)
+        _print_root_sharing(folder_service, folder.folder_id)
 
 
 def cmd_config_init(args: argparse.Namespace) -> None:
@@ -580,7 +653,7 @@ def cmd_config_unset(args: argparse.Namespace) -> None:
 
 def cmd_speakers_set(args: argparse.Namespace) -> None:
     config = load_config(validate_providers=False, config_path=args.config)
-    service = auth.build_drive_service(config=config)
+    service = _service_for_file(_fleet(config), args.target)
     names = json.dumps(args.names, ensure_ascii=False)
     drive.set_file_app_properties(
         service,
@@ -611,7 +684,7 @@ def cmd_bookings_list(args: argparse.Namespace) -> None:
 def cmd_bookings_rematch(args: argparse.Namespace) -> None:
     """Clear the unmatched mark so the polling loop reconsiders a recording."""
     config = load_config(config_path=args.config, validate_providers=False)
-    service = auth.build_drive_service(config=config)
+    service = _service_for_file(_fleet(config), args.target)
     booking_gate.clear_mark(service, args.target)
     print(
         f"Cleared the unmatched mark on {args.target}; "
@@ -631,9 +704,11 @@ def cmd_planfix_sent(args: argparse.Namespace) -> None:
     always "what happened lately".
     """
     config = load_config(config_path=args.config, validate_providers=False)
-    service = auth.build_drive_service(config=config)
+    fleet = _fleet(config)
+    config = fleet.config
     rows: list[tuple[str, str, str, str, str]] = []
     for folder in config.folders:
+        service = fleet.service_for(folder.folder_id)
         for item in drive.list_mp4_timestamps_in_tree(service, folder.folder_id):
             task_id = (item.get("appProperties") or {}).get(
                 drive.PLANFIX_COMMENT_TASK_ID_PROPERTY, ""
@@ -683,9 +758,11 @@ def cmd_bookings_restore_dates(args: argparse.Namespace) -> None:
     createdTime -- the closest recoverable value, since the original was overwritten.
     """
     config = load_config(config_path=args.config, validate_providers=False)
-    service = auth.build_drive_service(config=config)
+    fleet = _fleet(config)
+    config = fleet.config
     total = 0
     for folder in config.folders:
+        service = fleet.service_for(folder.folder_id)
         files = drive.list_mp4_timestamps_in_tree(service, folder.folder_id)
         for file_id, name, created in booking_gate.select_stale_marks(files):
             total += 1
@@ -736,6 +813,13 @@ def cmd_changes(args: argparse.Namespace) -> None:
     and the recording would be skipped.
     """
     config = load_config(validate_providers=False, config_path=args.config)
+    if config.uses_delegation:
+        logger.error(
+            "The changes feed belongs to one account, and delegation reads each "
+            "folder as its owner, so no cursor is kept. Use `gdstt list` to see what "
+            "is in the folders."
+        )
+        raise SystemExit(1)
     cursor_path = change_cursor.path_for(config.data_dir)
     cursor = change_cursor.read(cursor_path)
     if cursor is None:
@@ -844,13 +928,17 @@ def cmd_cursor_reset(args: argparse.Namespace) -> None:
 
 def cmd_list(args: argparse.Namespace) -> None:
     config = load_config(validate_providers=False, config_path=args.config)
-    folder_ids = [args.folder] if args.folder else [f.folder_id for f in config.folders]
-    if not folder_ids:
+    if not args.folder and not config.folders:
         logger.error("No folders to inspect; configure folders or pass --folder")
         raise SystemExit(1)
-    service = auth.build_drive_service(config=config)
+    fleet = _fleet(config)
+    config = fleet.config
+    folder_ids = [args.folder] if args.folder else [f.folder_id for f in config.folders]
+    if not folder_ids:
+        logger.error("No folders to inspect; no configured employee could be resolved")
+        raise SystemExit(1)
     for folder_id in folder_ids:
-        items = drive.list_folder_tree_state(service, folder_id)
+        items = drive.list_folder_tree_state(fleet.service_for(folder_id), folder_id)
         # Without this the report and the service disagree: `list` would show eight
         # recordings with no transcript while every cycle skipped all eight, and the
         # operator would be left wondering which one was lying.

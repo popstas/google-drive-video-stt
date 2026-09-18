@@ -4,12 +4,14 @@ import argparse
 import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import yaml
 
 from src import change_cursor, cli
+from src.auth import AuthError
 from src.call_booking import CallBooking, append
 from src.config import EmployeeFolder
 from src.presets import Preset
@@ -1937,3 +1939,135 @@ def test_doctor_stays_quiet_about_shortcuts_when_there_are_none(
     cli.main(["doctor", "--drive"])
 
     assert "shortcut" not in capsys.readouterr().out
+
+
+# --- the CLI under delegation -------------------------------------------------
+
+
+def _delegated_cfg(tmp_path, emails=("one@example.com",), **extra):
+    from dataclasses import replace
+
+    from src.config import EmployeeFolder
+
+    cfg = make_config(folders=["placeholder"], data_dir=tmp_path, **extra)
+    return replace(
+        cfg,
+        folders=tuple(EmployeeFolder(folder_id="", email=email) for email in emails),
+        google_service_account={"client_email": "reader@project.iam.gserviceaccount.com"},
+    )
+
+
+def _fleet_for(mocker, tmp_path, mapping, **extra):
+    """Patch delegation so each address resolves to a folder id and its own client."""
+    services = {email: MagicMock() for email in mapping}
+    mocker.patch(
+        "src.delegation.auth.build_drive_service",
+        side_effect=lambda config, subject: services[subject],
+    )
+    ids = {services[email]: folder_id for email, folder_id in mapping.items()}
+    mocker.patch(
+        "src.delegation.meet_root.resolve",
+        side_effect=lambda service, names: SimpleNamespace(
+            folder_id=ids[service], name="Google Meet", created_time="", candidates=1
+        ),
+    )
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Owner")
+    cfg = _delegated_cfg(tmp_path, emails=tuple(mapping), **extra)
+    mocker.patch("src.cli.load_config", return_value=cfg)
+    return services
+
+
+def test_list_reads_each_employees_folder_as_that_employee(mocker, capsys, tmp_path):
+    services = _fleet_for(
+        mocker, tmp_path, {"one@example.com": "f1", "two@example.com": "f2"}
+    )
+    tree_mock = mocker.patch("src.cli.drive.list_folder_tree_state", return_value=[])
+
+    cli.main(["list"])
+
+    listed = {call.args[1]: call.args[0] for call in tree_mock.call_args_list}
+    assert listed == {"f1": services["one@example.com"], "f2": services["two@example.com"]}
+    assert "Folder f1" in capsys.readouterr().out
+
+
+def test_process_finds_the_employee_whose_drive_holds_the_file(mocker, tmp_path):
+    services = _fleet_for(
+        mocker, tmp_path, {"one@example.com": "f1", "two@example.com": "f2"}
+    )
+    # Only the second employee can open it, which is how the owner is identified.
+    services["one@example.com"].files.return_value.get.return_value.execute.side_effect = (
+        RuntimeError("notFound")
+    )
+    process_mock = mocker.patch("src.cli.main_module.process_target", return_value=[])
+
+    cli.main(["process", "v1"])
+
+    assert process_mock.call_args.args[0] is services["two@example.com"]
+
+
+def test_a_file_nobody_can_open_is_named_rather_than_traced(mocker, capsys, tmp_path):
+    services = _fleet_for(mocker, tmp_path, {"one@example.com": "f1"})
+    services["one@example.com"].files.return_value.get.return_value.execute.side_effect = (
+        RuntimeError("notFound")
+    )
+    process_mock = mocker.patch("src.cli.main_module.process_target")
+
+    with pytest.raises(SystemExit):
+        cli.main(["process", "v1"])
+
+    process_mock.assert_not_called()
+
+
+def test_speakers_set_writes_through_the_owner(mocker, tmp_path):
+    services = _fleet_for(mocker, tmp_path, {"one@example.com": "f1"})
+    set_mock = mocker.patch("src.cli.drive.set_file_app_properties")
+
+    cli.main(["speakers", "set", "v1", "Manager", "Client"])
+
+    assert set_mock.call_args.args[0] is services["one@example.com"]
+
+
+def test_changes_says_there_is_no_feed_under_delegation(mocker, capsys, tmp_path):
+    _fleet_for(mocker, tmp_path, {"one@example.com": "f1"})
+    list_changes = mocker.patch("src.cli.drive.list_changes")
+
+    with pytest.raises(SystemExit):
+        cli.main(["changes"])
+
+    list_changes.assert_not_called()
+
+
+def test_doctor_warns_about_a_shared_recordings_root(mocker, capsys, tmp_path):
+    """The one moment when removing the share still saves the folder."""
+    _fleet_for(mocker, tmp_path, {"one@example.com": "f1"})
+    mocker.patch(
+        "src.cli.drive.describe_folder",
+        return_value={"id": "f1", "name": "Google Meet", "parents": ["root"]},
+    )
+    mocker.patch("src.cli.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.cli.drive.list_subfolders", return_value=[])
+    mocker.patch("src.cli.drive.list_recording_shortcuts", return_value=[])
+    mocker.patch(
+        "src.cli.drive.shared_with", return_value=["writer:boss@example.com"]
+    )
+
+    cli.main(["doctor", "--drive"])
+
+    out = capsys.readouterr().out
+    assert "delegation: on" in out
+    assert "WARNING: shared with writer:boss@example.com" in out
+    assert "each folder is read as its owner" in out
+
+
+def test_doctor_names_an_employee_it_could_not_act_as(mocker, capsys, tmp_path):
+    mocker.patch(
+        "src.delegation.auth.build_drive_service",
+        side_effect=AuthError("delegation is not authorized for client id 123"),
+    )
+    mocker.patch("src.cli.load_config", return_value=_delegated_cfg(tmp_path))
+
+    cli.main(["doctor", "--drive"])
+
+    out = capsys.readouterr().out
+    assert "UNREACHABLE one@example.com" in out
+    assert "client id 123" in out

@@ -143,3 +143,41 @@ def _owner_name(service: Any, email: str) -> str:
     except Exception:  # noqa: BLE001 - a missing name is a worse cycle, not a lost one
         logger.warning("Could not read the display name of %s", email)
         return ""
+
+
+def shared_service(config: Config, *, build: Callable[..., Any] | None = None) -> Any:
+    """The client for folders nobody owns, or ``None`` when there are none.
+
+    A deployment that delegates every folder has no user token at all, and building
+    one would fail before anything could explain why. So the shared client is built
+    only when something still needs it: a folder with no employee attached, or no
+    delegation in the first place.
+    """
+    build = build or auth.build_drive_service
+    if config.uses_delegation and config.folders and all(
+        folder.email for folder in config.folders
+    ):
+        return None
+    return build(config=config)
+
+
+def service_for_file(fleet: Fleet, file_id: str) -> Any:
+    """The client that can see ``file_id``, or ``None`` when nobody can.
+
+    Commands like ``process`` and ``speakers set`` are given an id, not a folder, so
+    under delegation there is no single account to ask. Trying each employee costs at
+    most one request per employee on a manual command, and the first one that can
+    open the file is the account whose Drive it lives in -- which is also the account
+    whose artifacts should sit beside it.
+    """
+    seen: list[Any] = []
+    for service in fleet.services.values():
+        if any(service is other for other in seen):
+            continue
+        seen.append(service)
+        try:
+            service.files().get(fileId=file_id, fields="id").execute()
+        except Exception:  # noqa: BLE001 - "cannot see it" is the answer, not an error
+            continue
+        return service
+    return fleet.fallback
