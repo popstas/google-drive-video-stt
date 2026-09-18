@@ -75,8 +75,11 @@ Output: `docs/reports/2026-XX-XX-meet-api.md`, and a go/no-go line at the top. A
 - `recordings_since(credentials, since) -> list[MeetRecording]`, where
   `MeetRecording` carries the conference id, the space code, start and end time, the
   Drive file id and the state.
-- Recordings whose file does not exist yet are dropped, not returned half-formed: an
-  item with no file id would reach code that assumes one.
+- A recording whose file does not exist yet is returned **with that fact**, not
+  dropped and not half-formed: discovery has to know it is waiting for something, or
+  the mark would move past a call whose recording was merely slow. The file id is
+  either present or explicitly absent, so nothing downstream can mistake one for the
+  other.
 - The same failure translation delegation already has: a missing scope names the
   client id and the scope to authorize, not a raw 403.
 - Tests: the filter is built from `since`; paging; a recording still being written;
@@ -86,20 +89,43 @@ Output: `docs/reports/2026-XX-XX-meet-api.md`, and a go/no-go line at the top. A
 
 - `run.discovery: meet`, alongside `auto` and `walk`. Refused without delegation,
   because the API is queried as each employee.
-- `meet.lookback_hours`, default 48. The window is **stateless on purpose**: no
-  cursor, no file, no "where did we stop". Whether a recording still needs work is
-  already derived from what sits beside it in Drive, so re-reading the same window is
-  free apart from the request itself, and a service that was down for a day catches
-  up by itself.
+- **Where to start looking is a timestamp in a file**, `<data-dir>/meet_checked_at.txt`:
+  the time of the earliest conference this service has not finished with. Not an
+  opaque cursor -- a readable moment, shared by every employee, because Meet filters
+  conferences by their start time.
+- **The timestamp never moves past unfinished work.** Meet names a conference as soon
+  as it ends, while its recording appears minutes or hours later. So a conference
+  whose file is not there yet holds the mark where it is, and the next cycle sees it
+  again; the mark moves past a conference only once its recording has been processed.
+  This is the rule the changes cursor already follows, for the same reason: a mark
+  that advanced on "I looked" rather than "I finished" loses exactly the recordings
+  that were slow to appear.
+- **But it may not be held for ever.** A conference with no recording at all -- nobody
+  pressed record -- holds nothing, there is no work to wait for. A recording whose
+  file never materialises is waited for, and given up on after `meet.wait_hours`
+  (default 24) with a line in the log, so a single failed recording cannot freeze
+  discovery. This mirrors the bounded wait already applied to a video Drive never
+  finishes processing.
+- **A missing timestamp costs one long listing, never a backlog.** With no file --
+  first run, a wiped data dir, a new machine -- discovery starts from
+  `meet.first_look_hours` (default 168) or from `run.since`, whichever is later. What
+  is in scope stays `run.since`'s job alone: if the mark were also the scope, losing
+  the file would silently mean "transcribe the entire archive", which is a bill
+  rather than a bug.
 - `_discover_by_meet(fleet, config)` returns the same `_Discovery` the walk does:
   for each employee, the recordings the API named, each mapped to its container and
   carrying the artifact flags read from that container.
 - Cost per employee per cycle: one list call, plus one recordings call per conference
-  in the window, plus one listing per meeting folder that actually has a new
-  recording. On this fleet that is about ten requests a cycle against 211.
-- Tests: a window with nothing in it costs one request per employee and returns
-  nothing; a new recording becomes an item with its artifacts read; a recording whose
-  file is not ready yet is left for a later cycle.
+  since the mark, plus one listing per meeting folder that actually has a new
+  recording. In steady state the mark sits close to now, so this is about ten requests
+  a cycle for the whole fleet, against 211 today -- and it does not grow with the
+  archive.
+- Tests: nothing new costs one request per employee and returns nothing; a new
+  recording becomes an item with its artifacts read; a conference whose file is not
+  ready holds the mark and is seen again next cycle; a conference with no recording
+  does not hold it; a recording still missing after `meet.wait_hours` releases it with
+  a logged line; a missing mark starts from the first-look window and never earlier
+  than `run.since`.
 
 ### Task 4: one conference, one piece of work
 
