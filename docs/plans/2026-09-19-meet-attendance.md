@@ -172,19 +172,23 @@ Nothing here starts until the gate below is passed.
 - For every diarized segment, ask who was present. A segment inside a single-presence
   window is that person's, with no model involved. Votes accumulate per diarized
   speaker id.
-- A diarized speaker is named when its votes point at one person without serious
-  contradiction; otherwise it stays unnamed and the existing model path decides it,
-  now with the presence windows as one more piece of evidence.
+- **Presence either names every speaker or names none.** A speaker is named when its
+  votes point at one person without contradiction; if even one speaker is left
+  unnamed, the whole call falls back to the path that runs today, the model reading
+  both transcripts, and nothing from presence is mixed into its answer. A half-
+  presence, half-model mapping would put two authorities on one call and let them
+  contradict each other -- presence calling a speaker one person while the model,
+  reasoning over the call as a whole, calls the same voice another.
 - Two diarized speakers resolving to the same person is a real answer, not a bug: it
   means diarization split one voice, and the call had one speaker.
 - **The gate:** run this against calls whose speaker mapping a person has already
   checked, and compare. It replaces the model only if it agrees; if it disagrees on
   even one call, it becomes evidence handed to the model instead, and this task stops
   there. A written verdict, as the Meet spike had.
-- Tests: a segment inside a single-presence window is attributed with no model call;
-  an overlapping stretch is left to the model; a latecomer's window excludes earlier
-  segments; a boundary segment inside the guard is not attributed; contradictory
-  votes leave the speaker unnamed.
+- Tests: every speaker resolved by presence means no model call at all; one speaker
+  left unresolved sends the whole call to the model, with no presence names kept; a
+  latecomer's window excludes earlier segments; a boundary segment inside the guard
+  is not attributed; contradictory votes count as unresolved.
 
 ### Task 6: doctor, documentation, live verification
 
