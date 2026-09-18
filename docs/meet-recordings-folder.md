@@ -77,8 +77,10 @@ across two places.
 and it is what any access-granting automation should use.
 
 **Do not pin a single folder id.** A configured id is a snapshot of where Meet wrote
-when the config was written. Discovery should read every Meet-looking root the account
-owns at the top level of its My Drive, so a new root is picked up on its own.
+when the config was written. Discovery should resolve, each cycle, which root the
+account is writing into now -- the newest Meet-named folder it owns at the top level of
+its My Drive -- and report the others as abandoned rather than read them. Re-resolving
+every cycle is what makes a move cost one cycle instead of a support ticket.
 
 **Treat a root with extra permissions as an alarm.** A root that carries any
 permission beyond its owner is one recording away from being abandoned. It is worth
