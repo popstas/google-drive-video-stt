@@ -2252,3 +2252,46 @@ def test_doctor_does_not_blame_the_walk_in_meet_mode(mocker, capsys, tmp_path):
     out = capsys.readouterr().out
     assert "Meet is asked what was recorded instead" in out
     assert "every cycle walks" not in out
+
+
+def test_doctor_counts_the_calls_nobody_came_to(mocker, capsys, tmp_path):
+    _meet_doctor(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_meet_service", return_value=MagicMock())
+    mocker.patch(
+        "src.cli.meet_api.conferences_since",
+        return_value=[_meet_conference([_meet_recording()])],
+    )
+    mocker.patch(
+        "src.cli.meet_api.attendance",
+        return_value=SimpleNamespace(people=("somebody",)),
+    )
+    mocker.patch("src.cli.meet_api.ever_together", return_value=False)
+    mocker.patch("src.cli.drive.file_placement", return_value=(["folder-1"], "one@example.com"))
+    mocker.patch(
+        "src.cli.drive.list_folder_state",
+        return_value=[{"file": {"id": "file-1"}, "skipped_id": "s1"}],
+    )
+
+    cli.main(["doctor", "--drive"])
+
+    out = capsys.readouterr().out
+    assert "1 call(s) nobody but the organiser came to" in out
+    assert "1 recording(s) marked as not worth transcribing" in out
+
+
+def test_doctor_says_when_attendance_could_not_be_read(mocker, capsys, tmp_path):
+    _meet_doctor(mocker, tmp_path)
+    mocker.patch("src.cli.auth.build_meet_service", return_value=MagicMock())
+    mocker.patch(
+        "src.cli.meet_api.conferences_since",
+        return_value=[_meet_conference([_meet_recording()])],
+    )
+    mocker.patch(
+        "src.cli.meet_api.attendance", side_effect=cli.meet_api.MeetError("refused")
+    )
+    mocker.patch("src.cli.drive.file_placement", return_value=(["folder-1"], "one@example.com"))
+    mocker.patch("src.cli.drive.list_folder_state", return_value=[])
+
+    cli.main(["doctor", "--drive"])
+
+    assert "attendance could not be read" in capsys.readouterr().out

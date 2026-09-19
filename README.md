@@ -337,6 +337,43 @@ answered. Walking remains fully supported and is what `meet.fallback: walk` uses
 an employee whose query failed: `gdstt run-once --mode meet` and `--mode walk` at the
 same moment must find the same recordings.
 
+### What Meet knows about a call
+
+Asking Meet what was recorded also answers who was in the call, when each of them
+joined and left, who spoke, and when the call really started. Three things follow,
+and all of them need `run.discovery: meet`; under `walk` each degrades to the
+behaviour it had before rather than failing.
+
+**A call nobody came to is not transcribed.** A manager who waited alone for a client
+who never arrived produces a recording of silence, and it used to cost a download, a
+Deepgram bill and three OpenAI calls. The rule is that two people were never in the
+call at the same time -- any overlap at all, even a second, means they came, because
+measured real calls overlapped for as little as fifteen seconds and any threshold
+above that would discard real conversations. The recording is left alone with a
+`<name>.skipped` file beside it saying who was seen and why nothing was produced, so
+the folder explains itself; delete that file and `gdstt reprocess` transcribes it
+after all. An attendance that could not be read is never a skip: "nobody was here"
+and "I could not find out" are opposite answers. Turn the whole thing off with
+`meet.skip_empty_calls: false`.
+
+**Prompts can name the people in the call.** `{{participants}}` renders everyone who
+was there and `{{participants-speakers}}` only those the transcript attributes speech
+to. Both are rendered per recording, as the prompt is sent -- unlike `{{entities}}`,
+which is configuration and is rendered once when the config loads. A placeholder with
+nothing to say takes its whole line with it, because a heading followed by emptiness
+tells the model there were none. Asking who *spoke* costs two extra requests per
+recording, so it is only paid for when a prompt actually contains that placeholder.
+
+**The meeting time comes from Meet.** `conferenceRecords.startTime` is when the call
+began; the recording's file name is a worse rendering of the same moment, and a call
+started outside the calendar is named after the meeting room and carries no time at
+all. That was the `no-meeting-time` answer that left such a recording matched to no
+booking and reaching no task.
+
+One caveat worth knowing: the API reports a participant's display name and an opaque
+user id, never an address. Nothing here can map one to the other, so a person is
+recognised by their name as Meet shows it.
+
 ### Meeting subfolders
 
 Google Meet files each meeting into its own subfolder of a `Google Meet` folder in the

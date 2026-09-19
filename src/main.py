@@ -2079,7 +2079,12 @@ def _prompts_want_people(config: Config) -> tuple[bool, bool]:
     """
     wants_people = False
     wants_speakers = False
-    for preset in (config.presets or {}).values():
+    # `config.presets` is a tuple of presets, and elsewhere a mapping of them: both
+    # shapes reach this code, and an empty one of either is falsy -- which is how a
+    # version of this that only handled mappings passed every test and then failed on
+    # the first real config.
+    configured = config.presets or ()
+    for preset in (configured.values() if hasattr(configured, "values") else configured):
         if not getattr(preset, "enabled", True):
             continue
         text = getattr(preset, "instructions", "") or ""

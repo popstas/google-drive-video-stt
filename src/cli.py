@@ -675,30 +675,55 @@ def _print_meet_health(config, fleet, folder, since: datetime) -> None:
         print(f"  Meet: {len(running)} still in progress, holding the mark")
     if not ready:
         return
-    service = fleet.service_for(folder.folder_id)
+    if config.meet_skip_empty_calls:
+        # The same client the conferences came from: attendance is a Meet question,
+        # and the Drive client below cannot answer it.
+        alone = 0
+        unknown = 0
+        for conference in recorded:
+            try:
+                who = meet_api.attendance(service, conference.name)
+            except (auth.AuthError, meet_api.MeetError):
+                unknown += 1
+                continue
+            if who.people and not meet_api.ever_together(who):
+                alone += 1
+        print(
+            f"  Meet: {alone} call(s) nobody but the organiser came to"
+            + (f", {unknown} whose attendance could not be read" if unknown else "")
+        )
+    drive_service = fleet.service_for(folder.folder_id)
     owners = {f.email.lower() for f in config.folders if f.email}
     done = 0
     unreadable = 0
     outside = 0
+    marked = 0
     for recording in ready:
         try:
-            parents, owner = drive.file_placement(service, recording.file_id)
+            parents, owner = drive.file_placement(drive_service, recording.file_id)
             if owner.lower() not in owners:
                 outside += 1
                 continue
             items = [
                 item
                 for parent in parents
-                for item in drive.list_folder_state(service, parent)
+                for item in drive.list_folder_state(drive_service, parent)
                 if item["file"]["id"] == recording.file_id
             ]
         except Exception as exc:  # noqa: BLE001 - a diagnosis says what it could not see
             unreadable += 1
             logger.debug("Could not read a recording Meet named: %s", exc)
             continue
-        if items and items[0].get("stt_id"):
+        if items and items[0].get("skipped_id"):
+            marked += 1
+        elif items and items[0].get("stt_id"):
             done += 1
-    print(f"  Meet: {done} of {len(ready) - outside} already processed")
+    # Only the recordings this account can actually act on are a denominator worth
+    # printing: counting one it cannot open as "not processed yet" reads as a backlog.
+    ours = len(ready) - outside - unreadable
+    print(f"  Meet: {done} of {ours} already processed")
+    if marked:
+        print(f"  Meet: {marked} recording(s) marked as not worth transcribing")
     if outside:
         print(
             f"  Meet: {outside} recording(s) owned outside the fleet, left to their "

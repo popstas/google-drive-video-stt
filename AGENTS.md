@@ -220,6 +220,12 @@ the listing of what is in them. Whether a recording is done is still read from t
 artifacts beside it, never from what discovery remembered -- which is why losing a
 cursor or a mark costs requests and never work.
 
+**What Meet knows rides along as optional item data.** Participants, who spoke and the
+conference's start time are attached to a discovered item when the mode has them, and
+absent otherwise; every reader prefers them and falls back to what it did before. That
+is what keeps `walk` and `meet` producing the same work from the same recordings, which
+is the property the acceptance test checks.
+
 **A shared recordings root is a dead one.** Meet stops writing into a `Google Meet`
 root as soon as it carries any permission beyond its owner, and creates a second root
 of the same name beside it; the abandoned one keeps its id and stays readable, so the

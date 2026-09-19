@@ -1016,3 +1016,23 @@ def test_a_recording_meet_timed_reaches_the_booking_gate(mocker, tmp_path):
     assert resolve.call_args.kwargs["meeting_start"] == dt.datetime(
         2026, 9, 18, 11, 7, 31, tzinfo=dt.timezone.utc
     )
+
+
+def test_presets_as_a_tuple_are_read_too(mocker, tmp_path):
+    """The real config carries a tuple; an empty one of either shape hides the bug."""
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    asked = _attending(mocker, _person(*ALONE), _person(*CAME))
+    _drive(mocker)
+    config = replace(
+        _config(["one@example.com"], tmp_path),
+        meet_skip_empty_calls=False,
+        presets=(
+            SimpleNamespace(
+                enabled=True, instructions="Who spoke: {{participants-speakers}}", name="k"
+            ),
+        ),
+    )
+
+    main._discover_by_meet(_fleet(config), config)
+
+    assert asked.call_args.kwargs["include_speech"] is True
