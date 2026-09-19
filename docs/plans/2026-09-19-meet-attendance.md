@@ -42,7 +42,11 @@ itself), across nine real conferences:
   recognised by matching that display name against the folder owner's name, which
   delegation already reads.
 
-## The idea that makes the speaker problem easy
+## The idea that makes the speaker problem easy -- DISPROVEN
+
+Everything in this section was measured against real calls after it was written, and
+it is wrong. It is kept because the reasoning is what the measurement had to defeat.
+See `docs/reports/2026-09-19-presence-speakers.md`.
 
 Aligning Deepgram's transcript with Google's is a bad plan: the two segment speech
 differently, merge turns differently, and Google mishears the language outright.
@@ -161,7 +165,7 @@ silence and a "hello? …hello?".
   the name; a file whose name carries no time is matched anyway under `meet` mode;
   the booking gate's existing behaviour is untouched in `walk` mode.
 
-### Task 5: who is who, from presence -- NOT STARTED, waiting on the gate
+### Task 5: who is who, from presence -- ABANDONED, the gate said no
 
 Nothing here starts until the gate below is passed.
 
@@ -217,13 +221,16 @@ shape is falsy -- so every unit test passed and the first real config failed. Th
 carries a regression test with a non-empty tuple. Worth recording because it is the
 second time here that a live run caught what a mocked one could not.
 
-## What Task 5 is waiting for
+## What the gate decided
 
-The gate needs calls whose speaker mapping a person has already checked, read as the
-account that owns them. The example recordings available are files on disk, and the
-accounts reachable from this machine are the two test ones -- neither is an employee
-whose mapping anybody has verified. Until that is available, Task 5 stays unstarted
-rather than merged unmeasured.
+It was run for free, against Meet's own transcript entries as ground truth rather
+than a paid re-transcription: the entries name the speaker by account, which is the
+answer presence was trying to guess. Across 69 real calls and 9 544 turns, presence
+could decide 1.3% of turns, was right on 55.3% of those, and named every speaker on
+none of the 69 calls. `docs/reports/2026-09-19-presence-speakers.md` has the numbers
+and why the plan's premise was wrong.
+
+Task 5 is abandoned. The four tasks that landed do not depend on it.
 
 ## What this costs
 
