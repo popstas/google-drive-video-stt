@@ -1834,6 +1834,44 @@ def process_target(
     return [result] if result is not None else []
 
 
+def _mark_not_worth_transcribing(
+    service: Any, item: dict, reason: str, config: Config
+) -> bool:
+    """Leave the decision beside the recording, where the folder can explain itself.
+
+    A hidden property would answer the pipeline but not the person who opens the
+    meeting folder and wonders why this call has no analysis. The marker is that
+    answer, and it is also what stops the next cycle from asking again.
+
+    A failure to write it is a lost cycle, not a lost recording: nothing is marked,
+    nothing is transcribed, and the next cycle decides again.
+    """
+    file_info = item.get("file", {})
+    container = item.get("container_id") or ""
+    try:
+        drive.upload_text(
+            service,
+            container,
+            f"{file_info.get('name', 'recording')}{drive.SKIPPED_SUFFIX}",
+            reason,
+            app_properties={drive.SOURCE_VIDEO_ID_PROPERTY: file_info.get("id", "")},
+        )
+    except Exception as exc:  # noqa: BLE001 - reported, and retried next cycle
+        logger.exception("Could not mark %s as skipped", file_info.get("name"))
+        notify.notify_error(
+            f"Could not mark {file_info.get('name')} as skipped: {exc}",
+            telegram_bot_token=config.telegram_bot_token,
+            telegram_chat_id=config.telegram_chat_id,
+            proxy_url=config.proxy_url,
+        )
+        return False
+    logger.info(
+        "Nobody came to %s, so it was marked and not transcribed",
+        file_info.get("name"),
+    )
+    return True
+
+
 @dataclass
 class _Discovery:
     """What one cycle found, and what to remember for the next one."""
@@ -1842,6 +1880,10 @@ class _Discovery:
     cursor: str | None
     retries: int = 0
     folder_errors: int = 0
+    # Recordings discovery decided not to transcribe, and the sentence saying why.
+    # The decision is made where the conference is known; the marker is written in
+    # the cycle, where writing to Drive already happens.
+    skip_files: dict[str, str] = field(default_factory=dict)
     # Where Meet discovery has finished, when that is the mode. Like the cursor
     # it is only saved by a cycle that drained what it found, and for the same
     # reason: a mark that moved on "I looked" would lose the slow recordings.
@@ -1965,7 +2007,7 @@ def _meet_work(
     mark for ever, and every later cycle would re-read everything since it for the
     whole fleet. That is the growth this mode exists to remove.
     """
-    files: list[str] = []
+    files: list[tuple[str, meet_api.MeetConference]] = []
     held: datetime | None = None
     wait = timedelta(hours=config.meet_wait_hours)
 
@@ -2000,7 +2042,9 @@ def _meet_work(
             continue
         for recording in conference.recordings:
             if recording.ready:
-                files.append(recording.file_id)
+                # The conference travels with the file: whether anybody came is asked
+                # of the conference, and the file is all the rest of the service knows.
+                files.append((recording.file_id, conference))
                 continue
             hold(
                 conference,
@@ -2008,6 +2052,52 @@ def _meet_work(
                 f"a recording is still in state {recording.state or 'unknown'}",
             )
     return files, held
+
+
+def _nobody_came(service, conference: meet_api.MeetConference, config: Config) -> str:
+    """Why this call is not worth transcribing, or an empty string.
+
+    A manager who waited alone for a client who never arrived produces a recording of
+    silence, and today it costs a download, a Deepgram bill and three OpenAI calls.
+
+    Two people in the call at the same time -- for any length of time at all -- means
+    they came. There is no duration threshold on purpose: the measured real calls
+    overlapped for as little as fifteen seconds, so a threshold would quietly discard
+    real conversations to save a few cents.
+
+    An attendance that could not be read returns an empty string, never a skip.
+    "Nobody was here" and "I could not find out" are opposite answers, and only one of
+    them may cost a recording.
+    """
+    try:
+        attendance = meet_api.attendance(service, conference.name)
+    except (meet_api.MeetError, HttpError) as exc:
+        logger.warning(
+            "Could not read who was in %s, so it is processed as usual: %s",
+            conference.name,
+            exc,
+        )
+        return ""
+    if not attendance.people:
+        # A recording exists, so somebody was in the call. An empty list is the API
+        # declining to say who, not an empty room, and acting on it would skip a real
+        # conversation.
+        logger.warning(
+            "Meet reported no participants at all for %s; processing it as usual",
+            conference.name,
+        )
+        return ""
+    if meet_api.ever_together(attendance):
+        return ""
+    who = ", ".join(
+        person.display_name or f"a {person.kind} participant"
+        for person in attendance.people
+    )
+    return (
+        "Nobody but the organiser was in this call, so it was not transcribed.\n"
+        f"Meet reported {len(attendance.people)} participant(s): {who or 'nobody'}.\n"
+        "Delete this file and run `gdstt reprocess <file-id>` to transcribe it anyway."
+    )
 
 
 def _meet_placements(
@@ -2122,6 +2212,7 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
     wanted: dict[str, set[str]] = {}
     seen_files: set[str] = set()
     asked: list[str] = []
+    skip_files: dict[str, str] = {}
 
     def hold_at(moment: datetime | None) -> None:
         nonlocal held
@@ -2147,6 +2238,12 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
             continue
         files, unfinished = _meet_work(conferences, config, now)
         hold_at(unfinished)
+        if config.meet_skip_empty_calls:
+            for file_id, conference in files:
+                reason = _nobody_came(service, conference, config)
+                if reason:
+                    skip_files[file_id] = reason
+        files = [file_id for file_id, _ in files]
         placement_retry_state = _RetryState()
         try:
             placed, outside, newly_placed = _call_with_transient_retries(
@@ -2231,6 +2328,7 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
         cursor=None,
         retries=retries,
         folder_errors=folder_errors,
+        skip_files=skip_files,
         meet_mark=held or now,
     )
 
@@ -2434,6 +2532,7 @@ def run_once(
     cycle_skipped_size = 0
     cycle_skipped_unmatched = 0
     cycle_skipped_empty = 0
+    cycle_skipped_nobody = 0
     cycle_folder_errors = 0
     cycle_deferred = 0
     cycle_skipped_old = 0
@@ -2476,6 +2575,19 @@ def run_once(
             item for item in pending
             if item.get("booking_match") != drive.BOOKING_MATCH_NONE
             and not item.get("transcript_empty")
+            # A recording already marked as not worth transcribing. Unlike the two
+            # above it is a decision rather than a result, so `reprocess` ignores it
+            # -- that command never consults this list.
+            and not item.get("skipped_id")
+        ]
+        # Recordings this cycle has just decided about. Splitting them out here keeps
+        # the marker out of the processing loop's way: a dry run says what it would
+        # write, and a real cycle writes it once.
+        to_mark = [
+            item for item in pending if item["file"]["id"] in discovery.skip_files
+        ]
+        pending = [
+            item for item in pending if item["file"]["id"] not in discovery.skip_files
         ]
         pending_before_size = len(pending)
         pending = _items_allowed_by_size(
@@ -2497,9 +2609,20 @@ def run_once(
             dry_run,
         )
         if dry_run:
+            for item in to_mark:
+                logger.info(
+                    "DRY RUN: would mark %s in folder %s as not worth transcribing",
+                    item["file"].get("name"),
+                    folder_id,
+                )
             for item in pending:
                 _log_dry_run(folder_id, item, config, reprocess_txt=False)
             continue
+        for item in to_mark:
+            if _mark_not_worth_transcribing(
+                folder_service, item, discovery.skip_files[item["file"]["id"]], config
+            ):
+                cycle_skipped_nobody += 1
         for item in pending:
             decision = booking_gate.resolve(item["file"], folder_id, config)
             if (
@@ -2639,7 +2762,8 @@ def run_once(
     logger.info(
         "Cycle summary [provider=%s, outcome=%s, folders=%d, pending=%d, processed=%d, failed=%d, "
         "retry_total=%d, skipped_size=%d, skipped_unmatched=%d, skipped_old=%d, "
-        "skipped_empty=%d, folder_errors=%d, deferred=%d, cursor_moved=%s, dry_run=%s, "
+        "skipped_empty=%d, skipped_nobody=%d, folder_errors=%d, deferred=%d, "
+        "cursor_moved=%s, dry_run=%s, "
         "duration_s=%.3f]",
         config.stt_provider or "artifact-only",
         _cycle_outcome(
@@ -2656,6 +2780,7 @@ def run_once(
         cycle_skipped_unmatched,
         cycle_skipped_old,
         cycle_skipped_empty,
+        cycle_skipped_nobody,
         cycle_folder_errors,
         cycle_deferred,
         bool(discovery.cursor) and cycle_drained and not dry_run,

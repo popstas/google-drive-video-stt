@@ -77,8 +77,12 @@ def _frozen_now(mocker):
     return clock
 
 
-def _ask(mocker, conferences, *, error=None):
+def _ask(mocker, conferences, *, error=None, nobody_came=""):
     mocker.patch("src.main.build_meet_service", return_value=MagicMock())
+    # Whether anybody came is its own question with its own tests; every other test
+    # here is about the mark, and a real attendance lookup against a mock would page
+    # for ever.
+    mocker.patch("src.main._nobody_came", return_value=nobody_came)
     if error is not None:
         return mocker.patch("src.main.meet_api.conferences_since", side_effect=error)
     return mocker.patch(
@@ -536,6 +540,7 @@ def test_an_address_in_another_case_is_still_the_same_employee(mocker, tmp_path)
 def test_an_owner_who_is_also_being_walked_is_not_listed_twice(mocker, tmp_path):
     """The walk reads that whole folder; listing it here too would duplicate the work."""
     mocker.patch("src.main.build_meet_service", return_value=MagicMock())
+    mocker.patch("src.main._nobody_came", return_value="")
     mocker.patch(
         "src.main.meet_api.conferences_since",
         side_effect=[
@@ -669,3 +674,181 @@ def test_a_retry_does_not_lose_what_the_first_attempt_placed(mocker, tmp_path):
         "folder-1",
         "folder-2",
     ]
+
+
+# --- a call nobody came to ----------------------------------------------------
+
+
+def _attending(mocker, *people, speech=False):
+    """What Meet says about who was in the call."""
+    return mocker.patch(
+        "src.main.meet_api.attendance",
+        return_value=meet_api.Attendance(
+            conference="conferenceRecords/c1",
+            people=tuple(people),
+            speech_known=speech,
+        ),
+    )
+
+
+def _person(name, joined, left, user="users/1"):
+    return meet_api.Presence(
+        display_name=name,
+        user_id=user,
+        windows=((dt.datetime.fromisoformat(joined), dt.datetime.fromisoformat(left)),),
+        participant=f"p/{name}",
+    )
+
+
+ALONE = ("Manager", "2026-09-18T11:00:00+00:00", "2026-09-18T11:30:00+00:00")
+CAME = ("Client", "2026-09-18T11:10:00+00:00", "2026-09-18T11:20:00+00:00", "users/2")
+
+
+def _meet_only(mocker, conferences):
+    """Discovery wired for the real `_nobody_came`, which is what is under test."""
+    mocker.patch("src.main.build_meet_service", return_value=MagicMock())
+    mocker.patch("src.main.meet_api.conferences_since", return_value=list(conferences))
+
+
+def test_a_call_nobody_came_to_is_named_for_skipping(mocker, tmp_path):
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    _attending(mocker, _person(*ALONE))
+    _drive(mocker)
+    config = _config(["one@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert "file-1" in found.skip_files
+    assert "not transcribed" in found.skip_files["file-1"]
+
+
+def test_a_call_somebody_came_to_is_not_named(mocker, tmp_path):
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    _attending(mocker, _person(*ALONE), _person(*CAME))
+    _drive(mocker)
+    config = _config(["one@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert found.skip_files == {}
+
+
+def test_attendance_that_could_not_be_read_never_skips(mocker, tmp_path):
+    """Nobody was here and I could not find out are opposite answers."""
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    mocker.patch(
+        "src.main.meet_api.attendance", side_effect=meet_api.MeetError("refused")
+    )
+    _drive(mocker)
+    config = _config(["one@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert found.skip_files == {}
+    assert found.folder_errors == 0
+
+
+def test_no_participants_at_all_never_skips(mocker, tmp_path):
+    """A recording exists, so somebody was there; an empty list is the API declining."""
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    _attending(mocker)
+    _drive(mocker)
+    config = _config(["one@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert found.skip_files == {}
+
+
+def test_the_switch_turns_the_whole_question_off(mocker, tmp_path):
+    """A deployment that wants every recording transcribed pays no extra request."""
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    asked = _attending(mocker, _person(*ALONE))
+    _drive(mocker)
+    config = replace(_config(["one@example.com"], tmp_path), meet_skip_empty_calls=False)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert found.skip_files == {}
+    asked.assert_not_called()
+
+
+def test_the_cycle_writes_the_marker_and_does_not_process(mocker, tmp_path):
+    # With a provider configured, so that "nothing was processed" is an
+    # assertion about the skip and not about an idle pipeline.
+    config = replace(
+        _config(["one@example.com"], tmp_path), stt_provider="deepgram"
+    )
+    mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Owner")
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    _attending(mocker, _person(*ALONE))
+    _drive(mocker)
+    marker = mocker.patch("src.main.drive.upload_text")
+    process = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), config, mode="meet")
+
+    process.assert_not_called()
+    assert marker.call_args.args[2] == "call.mp4.skipped"
+    assert "not transcribed" in marker.call_args.args[3]
+
+
+def test_a_dry_run_says_what_it_would_mark_and_writes_nothing(mocker, tmp_path):
+    config = _config(["one@example.com"], tmp_path)
+    mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Owner")
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    _attending(mocker, _person(*ALONE))
+    _drive(mocker)
+    marker = mocker.patch("src.main.drive.upload_text")
+
+    main.run_once(MagicMock(), config, mode="meet", dry_run=True)
+
+    marker.assert_not_called()
+
+
+def test_a_recording_already_marked_is_not_pending(mocker, tmp_path):
+    """The marker is how the next cycle knows the question was already answered."""
+    # With a provider configured, so that "nothing was processed" is an
+    # assertion about the skip and not about an idle pipeline.
+    config = replace(
+        _config(["one@example.com"], tmp_path), stt_provider="deepgram"
+    )
+    mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Owner")
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    _attending(mocker, _person(*ALONE), _person(*CAME))
+    mocker.patch("src.main.drive.file_placement", return_value=(["folder-1"], "one@example.com"))
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[dict(_item("file-1", "call.mp4"), skipped_id="s1")],
+    )
+    marker = mocker.patch("src.main.drive.upload_text")
+    process = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), config, mode="meet")
+
+    process.assert_not_called()
+    marker.assert_not_called()
+
+
+def test_a_marker_that_cannot_be_written_leaves_the_recording_alone(mocker, tmp_path):
+    """A lost cycle, not a lost recording: next cycle decides again."""
+    # With a provider configured, so that "nothing was processed" is an
+    # assertion about the skip and not about an idle pipeline.
+    config = replace(
+        _config(["one@example.com"], tmp_path), stt_provider="deepgram"
+    )
+    mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Owner")
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    _attending(mocker, _person(*ALONE))
+    _drive(mocker)
+    mocker.patch("src.main.drive.upload_text", side_effect=RuntimeError("no write"))
+    mocker.patch("src.main.notify.notify_error")
+    process = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), config, mode="meet")
+
+    process.assert_not_called()

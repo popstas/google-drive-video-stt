@@ -3364,3 +3364,30 @@ def test_the_meet_block_survives_a_rewrite(tmp_path):
     assert written["meet"]["first_look_hours"] == 48
     assert written["meet"]["fallback"] == "none"
     assert written["meet"]["folder_names"] == ["Google Meet"]
+
+
+def test_skipping_empty_calls_is_on_by_default(tmp_path):
+    cfg = _load_config(tmp_path, _meet_config([{"email": "one@example.com"}]))
+
+    assert cfg.meet_skip_empty_calls is True
+
+
+def test_skipping_empty_calls_can_be_turned_off(tmp_path):
+    """A deployment that wants every recording transcribed must be able to say so."""
+    cfg = _load_config(
+        tmp_path,
+        _meet_config([{"email": "one@example.com"}], meet={"skip_empty_calls": False}),
+    )
+
+    assert cfg.meet_skip_empty_calls is False
+
+
+def test_the_skip_switch_survives_a_rewrite(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _meet_config([{"email": "one@example.com"}], meet={"skip_empty_calls": False}),
+    )
+
+    written = _config_to_yaml_dict(cfg, tmp_path / "config.yml")
+
+    assert written["meet"]["skip_empty_calls"] is False

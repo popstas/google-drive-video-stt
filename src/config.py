@@ -286,6 +286,10 @@ class Config:
     # failure is logged either way -- a fallback that hides the problem is how a
     # service ends up quietly paying twice.
     meet_fallback: str = "walk"
+    # Whether a call nobody but the organiser attended is marked and left alone.
+    # On by default because it is pure saving; switchable because a deployment
+    # that wants every recording transcribed must be able to say so.
+    meet_skip_empty_calls: bool = True
     config_file: Path | None = None
 
     @property
@@ -1106,6 +1110,9 @@ def _config_from_yaml(
     meet_folder_names = _parse_meet_folder_names(raw.get("meet"))
     meet_wait_hours, meet_first_look_hours = _parse_meet_wait(raw.get("meet"))
     meet_fallback = _parse_meet_fallback(raw.get("meet"))
+    meet_skip_empty_calls = _yaml_bool(
+        _as_mapping(raw.get("meet"), "meet").get("skip_empty_calls"), default=True
+    )
 
     # Clean break: a config still on the old flat list must be rewritten by hand so
     # each folder gains its employee, rather than silently polling nameless folders.
@@ -1343,6 +1350,7 @@ def _config_from_yaml(
         meet_wait_hours=meet_wait_hours,
         meet_first_look_hours=meet_first_look_hours,
         meet_fallback=meet_fallback,
+        meet_skip_empty_calls=meet_skip_empty_calls,
         config_file=config_file,
     )
 
@@ -1870,6 +1878,7 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "wait_hours": config.meet_wait_hours,
             "first_look_hours": config.meet_first_look_hours,
             "fallback": config.meet_fallback,
+            "skip_empty_calls": config.meet_skip_empty_calls,
         },
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so

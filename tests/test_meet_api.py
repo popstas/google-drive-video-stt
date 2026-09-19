@@ -473,3 +473,128 @@ def test_an_empty_conference_is_an_empty_room():
     found = meet_api.attendance(service, "conferenceRecords/c1")
 
     assert found.people == ()
+
+
+# --- was anybody actually in the call together --------------------------------
+
+
+def _presence(name, joined, left, *, user="", kind="signed-in", participant=""):
+    return meet_api.Presence(
+        display_name=name,
+        user_id=user,
+        windows=(
+            (
+                dt.datetime.fromisoformat(joined),
+                dt.datetime.fromisoformat(left) if left else None,
+            ),
+        ),
+        kind=kind,
+        participant=participant or f"p/{name}",
+    )
+
+
+def _attendance(*people):
+    return meet_api.Attendance(conference="conferenceRecords/c1", people=tuple(people))
+
+
+def test_one_person_was_never_together_with_anyone():
+    found = _attendance(
+        _presence("Alone", "2026-09-18T11:00:00+00:00", "2026-09-18T11:30:00+00:00", user="users/1")
+    )
+
+    assert meet_api.ever_together(found) is False
+
+
+def test_an_empty_call_was_not_together_either():
+    assert meet_api.ever_together(_attendance()) is False
+
+
+def test_a_single_second_of_overlap_counts():
+    """Measured real calls overlap for as little as 15s; a threshold would lose them."""
+    found = _attendance(
+        _presence("First", "2026-09-18T11:00:00+00:00", "2026-09-18T11:10:01+00:00", user="users/1"),
+        _presence("Second", "2026-09-18T11:10:00+00:00", "2026-09-18T11:30:00+00:00", user="users/2"),
+    )
+
+    assert meet_api.ever_together(found) is True
+
+
+def test_two_people_who_never_coincided_are_not_together():
+    """The manager waited, gave up, and the client arrived afterwards."""
+    found = _attendance(
+        _presence("Waited", "2026-09-18T11:00:00+00:00", "2026-09-18T11:10:00+00:00", user="users/1"),
+        _presence("Arrived", "2026-09-18T11:20:00+00:00", "2026-09-18T11:30:00+00:00", user="users/2"),
+    )
+
+    assert meet_api.ever_together(found) is False
+
+
+def test_touching_windows_do_not_count_as_together():
+    """One left exactly as the other joined: they never saw each other."""
+    found = _attendance(
+        _presence("Out", "2026-09-18T11:00:00+00:00", "2026-09-18T11:10:00+00:00", user="users/1"),
+        _presence("In", "2026-09-18T11:10:00+00:00", "2026-09-18T11:30:00+00:00", user="users/2"),
+    )
+
+    assert meet_api.ever_together(found) is False
+
+
+def test_one_person_on_two_devices_is_still_one_person():
+    """Otherwise a laptop plus a phone would make every empty call look attended."""
+    found = _attendance(
+        _presence("Manager", "2026-09-18T11:00:00+00:00", "2026-09-18T11:30:00+00:00", user="users/1"),
+        _presence("Manager", "2026-09-18T11:05:00+00:00", "2026-09-18T11:25:00+00:00", user="users/1"),
+    )
+
+    assert meet_api.ever_together(found) is False
+
+
+def test_two_anonymous_guests_are_two_people():
+    """No account to compare, so they are distinct -- which errs towards processing."""
+    found = _attendance(
+        _presence("", "2026-09-18T11:00:00+00:00", "2026-09-18T11:30:00+00:00",
+                  kind="anonymous", participant="p/a"),
+        _presence("", "2026-09-18T11:05:00+00:00", "2026-09-18T11:25:00+00:00",
+                  kind="anonymous", participant="p/b"),
+    )
+
+    assert meet_api.ever_together(found) is True
+
+
+def test_a_window_still_open_overlaps_whatever_follows():
+    """No leaving time means they were still there, so anyone later was with them."""
+    found = _attendance(
+        _presence("Still here", "2026-09-18T11:00:00+00:00", None, user="users/1"),
+        _presence("Later", "2026-09-18T11:20:00+00:00", "2026-09-18T11:30:00+00:00", user="users/2"),
+    )
+
+    assert meet_api.ever_together(found) is True
+
+
+def test_a_rejoin_that_never_coincides_is_still_alone():
+    """The gap is what matters, and only the sessions show it."""
+    windows = (
+        (
+            dt.datetime(2026, 9, 18, 11, 0, tzinfo=dt.timezone.utc),
+            dt.datetime(2026, 9, 18, 11, 5, tzinfo=dt.timezone.utc),
+        ),
+        (
+            dt.datetime(2026, 9, 18, 11, 25, tzinfo=dt.timezone.utc),
+            dt.datetime(2026, 9, 18, 11, 30, tzinfo=dt.timezone.utc),
+        ),
+    )
+    found = _attendance(
+        meet_api.Presence("Manager", "users/1", windows, participant="p/1"),
+        _presence("Client", "2026-09-18T11:10:00+00:00", "2026-09-18T11:20:00+00:00", user="users/2"),
+    )
+
+    assert meet_api.ever_together(found) is False
+
+
+def test_a_person_with_no_window_at_all_cannot_be_counted_as_present():
+    found = _attendance(
+        _presence("Known", "2026-09-18T11:00:00+00:00", "2026-09-18T11:30:00+00:00", user="users/1"),
+        meet_api.Presence("Unknown", "users/2", (), participant="p/2"),
+    )
+
+    assert meet_api.ever_together(found) is False

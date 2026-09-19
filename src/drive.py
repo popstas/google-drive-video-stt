@@ -8,13 +8,19 @@ from pathlib import Path
 from typing import Any
 
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import (
+    MediaFileUpload,
+    MediaInMemoryUpload,
+    MediaIoBaseDownload,
+)
 
 logger = logging.getLogger(__name__)
 
 MP4_MIME = "video/mp4"
 MP3_MIME = "audio/mpeg"
 TXT_MIME = "text/plain"
+# The marker left beside a recording that was deliberately not transcribed.
+SKIPPED_SUFFIX = ".skipped"
 MD_MIME = "text/markdown"
 FOLDER_MIME = "application/vnd.google-apps.folder"
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
@@ -610,6 +616,11 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
     txt_files = [f for f in text_files if f["name"].endswith(".txt")]
     stt_files = [f for f in text_files if f["name"].endswith(".stt")]
     meta_yml_files = [f for f in text_files if f["name"].endswith(".meta.yml")]
+    # A recording somebody decided not to transcribe, and why. It sits beside the
+    # video for the same reason every other answer does: the folder has to be able
+    # to explain itself without a log, and the next cycle reads the decision from
+    # the same place it reads everything else.
+    skipped_files = [f for f in text_files if f["name"].endswith(SKIPPED_SUFFIX)]
 
     mp3_by_stem = {drive_stem(f["name"]): f for f in mp3_files}
     txt_by_stem = {drive_stem(f["name"]): f for f in txt_files}
@@ -619,6 +630,9 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
     # fallback, and reliable here because both names are always exactly
     # ``<stem>.stt``/``<stem>.meta.yml``.
     stt_by_stem = {drive_stem(f["name"]): f for f in stt_files}
+    skipped_by_stem = {
+        _strip_suffix(f["name"], SKIPPED_SUFFIX): f for f in skipped_files
+    }
     meta_yml_by_stem = {
         _strip_suffix(f["name"], ".meta.yml"): f for f in meta_yml_files
     }
@@ -653,6 +667,7 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
         txt = txt_by_source_id.get(mp4["id"]) or txt_by_stem.get(stem)
         stt = stt_by_stem.get(stem)
         meta_yml = meta_yml_by_stem.get(stem)
+        skipped = skipped_by_stem.get(mp4["name"]) or skipped_by_stem.get(stem)
 
         artifact_ids: dict[str, str] = {}
         # Legacy bare-stem keypoints first; an authoritative source_video_id
@@ -687,6 +702,11 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
             # to overwrite the previous ``.stt``/``.meta.yml`` in place on Drive
             # instead of leaving a duplicate behind.
             "stt_id": stt["id"] if stt else None,
+            # Set when this recording was deliberately not transcribed. Unlike the
+            # artifacts above it is not a step that was done -- it is a decision
+            # that it should not be -- so the pending check reads it, and a
+            # reprocess ignores it.
+            "skipped_id": skipped["id"] if skipped else None,
             "meta_yml_id": meta_yml["id"] if meta_yml else None,
             "artifact_ids": artifact_ids,
             "booking_match": mp4_props.get(BOOKING_MATCH_PROPERTY, ""),
@@ -785,6 +805,37 @@ def download_text(service: Any, file_id: str) -> str:
     while not done:
         _status, done = downloader.next_chunk()
     return buffer.getvalue().decode("utf-8-sig")
+
+
+def upload_text(
+    service: Any,
+    folder_id: str,
+    name: str,
+    text: str,
+    *,
+    app_properties: dict[str, str] | None = None,
+) -> dict:
+    """Write a small text file straight into a Drive folder.
+
+    Every other upload here comes from a file on disk, because every other upload is
+    a transcript or a media file that was produced on disk. A marker is two lines
+    decided in memory, and routing it through a temporary file would add a failure
+    mode (a full or read-only temp dir) to something that has none.
+    """
+    metadata = {"name": name, "parents": [folder_id]}
+    if app_properties:
+        metadata["appProperties"] = app_properties
+    media = MediaInMemoryUpload(text.encode("utf-8"), mimetype=TXT_MIME, resumable=False)
+    return (
+        service.files()
+        .create(
+            body=metadata,
+            media_body=media,
+            fields="id, name, parents",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
 
 
 def upload(

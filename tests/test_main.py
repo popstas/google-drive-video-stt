@@ -1321,8 +1321,8 @@ def test_run_once_logs_folder_and_cycle_summary(mocker, caplog):
     assert (
         "Cycle summary [provider=deepgram, outcome=success, folders=1, pending=1, "
         "processed=1, failed=0, retry_total=0, skipped_size=0, skipped_unmatched=0, "
-        "skipped_old=0, skipped_empty=0, folder_errors=0, deferred=0, cursor_moved=True, "
-        "dry_run=False, duration_s=1.250]"
+        "skipped_old=0, skipped_empty=0, skipped_nobody=0, folder_errors=0, "
+        "deferred=0, cursor_moved=True, dry_run=False, duration_s=1.250]"
     ) in caplog.text
 
 

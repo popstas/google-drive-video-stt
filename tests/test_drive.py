@@ -1451,3 +1451,70 @@ def test_is_readable_does_not_hide_a_drive_outage_as_a_permission_answer():
 
     with pytest.raises(HttpError):
         drive.is_readable(service, "v1")
+
+
+# --- the marker left beside a recording nobody came to ------------------------
+
+
+def test_list_folder_state_reports_a_skip_marker():
+    mp4 = [
+        {"id": "v1", "name": "a.mp4", "mimeType": "video/mp4"},
+        {"id": "v2", "name": "b.mp4", "mimeType": "video/mp4"},
+    ]
+    txt = [{"id": "s1", "name": "a.mp4.skipped", "mimeType": "text/plain"}]
+    service = _make_list_service({"mp4": mp4, "mp3": [], "txt": txt})
+
+    items = drive.list_folder_state(service, "folder1")
+
+    by_id = {it["file"]["id"]: it for it in items}
+    assert by_id["v1"]["skipped_id"] == "s1"
+    assert by_id["v2"]["skipped_id"] is None
+
+
+def test_a_skip_marker_named_by_stem_is_found_too():
+    """Both spellings resolve, so a marker written by hand is not ignored."""
+    mp4 = [{"id": "v1", "name": "a.mp4", "mimeType": "video/mp4"}]
+    txt = [{"id": "s1", "name": "a.skipped", "mimeType": "text/plain"}]
+    service = _make_list_service({"mp4": mp4, "mp3": [], "txt": txt})
+
+    items = drive.list_folder_state(service, "folder1")
+
+    assert items[0]["skipped_id"] == "s1"
+
+
+def test_a_skip_marker_is_not_mistaken_for_the_transcript():
+    """It shares text/plain with the transcript, and the stems collide."""
+    mp4 = [{"id": "v1", "name": "a.mp4", "mimeType": "video/mp4"}]
+    txt = [{"id": "s1", "name": "a.skipped", "mimeType": "text/plain"}]
+    service = _make_list_service({"mp4": mp4, "mp3": [], "txt": txt})
+
+    items = drive.list_folder_state(service, "folder1")
+
+    assert items[0]["txt_id"] is None
+    assert items[0]["has_txt"] is False
+
+
+def test_upload_text_writes_the_file_into_the_folder():
+    service = MagicMock()
+    created = service.files.return_value.create
+    created.return_value.execute.return_value = {"id": "s1", "name": "a.mp4.skipped"}
+
+    result = drive.upload_text(service, "folder1", "a.mp4.skipped", "nobody came")
+
+    assert result["id"] == "s1"
+    body = created.call_args.kwargs["body"]
+    assert body["name"] == "a.mp4.skipped"
+    assert body["parents"] == ["folder1"]
+    assert created.call_args.kwargs["media_body"].mimetype() == "text/plain"
+
+
+def test_upload_text_carries_app_properties_when_given():
+    service = MagicMock()
+    service.files.return_value.create.return_value.execute.return_value = {"id": "s1"}
+
+    drive.upload_text(
+        service, "folder1", "a.skipped", "why", app_properties={"source_video_id": "v1"}
+    )
+
+    body = service.files.return_value.create.call_args.kwargs["body"]
+    assert body["appProperties"] == {"source_video_id": "v1"}

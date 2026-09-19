@@ -115,6 +115,45 @@ class Attendance:
     speech_known: bool = False
 
 
+def _identity_key(person: Presence) -> str:
+    """What makes two presences the same human.
+
+    The account when there is one: a manager on a laptop and a phone joins twice, and
+    counting that as two people would make every call they waited through look
+    attended. Without an account -- a dial-in, an anonymous guest -- each presence is
+    its own person, which errs towards processing the call rather than skipping it.
+    """
+    return person.user_id or person.participant
+
+
+def ever_together(attendance: Attendance) -> bool:
+    """Whether two different people were in the call at the same moment.
+
+    The question behind "did anybody come". Not how long they overlapped: measured
+    real calls had as little as fifteen seconds of it, so any duration threshold
+    would quietly throw away real conversations. Touching windows -- one leaving
+    exactly as the other joins -- are not an overlap; they never saw each other.
+
+    A window with no end is still open, so anyone who joined afterwards was with them.
+    """
+    windows: list[tuple[dt.datetime, dt.datetime | None, str]] = []
+    for person in attendance.people:
+        key = _identity_key(person)
+        for start, end in person.windows:
+            windows.append((start, end, key))
+    for i, (start_a, end_a, key_a) in enumerate(windows):
+        for start_b, end_b, key_b in windows[i + 1:]:
+            if key_a == key_b:
+                continue
+            latest_start = max(start_a, start_b)
+            if end_a is not None and end_a <= latest_start:
+                continue
+            if end_b is not None and end_b <= latest_start:
+                continue
+            return True
+    return False
+
+
 def _moment(text: str) -> dt.datetime | None:
     """One of Meet's timestamps as an aware UTC datetime, or ``None``."""
     if not text:
@@ -310,7 +349,11 @@ def _pages(resource_list, key: str, page_size: int, **params) -> list[dict]:
     while True:
         response = resource_list(pageSize=page_size, pageToken=page_token, **params).execute()
         items.extend(response.get(key) or [])
-        page_token = response.get("nextPageToken")
+        token = response.get("nextPageToken")
+        # Only a real token continues the listing. Anything else -- absent, empty, or
+        # a value this client cannot send back -- ends it, because a loop that trusts
+        # whatever it is handed here does not end at all.
+        page_token = token if isinstance(token, str) and token else None
         if not page_token:
             return items
 
