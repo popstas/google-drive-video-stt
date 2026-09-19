@@ -230,7 +230,14 @@ could decide 1.3% of turns, was right on 55.3% of those, and named every speaker
 none of the 69 calls. `docs/reports/2026-09-19-presence-speakers.md` has the numbers
 and why the plan's premise was wrong.
 
-Task 5 is abandoned. The four tasks that landed do not depend on it.
+A second method -- aligning Deepgram's diarized clusters to Meet's turns by time,
+which needs no presence at all -- was then measured with a paid transcription of two
+real calls. It fails too, and the same report says why: a Meet turn averages 23
+seconds carrying 13 characters, so each account's turns cover three quarters of the
+call and every cluster overlaps every account about equally. The winning margins came
+out at 44-55%, and on the three-account call two clusters chose the same person.
+
+Task 5 is abandoned in both forms. The four tasks that landed do not depend on it.
 
 ## What this costs
 

@@ -1,9 +1,16 @@
-# Naming speakers from presence: measured, and rejected
+# Naming speakers from Meet's timings: measured twice, and rejected
 
 ## Verdict
 
 **No-go.** Task 5 of `docs/plans/2026-09-19-meet-attendance.md` is abandoned. Who is
 who stays the model's job, exactly as it is today.
+
+Two different methods were measured and both fail, for the same measured reason:
+**Meet's timestamps are not speech boundaries.** A turn averages 23 seconds carrying
+13 characters -- 0.6 characters per second, where speech runs around fifteen. The
+windows are roughly twenty times wider than the words in them, so on a two-person
+call one account's turns cover 74% of the clock and the other's 79%. By Meet's
+timings, both people are talking almost all of the time.
 
 ## What was proposed
 
@@ -40,6 +47,33 @@ presence could decide came out at barely better than a coin flip.
 The sample was not small; it was unrepresentative, and the difference was invisible
 until it was run against real conversations.
 
+## The second method: aligning turns, not presence
+
+The first measurement tested presence -- who was in the room -- and that was the wrong
+target. The better idea is to align *turns*: Deepgram's diarized clusters carry
+timestamps, Meet's entries carry timestamps and the account that spoke, so each
+cluster should belong to whichever account its turns overlap most. It needs no
+presence, no words, and no agreement between two transcripts.
+
+It was measured properly, with a paid transcription of two real calls (about 100
+minutes of audio, downloaded read-only, nothing written to anybody's Drive).
+
+| call | Deepgram clusters | assignment | margin |
+| --- | --- | --- | --- |
+| 73 min, 3 accounts | 4 | two clusters chose the same person | 44-55% |
+| 28 min, 2 accounts | 2 | one each | 50% and 54% |
+
+A 50% margin is a coin flip: the runner-up account overlapped almost exactly as much
+as the winner. On the three-account call diarization also produced four clusters and
+two of them landed on one person.
+
+The cause is the row above: when each account's turns cover three quarters of the
+call, every cluster overlaps every account by roughly the same amount, and "whichever
+it overlaps most" is noise.
+
+This is not a tuning problem. No threshold, guard band or weighting recovers a signal
+from timestamps that are twenty times coarser than the thing being timed.
+
 ## What survives
 
 - **The participants themselves.** Who was in the call, and who spoke, still reach the
@@ -53,6 +87,10 @@ until it was run against real conversations.
 
 ## Not worth reviving as a hint
 
-Handing the model the presence windows as extra evidence was the fallback in the plan.
-It is not worth building: presence has an opinion about 1.3% of turns, and that
-opinion is wrong nearly half the time. Adding it to a prompt would be adding noise.
+Handing the model the presence windows, or the alignment's winner, as extra evidence
+was the fallback in the plan. It is not worth building: presence has an opinion about
+1.3% of turns and is wrong nearly half the time, and the alignment's opinion is a coin
+flip by construction. Both would add noise to a prompt that already works.
+
+What *would* change this is a source of speech timings that are actually speech
+timings. Meet's are not, and nothing here can fix that from outside.
