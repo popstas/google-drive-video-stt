@@ -227,6 +227,11 @@ the last path segment in the browser URL:
 
 ### Reading each employee's own Drive
 
+[docs/config-guide.md](docs/config-guide.md) walks the whole setup in the order the
+decisions have to be made, and names the traps this reference does not: what to
+enable on the Google side, why `folder_id` stays out, why `run.since` is a guard
+rather than a nicety, and the two settings that routinely mislead.
+
 The alternative to being given access to folders is acting as the people who own
 them. With a service account that the Workspace admin has authorized for
 domain-wide delegation, a watched folder is configured by address alone:
