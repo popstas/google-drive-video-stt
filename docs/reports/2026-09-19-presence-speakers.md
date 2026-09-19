@@ -82,8 +82,10 @@ from timestamps that are twenty times coarser than the thing being timed.
 - **The attendance data.** Tasks 1, 2 and 4 -- who was there, the calls nobody came
   to, and the meeting's real start time -- are unaffected; none of them depends on
   this.
-- **The gate.** It cost one read-only afternoon and no Deepgram bill, and it stopped a
-  feature that would have relabelled real calls on a coin flip.
+- **The gate.** The first method was disproved for nothing, from data already there;
+  the second cost about a hundred minutes of Deepgram on two real calls. Together they
+  stopped a feature that would have relabelled real calls on a coin flip, which is
+  cheaper than shipping it and finding out from a customer.
 
 ## Not worth reviving as a hint
 
