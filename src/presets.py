@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib.resources as resources
 from collections.abc import Iterable, Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -83,6 +84,56 @@ INSTRUCTIONS = load_packaged_prompt("keypoints.md")
 # structured fields for the completion webhook. The `{{entities}}` placeholder in
 # the asset is rendered from `Config.meta_entities` at load time (`config.py`).
 META_INSTRUCTIONS = load_packaged_prompt("meta.md")
+
+
+# Placeholders an operator may put in a preset prompt to say where the people in the
+# call belong. Unlike ``{{entities}}``, which is configuration and is rendered once
+# when the config loads, these are *this call* and are rendered as the prompt is
+# sent. Confusing the two would put one call's participants into every later call's
+# prompt.
+PARTICIPANTS_PLACEHOLDER = "{{participants}}"
+SPEAKERS_PLACEHOLDER = "{{participants-speakers}}"
+
+
+def wants_participants(text: str) -> bool:
+    """Whether this prompt asks for the people in the call at all."""
+    return PARTICIPANTS_PLACEHOLDER in text or SPEAKERS_PLACEHOLDER in text
+
+
+def wants_speakers(text: str) -> bool:
+    """Whether this prompt asks specifically who spoke, which costs two requests."""
+    return SPEAKERS_PLACEHOLDER in text
+
+
+def render_participants(
+    text: str,
+    participants: Sequence[str] | None,
+    speakers: Sequence[str] | None,
+) -> str:
+    """Put the call's people where the prompt asked for them.
+
+    A placeholder with nothing to say leaves no trace: the whole line goes, rather
+    than a heading followed by emptiness. "Participants:" with nothing after it is
+    worse than silence -- it tells the model there were none.
+
+    ``None`` and an empty list are the same here on purpose. Whether nobody spoke or
+    nobody could find out, the prompt has nothing truthful to say either way, and the
+    only honest rendering of that is to say nothing.
+    """
+    for placeholder, names in (
+        (PARTICIPANTS_PLACEHOLDER, participants),
+        (SPEAKERS_PLACEHOLDER, speakers),
+    ):
+        if placeholder not in text:
+            continue
+        written = ", ".join(name for name in (names or []) if name)
+        if written:
+            text = text.replace(placeholder, written)
+        else:
+            text = "\n".join(
+                line for line in text.splitlines() if placeholder not in line
+            )
+    return text
 
 
 def default_artifact_suffix(name: str) -> str:

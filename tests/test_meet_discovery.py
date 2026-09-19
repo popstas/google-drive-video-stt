@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -852,3 +853,105 @@ def test_a_marker_that_cannot_be_written_leaves_the_recording_alone(mocker, tmp_
     main.run_once(MagicMock(), config, mode="meet")
 
     process.assert_not_called()
+
+
+# --- the people reach the recording they belong to ----------------------------
+
+
+def _with_prompt(config, text):
+    """A config whose one enabled preset carries the given prompt."""
+    preset = SimpleNamespace(enabled=True, instructions=text, name="keypoints")
+    return replace(config, presets={"keypoints": preset})
+
+
+def test_the_people_are_attached_to_the_recording(mocker, tmp_path):
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    _attending(mocker, _person(*ALONE), _person(*CAME))
+    _drive(mocker)
+    config = _config(["one@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert found.listings[0][1][0]["participants"] == ["Manager", "Client"]
+
+
+def test_who_spoke_is_absent_unless_the_transcript_was_read(mocker, tmp_path):
+    """An empty speaker list and an unread transcript render alike and mean opposites."""
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    _attending(mocker, _person(*ALONE), _person(*CAME), speech=False)
+    _drive(mocker)
+    config = _config(["one@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert "speakers" not in found.listings[0][1][0]
+
+
+def test_who_spoke_is_attached_when_it_is_known(mocker, tmp_path):
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    talker = replace(_person(*ALONE), spoke=True)
+    _attending(mocker, talker, _person(*CAME), speech=True)
+    _drive(mocker)
+    config = _config(["one@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert found.listings[0][1][0]["speakers"] == ["Manager"]
+
+
+def test_a_prompt_asking_for_people_is_reason_enough_to_ask(mocker, tmp_path):
+    """Even with the skip switched off, a prompt that names them must get them."""
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    asked = _attending(mocker, _person(*ALONE), _person(*CAME))
+    _drive(mocker)
+    config = _with_prompt(
+        replace(_config(["one@example.com"], tmp_path), meet_skip_empty_calls=False),
+        "People: {{participants}}",
+    )
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    asked.assert_called_once()
+    assert asked.call_args.kwargs["include_speech"] is False
+    assert found.listings[0][1][0]["participants"] == ["Manager", "Client"]
+
+
+def test_only_a_prompt_that_asks_who_spoke_pays_for_the_transcript(mocker, tmp_path):
+    """Who spoke costs two more requests per recording; nobody pays them by accident."""
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    asked = _attending(mocker, _person(*ALONE), _person(*CAME))
+    _drive(mocker)
+    config = _with_prompt(
+        _config(["one@example.com"], tmp_path), "Who spoke: {{participants-speakers}}"
+    )
+
+    main._discover_by_meet(_fleet(config), config)
+
+    assert asked.call_args.kwargs["include_speech"] is True
+
+
+def test_no_prompt_and_no_skip_asks_nothing(mocker, tmp_path):
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    asked = _attending(mocker, _person(*ALONE))
+    _drive(mocker)
+    config = _with_prompt(
+        replace(_config(["one@example.com"], tmp_path), meet_skip_empty_calls=False),
+        "Summarise the call.",
+    )
+
+    main._discover_by_meet(_fleet(config), config)
+
+    asked.assert_not_called()
+
+
+def test_an_unreadable_attendance_attaches_nothing(mocker, tmp_path):
+    _meet_only(mocker, [_conference(recordings=[_recording("file-1")])])
+    mocker.patch(
+        "src.main.meet_api.attendance", side_effect=meet_api.MeetError("refused")
+    )
+    _drive(mocker)
+    config = _config(["one@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert "participants" not in found.listings[0][1][0]

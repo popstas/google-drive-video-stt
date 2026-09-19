@@ -34,6 +34,7 @@ from src import (
     planfix_html,
     postprocess,
     preset_pipeline,
+    presets as presets_module,
     speaker_roles,
     stt_document,
     webhook,
@@ -239,6 +240,8 @@ def _run_preset_stage(
     config: Config,
     *,
     speaker_names: list[str] | None,
+    participants: list[str] | None = None,
+    speakers: list[str] | None = None,
     artifact_ids: dict[str, str],
     reprocess: bool,
     usage: dict[str, dict[str, int]],
@@ -353,6 +356,8 @@ def _run_preset_stage(
         config.presets,
         speaker_names=speaker_names,
         manager_name=employee.name if employee else "",
+        participants=participants,
+        speakers=speakers,
         only=missing,
         precomputed=precomputed,
     )
@@ -1352,6 +1357,8 @@ def process_item(
                     tmp_dir,
                     config,
                     speaker_names=participant_names,
+                    participants=item.get("participants"),
+                    speakers=item.get("speakers"),
                     artifact_ids=item.get("artifact_ids") or {},
                     reprocess=reprocess_txt,
                     usage=usage,
@@ -1387,6 +1394,8 @@ def process_item(
                     tmp_dir,
                     config,
                     speaker_names=speaker_names,
+                    participants=item.get("participants"),
+                    speakers=item.get("speakers"),
                     artifact_ids=item.get("artifact_ids") or {},
                     reprocess=False,
                     usage=usage,
@@ -2054,7 +2063,44 @@ def _meet_work(
     return files, held
 
 
-def _nobody_came(service, conference: meet_api.MeetConference, config: Config) -> str:
+def _prompts_want_people(config: Config) -> tuple[bool, bool]:
+    """Whether any enabled prompt asks for the call's people, and for who spoke.
+
+    Asked once per cycle rather than per recording, because the answer is the config
+    and the cost is not: who spoke means two more requests per recording, and a
+    deployment whose prompts never mention it must not pay them.
+    """
+    wants_people = False
+    wants_speakers = False
+    for preset in (config.presets or {}).values():
+        if not getattr(preset, "enabled", True):
+            continue
+        text = getattr(preset, "instructions", "") or ""
+        wants_people = wants_people or presets_module.wants_participants(text)
+        wants_speakers = wants_speakers or presets_module.wants_speakers(text)
+    return wants_people, wants_speakers
+
+
+def _call_people(
+    service, conference: meet_api.MeetConference, *, with_speech: bool
+) -> meet_api.Attendance | None:
+    """Who was in this call, or ``None`` when the answer could not be had.
+
+    ``None`` is not an empty room. Every caller below treats the two differently, and
+    the one that decides whether to transcribe must never confuse them.
+    """
+    try:
+        return meet_api.attendance(service, conference.name, include_speech=with_speech)
+    except (meet_api.MeetError, HttpError) as exc:
+        logger.warning(
+            "Could not read who was in %s, so it is treated as unknown: %s",
+            conference.name,
+            exc,
+        )
+        return None
+
+
+def _nobody_came(attendance: meet_api.Attendance | None, conference: str) -> str:
     """Why this call is not worth transcribing, or an empty string.
 
     A manager who waited alone for a client who never arrived produces a recording of
@@ -2064,19 +2110,8 @@ def _nobody_came(service, conference: meet_api.MeetConference, config: Config) -
     they came. There is no duration threshold on purpose: the measured real calls
     overlapped for as little as fifteen seconds, so a threshold would quietly discard
     real conversations to save a few cents.
-
-    An attendance that could not be read returns an empty string, never a skip.
-    "Nobody was here" and "I could not find out" are opposite answers, and only one of
-    them may cost a recording.
     """
-    try:
-        attendance = meet_api.attendance(service, conference.name)
-    except (meet_api.MeetError, HttpError) as exc:
-        logger.warning(
-            "Could not read who was in %s, so it is processed as usual: %s",
-            conference.name,
-            exc,
-        )
+    if attendance is None:
         return ""
     if not attendance.people:
         # A recording exists, so somebody was in the call. An empty list is the API
@@ -2084,7 +2119,7 @@ def _nobody_came(service, conference: meet_api.MeetConference, config: Config) -
         # conversation.
         logger.warning(
             "Meet reported no participants at all for %s; processing it as usual",
-            conference.name,
+            conference,
         )
         return ""
     if meet_api.ever_together(attendance):
@@ -2178,6 +2213,34 @@ def _meet_listing(fleet: delegation.Fleet, folder_id: str, containers: set[str])
     return items
 
 
+def _attach_people(
+    listings: list[tuple[str, list[dict]]],
+    people_by_file: dict[str, meet_api.Attendance],
+) -> None:
+    """Hand each recording the people who were in its call.
+
+    Optional data on an otherwise unchanged item: the walk produces the same items
+    without it, and everything that does not ask for it behaves as it always did.
+    ``speakers`` stays absent unless the transcript was actually read, because an
+    empty list of speakers and an unread transcript would render the same and mean
+    opposite things.
+    """
+    for _, items in listings:
+        for item in items:
+            attendance = people_by_file.get(item.get("file", {}).get("id", ""))
+            if attendance is None:
+                continue
+            item["participants"] = [
+                person.display_name for person in attendance.people if person.display_name
+            ]
+            if attendance.speech_known:
+                item["speakers"] = [
+                    person.display_name
+                    for person in attendance.people
+                    if person.spoke and person.display_name
+                ]
+
+
 def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
     """Ask each employee's Meet what they have been in, instead of reading Drive.
 
@@ -2213,6 +2276,8 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
     seen_files: set[str] = set()
     asked: list[str] = []
     skip_files: dict[str, str] = {}
+    people_by_file: dict[str, meet_api.Attendance] = {}
+    wants_people, wants_speakers = _prompts_want_people(config)
 
     def hold_at(moment: datetime | None) -> None:
         nonlocal held
@@ -2238,11 +2303,15 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
             continue
         files, unfinished = _meet_work(conferences, config, now)
         hold_at(unfinished)
-        if config.meet_skip_empty_calls:
+        if wants_people or config.meet_skip_empty_calls:
             for file_id, conference in files:
-                reason = _nobody_came(service, conference, config)
-                if reason:
-                    skip_files[file_id] = reason
+                attendance = _call_people(service, conference, with_speech=wants_speakers)
+                if attendance is not None:
+                    people_by_file[file_id] = attendance
+                if config.meet_skip_empty_calls:
+                    reason = _nobody_came(attendance, conference.name)
+                    if reason:
+                        skip_files[file_id] = reason
         files = [file_id for file_id, _ in files]
         placement_retry_state = _RetryState()
         try:
@@ -2323,6 +2392,7 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
         folder_errors += walked.folder_errors
         retries += walked.retries
 
+    _attach_people(listings, people_by_file)
     return _Discovery(
         listings,
         cursor=None,
