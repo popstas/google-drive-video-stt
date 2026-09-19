@@ -370,6 +370,15 @@ started outside the calendar is named after the meeting room and carries no time
 all. That was the `no-meeting-time` answer that left such a recording matched to no
 booking and reaching no task.
 
+**Naming the speakers starts from that list too.** Deciding which diarized voice is
+which person is still the model's job -- three ways of doing it from Meet's own
+timestamps were measured and all three failed, see
+[docs/reports/2026-09-19-presence-speakers.md](docs/reports/2026-09-19-presence-speakers.md)
+-- but the model is now given the people who actually spoke, from the accounts that
+joined, instead of names parsed out of Meet's transcript document. A participant who
+stayed silent is not offered as a candidate, because they cannot be one of the voices.
+The document is still read: its turns are the evidence the model weighs.
+
 One caveat worth knowing: the API reports a participant's display name and an opaque
 user id, never an address. Nothing here can map one to the other, so a person is
 recognised by their name as Meet shows it.

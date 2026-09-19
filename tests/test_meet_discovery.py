@@ -1036,3 +1036,29 @@ def test_presets_as_a_tuple_are_read_too(mocker, tmp_path):
     main._discover_by_meet(_fleet(config), config)
 
     assert asked.call_args.kwargs["include_speech"] is True
+
+
+# --- the people Meet named become the model's candidates ----------------------
+
+
+def test_who_spoke_beats_who_was_there():
+    """A participant who never said anything cannot be one of the diarized voices."""
+    item = {"participants": ["Ann", "Bob", "Quiet"], "speakers": ["Ann", "Bob"]}
+
+    assert main._speaker_candidates(item) == ["Ann", "Bob"]
+
+
+def test_without_who_spoke_everyone_present_is_a_candidate():
+    assert main._speaker_candidates({"participants": ["Ann", "Bob"]}) == ["Ann", "Bob"]
+
+
+def test_an_empty_speaker_list_does_not_starve_the_model():
+    """Nobody spoke on record is not the same as nobody could have."""
+    item = {"participants": ["Ann", "Bob"], "speakers": []}
+
+    assert main._speaker_candidates(item) == ["Ann", "Bob"]
+
+
+def test_nothing_from_meet_leaves_the_document_in_charge():
+    """The walk attaches nothing, and must behave exactly as it always did."""
+    assert main._speaker_candidates({}) is None

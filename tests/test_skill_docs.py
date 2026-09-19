@@ -85,7 +85,7 @@ def test_skill_is_a_single_compact_file():
     # adds operator surface, and pay for the raise by keeping the new section tight.
     # Last raised for what Meet knows about a call: the skip, the prompt
     # placeholders and the meeting time.
-    assert len(SKILL_PATH.read_text(encoding="utf-8").splitlines()) <= 542
+    assert len(SKILL_PATH.read_text(encoding="utf-8").splitlines()) <= 549
 
     assert not (CANONICAL_SKILL_ROOT / "references").exists()
     assert not (CANONICAL_SKILL_ROOT / "examples").exists()

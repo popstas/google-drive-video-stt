@@ -680,6 +680,19 @@ def _read_meet_transcript(
     return names, text
 
 
+def _speaker_candidates(item: dict) -> list[str] | None:
+    """Who could be a diarized voice on this call, when Meet was asked.
+
+    Whoever spoke beats whoever was there: a participant who never said anything
+    cannot be one of the voices diarization separated, and offering them as a
+    candidate is an invitation to bind a name to the wrong speaker.
+
+    ``None`` when Meet was not asked -- the walk attaches nothing -- and the caller
+    falls back to parsing the transcript document, exactly as before.
+    """
+    return item.get("speakers") or item.get("participants") or None
+
+
 def _resolve_speaker_names(
     transcript: str,
     file_name: str,
@@ -1326,6 +1339,13 @@ def process_item(
                         # name only has a first name from the calendar invite. Without
                         # a model nothing could use it, so it is not read.
                         meet = _read_meet_transcript(service, container_id, file_name)
+                        # Who could possibly be a speaker. The API's answer wins when
+                        # there is one: it comes from the accounts that joined, while
+                        # the document's comes from parsing prose, and "who spoke"
+                        # beats "who was there" because a silent participant cannot be
+                        # a diarized voice. The document is still read -- its turns are
+                        # the evidence the model weighs, whoever named the candidates.
+                        known = _speaker_candidates(item)
                         # An answer the model would not stand behind leaves the
                         # speakers numbered (``[]``). No name is ever bound to a
                         # speaker by order once a model could be asked: neither Meet's
@@ -1333,10 +1353,12 @@ def process_item(
                         # Meet's swapped the labels.
                         speaker_names = _resolve_speaker_names(
                             text, file_name, folder_id, config, usage=usage,
-                            candidates=meet[0] if meet else None,
+                            candidates=known or (meet[0] if meet else None),
                             meet_text=meet[1] if meet else "",
                         )
-                        participant_names = speaker_names or (meet[0] if meet else None)
+                        participant_names = (
+                            speaker_names or known or (meet[0] if meet else None)
+                        )
                     text = postprocess.postprocess_transcript(
                         text,
                         file_name,
@@ -2298,6 +2320,11 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
     people_by_file: dict[str, meet_api.Attendance] = {}
     conference_by_file: dict[str, meet_api.MeetConference] = {}
     wants_people, wants_speakers = _prompts_want_people(config)
+    # Naming the diarized speakers is the other reason to ask who spoke, and the better
+    # one: it hands the model the people who actually talked instead of every name a
+    # document happened to mention.
+    if config.stt_postprocess and config.openai_api_key:
+        wants_people = wants_speakers = True
 
     def hold_at(moment: datetime | None) -> None:
         nonlocal held
