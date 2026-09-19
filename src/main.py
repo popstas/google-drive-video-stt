@@ -680,17 +680,38 @@ def _read_meet_transcript(
     return names, text
 
 
-def _speaker_candidates(item: dict) -> list[str] | None:
-    """Who could be a diarized voice on this call, when Meet was asked.
+def _speaker_candidates(
+    item: dict, from_document: list[str] | None = None
+) -> list[str] | None:
+    """Who could be a diarized voice on this call.
 
-    Whoever spoke beats whoever was there: a participant who never said anything
-    cannot be one of the voices diarization separated, and offering them as a
-    candidate is an invitation to bind a name to the wrong speaker.
+    Both sources, not one. The transcript document goes first because its names are
+    the exact strings the model sees in the turns it is given as evidence, and the
+    answer is validated against this list -- a candidate spelled differently from the
+    evidence is a correct answer thrown away. Meet's own participants follow, and they
+    are what makes the list complete: the document is read with a limit of two names,
+    which on a call between four people leaves the model two candidates for four
+    voices.
 
-    ``None`` when Meet was not asked -- the walk attaches nothing -- and the caller
-    falls back to parsing the transcript document, exactly as before.
+    Whoever spoke leads whoever merely attended: a participant who never said anything
+    cannot be one of the voices diarization separated.
+
+    ``None`` when neither source has anything, and the caller keeps its own fallback.
     """
-    return item.get("speakers") or item.get("participants") or None
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for source in (
+        from_document or [],
+        item.get("speakers") or [],
+        item.get("participants") or [],
+    ):
+        for name in source:
+            cleaned = (name or "").strip()
+            key = cleaned.casefold()
+            if cleaned and key not in seen:
+                seen.add(key)
+                ordered.append(cleaned)
+    return ordered or None
 
 
 def _resolve_speaker_names(
@@ -1345,7 +1366,7 @@ def process_item(
                         # beats "who was there" because a silent participant cannot be
                         # a diarized voice. The document is still read -- its turns are
                         # the evidence the model weighs, whoever named the candidates.
-                        known = _speaker_candidates(item)
+                        known = _speaker_candidates(item, meet[0] if meet else None)
                         # An answer the model would not stand behind leaves the
                         # speakers numbered (``[]``). No name is ever bound to a
                         # speaker by order once a model could be asked: neither Meet's
@@ -1353,12 +1374,10 @@ def process_item(
                         # Meet's swapped the labels.
                         speaker_names = _resolve_speaker_names(
                             text, file_name, folder_id, config, usage=usage,
-                            candidates=known or (meet[0] if meet else None),
+                            candidates=known,
                             meet_text=meet[1] if meet else "",
                         )
-                        participant_names = (
-                            speaker_names or known or (meet[0] if meet else None)
-                        )
+                        participant_names = speaker_names or known
                     text = postprocess.postprocess_transcript(
                         text,
                         file_name,

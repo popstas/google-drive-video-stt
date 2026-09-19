@@ -1041,24 +1041,38 @@ def test_presets_as_a_tuple_are_read_too(mocker, tmp_path):
 # --- the people Meet named become the model's candidates ----------------------
 
 
-def test_who_spoke_beats_who_was_there():
+def test_the_document_names_come_first():
+    """They are the strings the model sees in the evidence, and the answer is
+    validated against this list -- a different spelling is a right answer thrown out."""
+    item = {"speakers": ["Bob", "Ann"], "participants": ["Bob", "Ann"]}
+
+    assert main._speaker_candidates(item, ["Ann", "Bob"]) == ["Ann", "Bob"]
+
+
+def test_meet_completes_what_the_document_truncated():
+    """The document is read with a limit of two; four people on a call is normal."""
+    item = {"speakers": ["Ann", "Bob", "Cid", "Dee"]}
+
+    assert main._speaker_candidates(item, ["Ann", "Bob"]) == ["Ann", "Bob", "Cid", "Dee"]
+
+
+def test_who_spoke_leads_who_only_attended():
     """A participant who never said anything cannot be one of the diarized voices."""
-    item = {"participants": ["Ann", "Bob", "Quiet"], "speakers": ["Ann", "Bob"]}
+    item = {"participants": ["Quiet", "Ann"], "speakers": ["Ann"]}
 
-    assert main._speaker_candidates(item) == ["Ann", "Bob"]
-
-
-def test_without_who_spoke_everyone_present_is_a_candidate():
-    assert main._speaker_candidates({"participants": ["Ann", "Bob"]}) == ["Ann", "Bob"]
+    assert main._speaker_candidates(item) == ["Ann", "Quiet"]
 
 
-def test_an_empty_speaker_list_does_not_starve_the_model():
-    """Nobody spoke on record is not the same as nobody could have."""
-    item = {"participants": ["Ann", "Bob"], "speakers": []}
+def test_the_same_person_is_not_offered_twice():
+    item = {"speakers": ["ann"], "participants": ["Ann "]}
 
-    assert main._speaker_candidates(item) == ["Ann", "Bob"]
+    assert main._speaker_candidates(item, ["Ann"]) == ["Ann"]
 
 
-def test_nothing_from_meet_leaves_the_document_in_charge():
+def test_without_meet_the_document_is_the_whole_list():
     """The walk attaches nothing, and must behave exactly as it always did."""
-    assert main._speaker_candidates({}) is None
+    assert main._speaker_candidates({}, ["Ann", "Bob"]) == ["Ann", "Bob"]
+
+
+def test_with_nothing_at_all_the_caller_keeps_its_fallback():
+    assert main._speaker_candidates({}, None) is None

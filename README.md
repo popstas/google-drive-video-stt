@@ -374,10 +374,12 @@ booking and reaching no task.
 which person is still the model's job -- three ways of doing it from Meet's own
 timestamps were measured and all three failed, see
 [docs/reports/2026-09-19-presence-speakers.md](docs/reports/2026-09-19-presence-speakers.md)
--- but the model is now given the people who actually spoke, from the accounts that
-joined, instead of names parsed out of Meet's transcript document. A participant who
-stayed silent is not offered as a candidate, because they cannot be one of the voices.
-The document is still read: its turns are the evidence the model weighs.
+-- but the list of candidates it chooses from is now both sources together. The
+transcript document leads, because its names are the exact strings the model sees in
+the turns it is given as evidence and a differently spelled candidate is a correct
+answer thrown away; Meet's participants follow and make the list complete, which
+matters because the document is read with a limit of two names and a call between
+four people is ordinary. Whoever spoke leads whoever merely attended.
 
 One caveat worth knowing: the API reports a participant's display name and an opaque
 user id, never an address. Nothing here can map one to the other, so a person is
