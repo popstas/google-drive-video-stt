@@ -5,7 +5,8 @@
 **No-go.** Task 5 of `docs/plans/2026-09-19-meet-attendance.md` is abandoned. Who is
 who stays the model's job, exactly as it is today.
 
-Two different methods were measured and both fail, for the same measured reason:
+Three methods were measured -- presence, whole-turn overlap, and turn starts alone --
+and all three fail, for the same measured reason:
 **Meet's timestamps are not speech boundaries.** A turn averages 23 seconds carrying
 13 characters -- 0.6 characters per second, where speech runs around fifteen. The
 windows are roughly twenty times wider than the words in them, so on a two-person
@@ -73,6 +74,36 @@ it overlaps most" is noise.
 
 This is not a tuning problem. No threshold, guard band or weighting recovers a signal
 from timestamps that are twenty times coarser than the thing being timed.
+
+## The third method: only the starts
+
+The ends of Meet's turns are clearly inflated, so the obvious refinement is to use
+only the *start* of each turn -- the moment somebody began speaking -- and ask which
+diarized voice was talking then. Then the stricter version: keep only the moments
+where a Meet turn start and a Deepgram utterance start fall within a second or two of
+each other, on the grounds that those must be the same event.
+
+Both were measured on the same two calls. The strict version is the one that settles
+it, because it fails in a way that cannot be argued with:
+
+| tolerance | 73-minute call, 3 accounts | 28-minute call, 2 accounts |
+| --- | --- | --- |
+| +-1s | 50-70%, two voices on one person | 50% and 57% |
+| +-2s | 51-59%, same collision | 54% and 63% |
+| +-3s | 52-58%, same collision | 56% and 59% |
+| +-5s | 50-57%, same collision | 53% and 58% |
+
+**Tightening the window does not sharpen the answer.** If turn starts carried real
+timing, +-1s would be far cleaner than +-5s. It is flat, which is the signature of
+coincidence rather than signal.
+
+The count confirms it. Deepgram produces an utterance start every 4.0 seconds on that
+call, so a two-second window catches an unrelated one about 50% of the time by
+chance -- and the measured match rate is 50%. On the second call chance predicts 53%
+and the measured rate is 45%, at or below it.
+
+So the starts are not speech starts either. Every match is a coincidence, and a vote
+over coincidences is a vote over nothing.
 
 ## What survives
 
