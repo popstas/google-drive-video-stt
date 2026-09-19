@@ -66,6 +66,9 @@ folder that was renamed and moved while keeping its id, from a different cause.
 The split is not repairable by un-sharing. The old meetings stay where they are;
 moving them into the live root is possible if someone wants one folder again, since
 moving and writing do not trigger anything.
+[docs/meet-folder-consolidation.md](meet-folder-consolidation.md) is how that move is
+planned and run, what it does to inherited access, and what the rejoined history costs
+the next cycle.
 
 ## Rules this imposes
 

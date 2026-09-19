@@ -262,8 +262,10 @@ of this config, not of the grant.
 
 What changes when delegation is on:
 
-- `folder_id` becomes optional. Setting it anyway pins that folder for that employee
-  and skips the lookup.
+- `folder_id` becomes optional, and leaving it out is the point. Setting it pins that
+  folder for that employee and skips the lookup -- so a config written before Meet
+  abandoned a root keeps reading the dead one, reports no errors, and finds nothing
+  ever again. Pin an id only for a folder that is not a Meet root at all.
 - `name` becomes optional; it is read from the employee's own Drive profile, and
   still decides which speaker the transcript calls the manager.
 - The id is resolved **every cycle**, never written back to the config. That is the
@@ -408,7 +410,11 @@ A recordings root that gets shared with anyone is abandoned by Meet: from the ne
 recording on, a second folder of the same name appears beside it and everything lands
 there instead, while the configured id keeps resolving and keeps finding nothing. What
 is safe to share, what is not, and how to tell a live root from a dead one is written
-down in [docs/meet-recordings-folder.md](docs/meet-recordings-folder.md).
+down in [docs/meet-recordings-folder.md](docs/meet-recordings-folder.md). Moving the
+calls out of an abandoned root and into the live one is a separate operation with its
+own consequences -- inherited access disappears, and the rejoined history arrives as a
+backlog that `run.since` has to bound. It is written down in
+[docs/meet-folder-consolidation.md](docs/meet-folder-consolidation.md).
 
 ### How new recordings are found
 
