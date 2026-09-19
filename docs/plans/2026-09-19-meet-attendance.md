@@ -77,7 +77,7 @@ firmer question.
 
 ## Implementation steps
 
-### Task 1: attendance, as the API reports it
+### Task 1: attendance, as the API reports it -- DONE (`meet_api.attendance`)
 
 Extend `src/meet_api.py`, which still knows nothing about folders or the pipeline:
 
@@ -97,7 +97,7 @@ Extend `src/meet_api.py`, which still knows nothing about folders or the pipelin
 - Tests: one participant; two with a latecomer; a rejoin producing two windows; a
   silent participant; an anonymous one; an unreadable conference.
 
-### Task 2: a call nobody came to is not transcribed
+### Task 2: a call nobody came to is not transcribed -- DONE (`_nobody_came`, `.skipped`)
 
 The saving this plan pays for itself with: a call where the manager waited alone
 costs a download, a Deepgram bill and three OpenAI calls today, for a recording of
@@ -127,7 +127,7 @@ silence and a "hello? …hello?".
   processed; the marker makes the next cycle skip; `reprocess` ignores the marker;
   in `walk` mode nothing changes.
 
-### Task 3: participants where the operator wants them
+### Task 3: participants where the operator wants them -- DONE (`presets.render_participants`)
 
 - `{{participants}}` -- everyone who was in the call, including the silent.
 - `{{participants-speakers}}` -- only those the transcript attributes speech to.
@@ -146,7 +146,7 @@ silence and a "hello? …hello?".
   other; no attendance renders nothing rather than an empty list; a prompt with no
   placeholder is unchanged; the hint line is not duplicated.
 
-### Task 4: the time the call actually started
+### Task 4: the time the call actually started -- DONE (`item['meeting_start']`)
 
 - `conferenceRecords.startTime` is authoritative. Today the meeting time is parsed
   out of the recording's file name, and when that fails the gate answers
@@ -161,7 +161,7 @@ silence and a "hello? …hello?".
   the name; a file whose name carries no time is matched anyway under `meet` mode;
   the booking gate's existing behaviour is untouched in `walk` mode.
 
-### Task 5: who is who, from presence -- gated on a measurement
+### Task 5: who is who, from presence -- NOT STARTED, waiting on the gate
 
 Nothing here starts until the gate below is passed.
 
@@ -190,7 +190,7 @@ Nothing here starts until the gate below is passed.
   latecomer's window excludes earlier segments; a boundary segment inside the guard
   is not attributed; contradictory votes count as unresolved.
 
-### Task 6: doctor, documentation, live verification
+### Task 6: doctor, documentation, live verification -- DONE for tasks 1-4
 
 - `doctor --drive` per employee: how many conferences in the window had nobody but
   the organiser, and how many recordings carry a skip marker.
@@ -199,6 +199,31 @@ Nothing here starts until the gate below is passed.
 - Live: one real solo call marked and skipped end to end; one real attended call
   processed with both placeholders rendered; `--mode walk` unchanged on the same
   moment.
+
+## What the live verification found
+
+Run against the real domain on 2026-09-19, one delegated employee:
+
+- `doctor --drive`: 13 conferences in the window, 10 recorded, **0 that nobody but the
+  organiser came to**, 1 of 9 already processed, 1 recording this account cannot open
+  (a call the employee only attended, whose file belongs to its organiser).
+- `run-once --dry-run --mode meet` and `--mode walk` found **the same 8 recordings**,
+  by file id, and nothing was wrongly marked.
+- The attendance lookup found real join times on every call, including latecomers.
+
+The first run of that comparison found 0 against the walk's 8: `config.presets` is a
+tuple of presets, not the mapping this plan's code assumed, and an empty one of either
+shape is falsy -- so every unit test passed and the first real config failed. The fix
+carries a regression test with a non-empty tuple. Worth recording because it is the
+second time here that a live run caught what a mocked one could not.
+
+## What Task 5 is waiting for
+
+The gate needs calls whose speaker mapping a person has already checked, read as the
+account that owns them. The example recordings available are files on disk, and the
+accounts reachable from this machine are the two test ones -- neither is an employee
+whose mapping anybody has verified. Until that is available, Task 5 stays unstarted
+rather than merged unmeasured.
 
 ## What this costs
 
