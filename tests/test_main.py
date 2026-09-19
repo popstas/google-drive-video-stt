@@ -4239,6 +4239,57 @@ def test_telegram_summary_is_not_sent_twice(monkeypatch, telegram_config):
     send.assert_not_called()
 
 
+def test_telegram_summary_logs_the_send_and_the_delivery(
+    monkeypatch, telegram_config, caplog
+):
+    """A delivered summary is the one thing the log never mentioned, which made a
+    silent log indistinguishable from a silent failure."""
+    monkeypatch.setattr(main.notify, "send_message", MagicMock(return_value=True))
+    monkeypatch.setattr(main.drive, "set_file_app_properties", MagicMock())
+
+    with caplog.at_level("INFO"):
+        main._send_telegram_summary(
+            MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, telegram_config,
+            {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+        )
+
+    assert "Sending the Telegram summary" in caplog.text
+    assert "delivered to chat" in caplog.text
+    assert TELEGRAM_CHAT_ID in caplog.text
+    assert "v1.mp4" in caplog.text
+
+
+def test_a_failed_telegram_summary_still_logs_that_it_was_tried(
+    monkeypatch, telegram_config, caplog
+):
+    """The trigger line is what separates "never tried" from "tried and failed"."""
+    monkeypatch.setattr(main.notify, "send_message", MagicMock(return_value=False))
+
+    with caplog.at_level("INFO"):
+        main._send_telegram_summary(
+            MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, telegram_config,
+            {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+        )
+
+    assert "Sending the Telegram summary" in caplog.text
+    assert "delivered to chat" not in caplog.text
+    assert "Failed to send the Telegram summary" in caplog.text
+
+
+def test_a_folder_without_a_chat_says_so_rather_than_saying_nothing(
+    monkeypatch, gate_config, caplog
+):
+    monkeypatch.setattr(main.notify, "send_message", MagicMock(return_value=True))
+
+    with caplog.at_level("DEBUG"):
+        main._send_telegram_summary(
+            MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, gate_config,
+            {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+        )
+
+    assert "no Telegram chat" in caplog.text
+
+
 def test_telegram_summary_also_goes_out_for_a_matched_recording(
     monkeypatch, telegram_config
 ):

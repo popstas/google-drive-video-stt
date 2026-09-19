@@ -1173,8 +1173,10 @@ def _send_telegram_summary(
     successful send, so a later cycle backfilling a newly configured preset does not
     re-post the whole summary.
     """
+    name = item.get("file", {}).get("name")
     chat_id = folder_telegram_chat(config, folder_id)
     if not chat_id:
+        logger.debug("Folder %s has no Telegram chat; %s stays unsent", folder_id, name)
         return
     if (
         config.planfix_ignore_telegram_when_planfix
@@ -1205,6 +1207,11 @@ def _send_telegram_summary(
         )
         return
 
+    # Both ends of the send are logged, because only the failures used to be. A
+    # summary that arrived left no trace at all, so a quiet log could not be told
+    # apart from a delivery that never happened -- and the first thing anybody does
+    # when a chat stays empty is read the log.
+    logger.info("Sending the Telegram summary for %s to chat %s", name, chat_id)
     sent = notify.send_message(
         text,
         bot_token=config.telegram_bot_token,
@@ -1217,6 +1224,7 @@ def _send_telegram_summary(
             file_id,
             {drive.TELEGRAM_SENT_CHAT_ID_PROPERTY: chat_id},
         )
+        logger.info("Telegram summary for %s delivered to chat %s", name, chat_id)
         return
 
     # No ``notify_error`` here: the error channel is the same Telegram API that just
@@ -1225,7 +1233,7 @@ def _send_telegram_summary(
     logger.warning(
         "Failed to send the Telegram summary for %s to %s; rerun "
         "`gdstt reprocess %s`",
-        item.get("file", {}).get("name"), chat_id, file_id,
+        name, chat_id, file_id,
     )
 
 
