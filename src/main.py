@@ -1238,7 +1238,9 @@ def process_item(
     # `run_once` resolves this itself so it can gate and count; the manual commands do
     # not, and get a decision here purely so a matched call still reaches Planfix.
     if booking_decision is None:
-        booking_decision = booking_gate.resolve(file_info, folder_id, config)
+        booking_decision = booking_gate.resolve(
+            file_info, folder_id, config, meeting_start=item.get("meeting_start")
+        )
 
     provider = _processing_provider(config, needs_txt=needs_txt)
     processing_mode = _processing_mode(needs_mp3=needs_mp3, needs_txt=needs_txt)
@@ -1537,6 +1539,11 @@ def _recording_datetime(item: dict) -> datetime | None:
     a recording nobody can date would be a silent loss, and silent loss is the
     failure this whole area exists to remove.
     """
+    known = item.get("meeting_start")
+    if known is not None:
+        # Meet said so. The name is a rendering of the same moment, and a worse one:
+        # a call started outside the calendar is named after the meeting room.
+        return known
     file_info = item.get("file", {})
     meeting = parse_meeting_start(file_info.get("name", ""))
     if meeting is not None:
@@ -2213,11 +2220,12 @@ def _meet_listing(fleet: delegation.Fleet, folder_id: str, containers: set[str])
     return items
 
 
-def _attach_people(
+def _attach_call_facts(
     listings: list[tuple[str, list[dict]]],
     people_by_file: dict[str, meet_api.Attendance],
+    conference_by_file: dict[str, meet_api.MeetConference],
 ) -> None:
-    """Hand each recording the people who were in its call.
+    """Hand each recording what Meet knows about the call it came from.
 
     Optional data on an otherwise unchanged item: the walk produces the same items
     without it, and everything that does not ask for it behaves as it always did.
@@ -2227,7 +2235,13 @@ def _attach_people(
     """
     for _, items in listings:
         for item in items:
-            attendance = people_by_file.get(item.get("file", {}).get("id", ""))
+            file_id = item.get("file", {}).get("id", "")
+            conference = conference_by_file.get(file_id)
+            if conference is not None:
+                started = _moment(conference.start_time)
+                if started is not None:
+                    item["meeting_start"] = started
+            attendance = people_by_file.get(file_id)
             if attendance is None:
                 continue
             item["participants"] = [
@@ -2277,6 +2291,7 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
     asked: list[str] = []
     skip_files: dict[str, str] = {}
     people_by_file: dict[str, meet_api.Attendance] = {}
+    conference_by_file: dict[str, meet_api.MeetConference] = {}
     wants_people, wants_speakers = _prompts_want_people(config)
 
     def hold_at(moment: datetime | None) -> None:
@@ -2303,6 +2318,8 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
             continue
         files, unfinished = _meet_work(conferences, config, now)
         hold_at(unfinished)
+        for file_id, conference in files:
+            conference_by_file[file_id] = conference
         if wants_people or config.meet_skip_empty_calls:
             for file_id, conference in files:
                 attendance = _call_people(service, conference, with_speech=wants_speakers)
@@ -2392,7 +2409,7 @@ def _discover_by_meet(fleet: delegation.Fleet, config: Config) -> _Discovery:
         folder_errors += walked.folder_errors
         retries += walked.retries
 
-    _attach_people(listings, people_by_file)
+    _attach_call_facts(listings, people_by_file, conference_by_file)
     return _Discovery(
         listings,
         cursor=None,
@@ -2694,7 +2711,12 @@ def run_once(
             ):
                 cycle_skipped_nobody += 1
         for item in pending:
-            decision = booking_gate.resolve(item["file"], folder_id, config)
+            decision = booking_gate.resolve(
+                item["file"],
+                folder_id,
+                config,
+                meeting_start=item.get("meeting_start"),
+            )
             if (
                 decision.state == booking_gate.UNMATCHED
                 and config.call_booking_disable_recognition

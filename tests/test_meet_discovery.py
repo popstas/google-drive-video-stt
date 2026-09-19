@@ -955,3 +955,64 @@ def test_an_unreadable_attendance_attaches_nothing(mocker, tmp_path):
     found = main._discover_by_meet(_fleet(config), config)
 
     assert "participants" not in found.listings[0][1][0]
+
+
+# --- the time the call actually started ---------------------------------------
+
+
+def test_the_conference_time_is_attached_to_the_recording(mocker, tmp_path):
+    _meet_only(mocker, [_conference(start="2026-09-18T11:07:31Z", recordings=[_recording("file-1")])])
+    _attending(mocker, _person(*ALONE), _person(*CAME))
+    _drive(mocker)
+    config = _config(["one@example.com"], tmp_path)
+
+    found = main._discover_by_meet(_fleet(config), config)
+
+    assert found.listings[0][1][0]["meeting_start"] == dt.datetime(
+        2026, 9, 18, 11, 7, 31, tzinfo=dt.timezone.utc
+    )
+
+
+def test_the_conference_time_beats_the_one_in_the_name():
+    """A call started outside the calendar is named after the meeting room."""
+    item = dict(
+        _item("file-1", "xyz-abcd-efg (2026-09-18 09_00 GMT).mp4"),
+        meeting_start=dt.datetime(2026, 9, 18, 11, 7, 31, tzinfo=dt.timezone.utc),
+    )
+
+    assert main._recording_datetime(item) == dt.datetime(
+        2026, 9, 18, 11, 7, 31, tzinfo=dt.timezone.utc
+    )
+
+
+def test_without_a_conference_the_name_is_still_read():
+    """The walk produces no conference, and must behave exactly as it always did."""
+    item = _item("file-1", "xyz-abcd-efg (2026-09-18 09_00 GMT).mp4")
+
+    assert main._recording_datetime(item) is not None
+
+
+def test_a_recording_meet_timed_reaches_the_booking_gate(mocker, tmp_path):
+    """The `no-meeting-time` refusal is what this removes."""
+    config = replace(
+        _config(["one@example.com"], tmp_path), stt_provider="deepgram"
+    )
+    mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Owner")
+    _meet_only(
+        mocker,
+        [_conference(start="2026-09-18T11:07:31Z", recordings=[_recording("file-1")])],
+    )
+    _attending(mocker, _person(*ALONE), _person(*CAME))
+    _drive(mocker, items=[_item("file-1", "a-call-with-no-time-in-it.mp4")])
+    resolve = mocker.patch(
+        "src.main.booking_gate.resolve",
+        return_value=main.booking_gate.BookingDecision(state="disabled"),
+    )
+    mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), config, mode="meet")
+
+    assert resolve.call_args.kwargs["meeting_start"] == dt.datetime(
+        2026, 9, 18, 11, 7, 31, tzinfo=dt.timezone.utc
+    )

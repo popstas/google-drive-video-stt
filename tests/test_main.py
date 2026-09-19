@@ -2973,7 +2973,9 @@ def patch_folder_items(monkeypatch, items):
 
 def patch_decision(monkeypatch, decision):
     monkeypatch.setattr(
-        main.booking_gate, "resolve", lambda file_info, folder_id, config: decision
+        main.booking_gate,
+        "resolve",
+        lambda file_info, folder_id, config, **kwargs: decision,
     )
 
 

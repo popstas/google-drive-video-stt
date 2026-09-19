@@ -56,8 +56,20 @@ def _match_name_rule(file_name: str, config: Config) -> NameRule | None:
     return None
 
 
-def resolve(file_info: dict, folder_id: str, config: Config) -> BookingDecision:
-    """Match one Drive mp4 against the name rules, then the booking journal."""
+def resolve(
+    file_info: dict,
+    folder_id: str,
+    config: Config,
+    *,
+    meeting_start: datetime | None = None,
+) -> BookingDecision:
+    """Match one Drive mp4 against the name rules, then the booking journal.
+
+    ``meeting_start`` is when Meet says the call began. Given one, it is used as
+    is: the name is a rendering of that same moment, and a call started outside
+    the calendar has a name that carries nothing to parse -- which is the
+    ``no-meeting-time`` answer this exists to stop producing.
+    """
     file_name = file_info.get("name", "")
 
     # Before the ``enabled`` gate on purpose: a name rule is a routing mechanism in its
@@ -82,7 +94,7 @@ def resolve(file_info: dict, folder_id: str, config: Config) -> BookingDecision:
     if not email:
         return BookingDecision(state=UNMATCHED, reason="no-folder-email")
 
-    video_start = parse_meeting_start(file_name)
+    video_start = meeting_start or parse_meeting_start(file_name)
     if video_start is None:
         return BookingDecision(state=UNMATCHED, reason="no-meeting-time")
 
