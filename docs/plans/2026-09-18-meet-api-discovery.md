@@ -208,9 +208,10 @@ Run against the real domain on 2026-09-18, one delegated employee with a Meet ar
   the live file rather than only in tests.
 
 The question that was open when this plan was written -- whether the API returns
-conferences an employee only attended -- has since been measured: it does, and the
-attendee gets 404 from Drive for the recording. Coverage is therefore exactly the
-walk's, which is what the comparison above shows. See
+conferences an employee only attended -- has since been measured: it does. Whether
+the attendee can then *open* that recording varies: refused on the test call, allowed
+for every one of a real employee's 13 attended recordings. Coverage stays the walk's
+because discovery decides on ownership rather than access. See
 `docs/reports/2026-09-18-meet-api.md`.
 
 The mode is still turned on explicitly rather than becoming the default for every
