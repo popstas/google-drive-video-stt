@@ -1427,7 +1427,7 @@ Planfix. Give the folder a `telegram` chat id and set the bot token once:
 folders:
   - folder_id: abc
     name: Sales
-    telegram: "-1001234567890"   # numeric chat id, or @channelname, or a list of them
+    telegram: "-1001234567890"   # numeric chat id or @channelname; several: a list or "a, b"
     telegram_calendly:           # optional; chats that get booked calls only
       - "-1009876543210"
 notifications:

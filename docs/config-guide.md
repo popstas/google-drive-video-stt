@@ -151,10 +151,12 @@ folders:
   - '-1001111111111'
   - '@sales_channel'
   telegram_calendly: ['-1002222222222', '-1003333333333']   # or on one line
+- email: oleg@company.example
+  telegram: '241225329, 241225322'    # or one string with commas
 ```
 
-- **Several chats are a YAML list.** A comma inside one string (`'-1001,-1002'`) is a
-  startup error, not two chats.
+- **Several chats**: a YAML list, or one string with commas -- `'-1001, -1002'` is two
+  chats. Spaces around the commas, blanks and repeats are ignored.
 - **Quote every id.** An unquoted `-1001234567890` still loads, but an unquoted
   `@channel` breaks the whole file: `@` cannot start a plain YAML value.
 - **Where an id comes from:** add the bot, post a message in the chat, open

@@ -444,10 +444,12 @@ _SENT_CHATS_MAX_LENGTH = 124 - len("telegram_sent_chat_id")
 
 
 def _chat_ids(raw: object, source: str) -> tuple[str, ...]:
-    """Read one chat id or a list of them; blanks are dropped, order is kept.
+    """Read one chat id or several; blanks and repeats are dropped, order is kept.
 
-    A single value stays valid because that is how every existing config spells it.
-    YAML reads an unquoted ``-100123`` as a number, so each id goes through
+    Several chats may be a YAML list or one comma-separated string -- no chat id,
+    numeric or ``@name``, can contain a comma, so splitting on it never cuts one in
+    two. A single value stays valid because that is how every existing config spells
+    it. YAML reads an unquoted ``-100123`` as a number, so each id goes through
     ``_yaml_str`` rather than being required to be a string.
     """
     if raw is None:
@@ -457,14 +459,10 @@ def _chat_ids(raw: object, source: str) -> tuple[str, ...]:
     for value in values:
         if isinstance(value, (dict, list, tuple)):
             raise ValueError(f"{source} must be a chat id or a list of chat ids, got: {raw!r}")
-        chat = _yaml_str(value)
-        if "," in chat:
-            raise ValueError(
-                f"{source} has {chat!r}; list several chats as a YAML list, not "
-                "a comma-separated string"
-            )
-        if chat and chat not in chats:
-            chats.append(chat)
+        for chat in _yaml_str(value).split(","):
+            chat = chat.strip()
+            if chat and chat not in chats:
+                chats.append(chat)
     return tuple(chats)
 
 

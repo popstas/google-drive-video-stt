@@ -3146,15 +3146,25 @@ def test_folder_telegram_accepts_a_list_of_chats(tmp_path):
     assert config.folders[0].telegram == ("-100123", "@team")
 
 
-def test_folder_telegram_rejects_a_comma_separated_string(tmp_path):
-    """Silently reading it as one chat would send nowhere and mark it delivered."""
+def test_folder_chats_accept_a_comma_separated_string(tmp_path):
+    """Read as one chat, it would send nowhere and be marked delivered. No chat id
+    contains a comma, so the string is split instead."""
     raw = {
         **TELEGRAM_BASE,
-        "folders": [{"folder_id": "f1", "telegram": "-100123,-100456"}],
+        "folders": [
+            {
+                "folder_id": "f1",
+                "email": "a@example.com",
+                "telegram": "241225329, 241225322",
+                "telegram_calendly": "-100123,@team, ,-100123",
+            }
+        ],
     }
 
-    with pytest.raises(ValueError, match="YAML list"):
-        load_config(config_path=write_config(tmp_path, raw))
+    config = load_config(config_path=write_config(tmp_path, raw))
+
+    assert config.folders[0].telegram == ("241225329", "241225322")
+    assert config.folders[0].telegram_calendly == ("-100123", "@team")
 
 
 def test_folder_telegram_calendly_defaults_to_empty(tmp_path):
