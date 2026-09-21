@@ -293,6 +293,29 @@ def test_doctor_lists_each_folder_with_employee_name_and_email(mocker, capsys, t
     assert "f2: (no employee configured)" in out
 
 
+def test_doctor_shows_where_each_folder_sends_its_summaries(mocker, capsys, tmp_path):
+    cfg = make_config(
+        folders=[
+            EmployeeFolder(
+                "f1",
+                email="a@example.com",
+                telegram=("-1001", "-1002"),
+                telegram_calendly=("-1003",),
+            ),
+            EmployeeFolder("f2"),
+        ],
+        data_dir=tmp_path,
+    )
+    mocker.patch("src.cli.load_config", return_value=cfg)
+
+    cli.main(["doctor"])
+
+    out = capsys.readouterr().out
+    assert "telegram (every call): -1001, -1002" in out
+    assert "telegram_calendly (booked calls): -1003" in out
+    assert out.count("telegram (every call)") == 1
+
+
 def test_doctor_drive_check_lists_configured_folders(mocker, capsys, tmp_path):
     cfg = make_config(folders=["f1"], data_dir=tmp_path)
     mocker.patch("src.cli.load_config", return_value=cfg)
@@ -1501,10 +1524,84 @@ def test_planfix_sent_falls_back_to_the_bare_task_id(tmp_path, monkeypatch, caps
     assert "https://drive.google.com/file/d/v1/view" in out
 
 
+def test_planfix_sent_links_the_meeting_folder(tmp_path, monkeypatch, mocker, capsys):
+    """Same link the summary gives: the meeting folder holds the video and the
+    transcript, so it is what a reader asks access to."""
+    config_path = write_cli_config(
+        tmp_path, folders=[{"folder_id": "f1", "email": "a@example.com"}]
+    )
+    monkeypatch.setattr(cli.auth, "build_drive_service", lambda **kwargs: MagicMock())
+    by_folder = {"f1": [], "m1": _sent_files(1)}
+    monkeypatch.setattr(
+        cli.drive, "list_mp4_timestamps", lambda svc, folder_id: by_folder[folder_id]
+    )
+    # mocker, not monkeypatch: the autouse fixture already patched this with mocker, and
+    # mixing the two restores the fixture's mock after the test instead of the original.
+    mocker.patch("src.cli.drive.list_subfolders", return_value=[{"id": "m1"}])
+
+    cli.main(["--config", str(config_path), "planfix", "sent"])
+
+    out = capsys.readouterr().out
+    assert "https://drive.google.com/drive/folders/m1" in out
+    assert "/file/d/v1/view" not in out
+
+
 def test_planfix_sent_reports_an_empty_log(tmp_path, monkeypatch, capsys):
     _run_sent(tmp_path, monkeypatch, [])
 
     assert "No recording carries a sent-comment marker." in capsys.readouterr().out
+
+
+def _run_telegram_sent(tmp_path, monkeypatch, files, extra=()):
+    config_path = write_cli_config(
+        tmp_path, folders=[{"folder_id": "f1", "email": "a@example.com"}]
+    )
+    monkeypatch.setattr(cli.auth, "build_drive_service", lambda **kwargs: MagicMock())
+    monkeypatch.setattr(cli.drive, "list_mp4_timestamps", lambda svc, folder_id: files)
+    cli.main(["--config", str(config_path), "telegram", "sent", *extra])
+
+
+def _telegram_files(count):
+    return [
+        {
+            "id": f"v{n}",
+            "name": f"call-{n}.mp4",
+            "createdTime": f"2026-08-{n:02d}T10:00:00.000Z",
+            "appProperties": {"telegram_sent_chat_id": "-1001,-1002"},
+        }
+        for n in range(1, count + 1)
+    ]
+
+
+def test_telegram_sent_lists_each_delivered_recording_and_its_chats(
+    tmp_path, monkeypatch, capsys
+):
+    files = _telegram_files(1) + [
+        {"id": "v9", "name": "never-sent.mp4", "createdTime": "2026-08-09T10:00:00.000Z"}
+    ]
+    _run_telegram_sent(tmp_path, monkeypatch, files)
+
+    out = capsys.readouterr().out
+    assert "call-1.mp4" in out
+    assert "chats: -1001, -1002" in out
+    assert "never-sent.mp4" not in out
+
+
+def test_telegram_sent_puts_the_newest_first_and_caps_the_list(
+    tmp_path, monkeypatch, capsys
+):
+    _run_telegram_sent(tmp_path, monkeypatch, _telegram_files(3), extra=["--limit", "2"])
+
+    out = capsys.readouterr().out
+    assert out.index("call-3.mp4") < out.index("call-2.mp4")
+    assert "call-1.mp4" not in out
+    assert "2 of 3 shown" in out
+
+
+def test_telegram_sent_reports_an_empty_log(tmp_path, monkeypatch, capsys):
+    _run_telegram_sent(tmp_path, monkeypatch, [])
+
+    assert "No recording carries a sent-summary marker." in capsys.readouterr().out
 
 
 # --- Subfolders and the changes feed from the operator's side ---------------------

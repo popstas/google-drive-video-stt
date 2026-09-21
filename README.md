@@ -1472,6 +1472,9 @@ configured preset does not re-post the summary. A failed send leaves that chat o
 marker — `gdstt reprocess <file-id>` resends it there and nowhere else. The marker has
 room for about seven chat ids per folder; a config listing more is a startup error.
 
+`gdstt telegram sent [--limit N]` lists the recordings a summary reached, newest first,
+with the chats each one went to; `gdstt doctor` shows every folder's chats.
+
 ## Project layout
 
 ```

@@ -453,6 +453,18 @@ def _describe_employee(folder) -> str:
     return folder.name or folder.email or "(no employee configured)"
 
 
+def _print_folder_chats(folder) -> None:
+    """Where this folder's summaries go, and which calls each chat gets.
+
+    Chat ids are addresses, not secrets; printing them is how an operator catches a
+    summary going to the wrong group before anybody reads it there.
+    """
+    if folder.telegram:
+        print(f"    telegram (every call): {', '.join(folder.telegram)}")
+    if folder.telegram_calendly:
+        print(f"    telegram_calendly (booked calls): {', '.join(folder.telegram_calendly)}")
+
+
 def _print_root_sharing(service, folder_id: str) -> None:
     """Say so when a recordings root is shared, because Meet is about to leave it.
 
@@ -561,6 +573,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     for folder in config.folders:
         where = folder.folder_id or "(found at run time)"
         print(f"  {where}: {_describe_employee(folder)}")
+        _print_folder_chats(folder)
     print(f"stt.provider: {config.stt_provider or 'not configured'}")
     _print_preset_dag(config)
     print(
@@ -824,6 +837,62 @@ def cmd_bookings_rematch(args: argparse.Namespace) -> None:
     )
 
 
+def _recording_link(item: dict, folder_id: str) -> str:
+    """The link a summary gives for a recording: its meeting folder, else the video."""
+    container = item.get("container_id") or folder_id
+    return meta_doc.folder_url(container, folder_id) or meta_doc.video_url(
+        item.get("id", "")
+    )
+
+
+def _sent_rows(args: argparse.Namespace, property_name: str) -> tuple[object, list[tuple]]:
+    """Every recording carrying ``property_name``, newest first.
+
+    Each row is ``(createdTime, marker value, manager, link, name)``.
+    """
+    config = load_config(config_path=args.config, validate_providers=False)
+    fleet = _fleet(config)
+    config = fleet.config
+    rows: list[tuple[str, str, str, str, str]] = []
+    for folder in config.folders:
+        service = fleet.service_for(folder.folder_id)
+        for item in drive.list_mp4_timestamps_in_tree(service, folder.folder_id):
+            value = (item.get("appProperties") or {}).get(property_name, "")
+            if value:
+                rows.append(
+                    (
+                        item.get("createdTime", ""),
+                        value,
+                        folder.name,
+                        _recording_link(item, folder.folder_id),
+                        item.get("name", ""),
+                    )
+                )
+    # Newest first: this is a "what happened lately" listing, and the calls an operator
+    # is asking about are the ones that just happened.
+    rows.sort(reverse=True)
+    return config, rows
+
+
+def _print_sent(rows: list[tuple], limit: int, describe) -> None:
+    """Print one block per recording; ``describe`` renders the marker's line."""
+    shown = rows if limit <= 0 else rows[:limit]
+    # One record per block rather than one per line: the links are the point of these
+    # commands, and a terminal only makes them clickable when they stand alone.
+    for index, (created, value, manager, link, name) in enumerate(shown):
+        if index:
+            print()
+        print(f"{created}\t{manager}")
+        print(describe(value))
+        print(link)
+        print(name)
+
+    # Say what was left out. A truncated list that looks complete is worse than a long
+    # one, because nobody goes looking for the calls they were never told about.
+    if len(shown) < len(rows):
+        print(f"\n{len(shown)} of {len(rows)} shown; --limit 0 for all")
+
+
 def cmd_planfix_sent(args: argparse.Namespace) -> None:
     """List every recording whose Planfix comment was actually delivered.
 
@@ -835,50 +904,34 @@ def cmd_planfix_sent(args: argparse.Namespace) -> None:
     Newest first and capped by ``--limit``, because the question this answers is almost
     always "what happened lately".
     """
-    config = load_config(config_path=args.config, validate_providers=False)
-    fleet = _fleet(config)
-    config = fleet.config
-    rows: list[tuple[str, str, str, str, str]] = []
-    for folder in config.folders:
-        service = fleet.service_for(folder.folder_id)
-        for item in drive.list_mp4_timestamps_in_tree(service, folder.folder_id):
-            task_id = (item.get("appProperties") or {}).get(
-                drive.PLANFIX_COMMENT_TASK_ID_PROPERTY, ""
-            )
-            if task_id:
-                rows.append(
-                    (
-                        item.get("createdTime", ""),
-                        task_id,
-                        folder.name,
-                        item.get("name", ""),
-                        item.get("id", ""),
-                    )
-                )
-
+    config, rows = _sent_rows(args, drive.PLANFIX_COMMENT_TASK_ID_PROPERTY)
     if not rows:
         print("No recording carries a sent-comment marker.")
         return
+    _print_sent(
+        rows,
+        args.limit,
+        lambda task_id: meta_doc.task_url(config.planfix_task_url, task_id)
+        or f"task {task_id}",
+    )
 
-    # Newest first: this is a "what happened lately" listing, and the calls an operator
-    # is asking about are the ones that just happened.
-    rows.sort(reverse=True)
-    shown = rows if args.limit <= 0 else rows[: args.limit]
 
-    # One record per block rather than one per line: the two links are the point of
-    # this command, and a terminal only makes them clickable when they stand alone.
-    for index, (created, task_id, manager, name, file_id) in enumerate(shown):
-        if index:
-            print()
-        print(f"{created}\t{manager}")
-        print(meta_doc.task_url(config.planfix_task_url, task_id) or f"task {task_id}")
-        print(meta_doc.video_url(file_id))
-        print(name)
+def cmd_telegram_sent(args: argparse.Namespace) -> None:
+    """List every recording whose Telegram summary reached at least one chat.
 
-    # Say what was left out. A truncated list that looks complete is worse than a long
-    # one, because nobody goes looking for the calls they were never told about.
-    if len(shown) < len(rows):
-        print(f"\n{len(shown)} of {len(rows)} shown; --limit 0 for all")
+    Read from the ``telegram_sent_chat_id`` appProperty, which names each chat only
+    after its send succeeded -- so a chat missing from a line is one ``gdstt
+    reprocess`` would still deliver to.
+    """
+    _, rows = _sent_rows(args, drive.TELEGRAM_SENT_CHAT_ID_PROPERTY)
+    if not rows:
+        print("No recording carries a sent-summary marker.")
+        return
+    _print_sent(
+        rows,
+        args.limit,
+        lambda chats: "chats: " + ", ".join(c for c in chats.split(",") if c),
+    )
 
 
 def cmd_bookings_restore_dates(args: argparse.Namespace) -> None:
@@ -1501,6 +1554,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="How many of the newest to print; 0 for all (default: 20)",
     )
     p_planfix_sent.set_defaults(func=cmd_planfix_sent)
+
+    p_telegram = sub.add_parser(
+        "telegram",
+        help="Inspect what was sent to Telegram",
+    )
+    telegram_sub = p_telegram.add_subparsers(dest="telegram_command", required=True)
+    p_telegram_sent = telegram_sub.add_parser(
+        "sent", help="List recordings whose Telegram summary was delivered, and where"
+    )
+    p_telegram_sent.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="How many of the newest to print; 0 for all (default: 20)",
+    )
+    p_telegram_sent.set_defaults(func=cmd_telegram_sent)
 
     p_bookings = sub.add_parser(
         "bookings",

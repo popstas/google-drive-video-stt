@@ -201,10 +201,18 @@ def list_mp4_timestamps_in_tree(service: Any, folder_id: str) -> list[dict]:
     The operator-facing reports run over this. Asking only the configured folder
     answers "no recordings at all" on a Google Meet root, which reads as "nothing was
     ever sent to Planfix" or "nothing to restore" -- confidently, and wrongly.
+
+    Each file carries ``container_id``, the folder it was found in, so a report can
+    link a recording's meeting folder rather than the bare video.
     """
-    files = list_mp4_timestamps(service, folder_id)
+    files = [
+        {**f, "container_id": folder_id} for f in list_mp4_timestamps(service, folder_id)
+    ]
     for subfolder in list_subfolders(service, folder_id):
-        files.extend(list_mp4_timestamps(service, subfolder["id"]))
+        files.extend(
+            {**f, "container_id": subfolder["id"]}
+            for f in list_mp4_timestamps(service, subfolder["id"])
+        )
     return files
 
 

@@ -240,7 +240,7 @@ write goes to `container_id`** — the `.txt`, each preset artifact, `.meta.yml`
 and the `.mp3`; the mp3 upload is its own call site and was the one left behind, which
 put every artifact a level above its recording. **Every folder listing an operator
 command makes reads the tree**, not one level: `list`, `latest`, `doctor --drive`,
-`planfix sent` and `bookings restore-dates` all go through a `*_in_tree` helper,
+`planfix sent`, `telegram sent` and `bookings restore-dates` all go through a `*_in_tree` helper,
 because one level on a Meet root returns nothing and reads as "there is nothing here".
 
 `process_target` (`src/main.py`) is the on-demand entry the CLI's `process` command uses:
