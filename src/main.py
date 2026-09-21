@@ -492,6 +492,7 @@ def _write_call_documents(
         transcript=transcript,
         planfix_task_id=task_id,
         processed_at=datetime.now(timezone.utc),
+        container_id=container_id,
     )
     meta_yaml = meta_doc.to_yaml(document, config.meta_entities)
 
@@ -959,7 +960,12 @@ def _planfix_meta_lines(
             # label when the document carries no source_name (or an empty one).
             anchor = str(document.get("source_name") or "").strip()
             anchor = " ".join(anchor.split()) or label
-            lines.append(f"[{anchor}]({text})")
+            # The meeting folder beats the bare video: it holds the transcript too, and
+            # asking for access to it is asking for the whole call. Substituted here
+            # rather than listed as a field of its own so every configured
+            # ``planfix.meta_fields`` gets it without an edit.
+            href = " ".join(str(document.get("folder_url") or "").split()) or text
+            lines.append(f"[{anchor}]({href})")
         else:
             lines.append(f"**{label}:** {text}")
     return lines
@@ -1143,14 +1149,59 @@ def _send_planfix_comment(
     )
 
 
-def folder_telegram_chat(config: Config, folder_id: str) -> str:
-    """The chat a folder's summaries go to, or "" when it has none.
+def folder_telegram_chats(config: Config, folder_id: str) -> tuple[str, ...]:
+    """The chats every summary from a folder goes to, or () when it has none.
 
     Also the "recognize unconditionally" predicate: a folder with a chat is watched for
     its own sake, so ``run_once`` must not skip its recordings for want of a booking.
+    ``telegram_calendly`` is deliberately not part of it -- those chats want booked
+    calls only, and a booked call is recognized anyway.
     """
     folder = config.folder_by_id(folder_id)
-    return folder.telegram.strip() if folder else ""
+    return folder.telegram if folder else ()
+
+
+def _summary_chats(
+    config: Config,
+    folder_id: str,
+    file_id: str,
+    booking_decision: booking_gate.BookingDecision,
+) -> tuple[str, ...]:
+    """Every chat this recording's summary belongs in, each once.
+
+    ``telegram`` gets every call unless ``planfix.ignore_telegram_when_planfix`` hands
+    a call the CRM recorded over to the CRM. ``telegram_calendly`` gets booked calls
+    and ignores that option: it is a delivery channel of its own, not a fallback.
+    """
+    folder = config.folder_by_id(folder_id)
+    if folder is None:
+        return ()
+    chats = list(folder.telegram)
+    if (
+        chats
+        and config.planfix_ignore_telegram_when_planfix
+        and booking_decision.is_matched
+        and config.planfix_create_comment_url
+    ):
+        logger.debug(
+            "Planfix covers %s and ignore_telegram_when_planfix is set; "
+            "leaving the folder's telegram chats out",
+            file_id,
+        )
+        chats = []
+    if booking_decision.is_booked:
+        chats.extend(folder.telegram_calendly)
+    return tuple(dict.fromkeys(chats))
+
+
+def _sent_chats(item: dict) -> list[str]:
+    """The chats a summary already reached, read off the recording's marker.
+
+    The marker used to hold a single chat id; that value reads as a one-chat list, so
+    recordings delivered before chats became lists are not delivered again.
+    """
+    raw = str(item.get("telegram_sent_chat_id") or "")
+    return [chat for chat in raw.split(",") if chat]
 
 
 def _send_telegram_summary(
@@ -1163,33 +1214,21 @@ def _send_telegram_summary(
     booking_decision: booking_gate.BookingDecision,
     meta_document: dict[str, object] | None = None,
 ) -> None:
-    """Post the meeting summary into the folder's Telegram chat, exactly once.
+    """Post the meeting summary into each of the folder's Telegram chats, once per chat.
 
-    Independent of Planfix by default -- a folder that asked for a chat gets every
-    call in it, matched or not. ``planfix.ignore_telegram_when_planfix`` turns that
-    into a fallback: a call the CRM already recorded stays out of the chat.
-
-    Like the Planfix marker, ``telegram_sent_chat_id`` is written only after a
-    successful send, so a later cycle backfilling a newly configured preset does not
-    re-post the whole summary.
+    Which chats is ``_summary_chats``' call. Like the Planfix marker,
+    ``telegram_sent_chat_id`` records a chat only after its send succeeded, so a later
+    cycle backfilling a newly configured preset does not re-post the summary, and a
+    send that failed for one chat is retried for that chat alone.
     """
     name = item.get("file", {}).get("name")
-    chat_id = folder_telegram_chat(config, folder_id)
-    if not chat_id:
-        logger.debug("Folder %s has no Telegram chat; %s stays unsent", folder_id, name)
+    chats = _summary_chats(config, folder_id, file_id, booking_decision)
+    if not chats:
+        logger.debug("Folder %s has no Telegram chat for %s; nothing to send", folder_id, name)
         return
-    if (
-        config.planfix_ignore_telegram_when_planfix
-        and booking_decision.is_matched
-        and config.planfix_create_comment_url
-    ):
-        logger.debug(
-            "Planfix covers %s and ignore_telegram_when_planfix is set; "
-            "skipping the Telegram summary",
-            file_id,
-        )
-        return
-    if item.get("telegram_sent_chat_id"):
+    sent = _sent_chats(item)
+    pending = [chat for chat in chats if chat not in sent]
+    if not pending:
         logger.debug("Telegram summary already sent for %s, skipping", file_id)
         return
 
@@ -1207,34 +1246,37 @@ def _send_telegram_summary(
         )
         return
 
-    # Both ends of the send are logged, because only the failures used to be. A
-    # summary that arrived left no trace at all, so a quiet log could not be told
-    # apart from a delivery that never happened -- and the first thing anybody does
-    # when a chat stays empty is read the log.
-    logger.info("Sending the Telegram summary for %s to chat %s", name, chat_id)
-    sent = notify.send_message(
-        text,
-        bot_token=config.telegram_bot_token,
-        chat_id=chat_id,
-        proxy_url=config.proxy_url,
-    )
-    if sent:
+    for chat_id in pending:
+        # Both ends of the send are logged, because only the failures used to be. A
+        # summary that arrived left no trace at all, so a quiet log could not be told
+        # apart from a delivery that never happened -- and the first thing anybody does
+        # when a chat stays empty is read the log.
+        logger.info("Sending the Telegram summary for %s to chat %s", name, chat_id)
+        delivered = notify.send_message(
+            text,
+            bot_token=config.telegram_bot_token,
+            chat_id=chat_id,
+            proxy_url=config.proxy_url,
+        )
+        if not delivered:
+            # No ``notify_error`` here: the error channel is the same Telegram API that
+            # just failed, so the escalation would most likely be lost too. The chat is
+            # left off the marker, so `gdstt reprocess` can resend it.
+            logger.warning(
+                "Failed to send the Telegram summary for %s to %s; rerun "
+                "`gdstt reprocess %s`",
+                name, chat_id, file_id,
+            )
+            continue
+        # Written after each chat rather than once at the end: a later chat failing,
+        # or the process dying, must not cost the record of the ones that arrived.
+        sent.append(chat_id)
         drive.set_file_app_properties(
             service,
             file_id,
-            {drive.TELEGRAM_SENT_CHAT_ID_PROPERTY: chat_id},
+            {drive.TELEGRAM_SENT_CHAT_ID_PROPERTY: ",".join(sent)},
         )
         logger.info("Telegram summary for %s delivered to chat %s", name, chat_id)
-        return
-
-    # No ``notify_error`` here: the error channel is the same Telegram API that just
-    # failed, so the escalation would most likely be lost too. No marker is written,
-    # so `gdstt reprocess` can resend it.
-    logger.warning(
-        "Failed to send the Telegram summary for %s to %s; rerun "
-        "`gdstt reprocess %s`",
-        name, chat_id, file_id,
-    )
 
 
 def process_item(
@@ -2782,7 +2824,7 @@ def run_once(
                 # A folder with a Telegram chat is recognized unconditionally: the
                 # chat is the destination, so "no booking" is not a reason to skip --
                 # and marking the file unmatched would park it for good.
-                and not folder_telegram_chat(config, folder_id)
+                and not folder_telegram_chats(config, folder_id)
             ):
                 file_name = item.get("file", {}).get("name")
                 if booking_server.is_running():

@@ -504,7 +504,8 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   `disable_recognition` while any `folders` entry lacks both an `email` and a
   `telegram` chat — that folder could never match a booking, so it would never be
   transcribed again. A folder with a chat is exempt: it is recognized regardless.
-- `folders[].telegram` is a chat id, and setting it does two things. `run_once` never
+- `folders[].telegram` is a tuple of chat ids (YAML: one id or a list), and setting
+  it does two things. `run_once` never
   skips (or marks) that folder's unmatched recordings — the chat, not a booking, is
   what the folder is watched for — and `_send_telegram_summary` posts the same header
   + `planfix.presets` sections the CRM comment carries, as **plain text**
@@ -512,9 +513,21 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   Plain text is deliberate: a parse mode fails the whole `sendMessage` on one
   unbalanced `*` or `<` in transcript-derived text, and a rejected message is a lost
   summary. Both channels render from `_summary_sections`, so they never drift.
-  Idempotency is the `telegram_sent_chat_id` appProperty, written only after every
-  chunk was accepted. A failed send is logged, never escalated through
-  `notify.notify_error` — that is the same API that just failed.
+  Idempotency is the `telegram_sent_chat_id` appProperty: the chats that accepted
+  every chunk, comma-joined, rewritten after each one. A bare id written before chats
+  became lists reads as a one-chat list, so old recordings are not re-sent. Drive caps
+  key plus value at 124 bytes, so `load_config` rejects a folder whose chats would not
+  fit -- the rejected marker write would re-send the summary every cycle. A failed send
+  is logged, never escalated through `notify.notify_error` — that is the same API
+  that just failed.
+- `folders[].telegram_calendly` gets the summary only when `BookingDecision.is_booked`
+  -- matched by the journal, not by a name rule -- and ignores
+  `ignore_telegram_when_planfix`. It never forces recognition: that stays keyed on
+  `telegram` alone (`folder_telegram_chats`), or a calendly chat would transcribe
+  every unbooked call at full cost. Chats in both fields get one message.
+- The summary's `video_url` line links `folder_url` (the meeting subfolder, empty for
+  a recording lying in the configured folder) when there is one. It is substituted at
+  render time, not added to `planfix.meta_fields`, so existing configs get it.
 - `planfix.ignore_telegram_when_planfix` (default false) turns the chat into a
   fallback: a `matched` recording with `planfix.create_comment_url` configured stays
   out of it. Off by default because the two are independent channels.

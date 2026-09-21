@@ -117,6 +117,8 @@ Two Telegram settings that look alike and are not:
 folders:
 - email: ivan@company.example
   telegram: '-1001234567890'   # where this folder's call summaries go
+  telegram_calendly:           # where its booked calls also go
+  - '-1005555555555'
 notifications:
   telegram:
     bot_token: <token>         # one bot for both
@@ -129,6 +131,11 @@ The bot must be a member of the chat, an admin for a channel. A folder with a
 Planfix is an independent channel, not an alternative: with both configured, a call
 reaches the task **and** the chat. `planfix.ignore_telegram_when_planfix: true` makes
 the chat a fallback instead.
+
+Both folder fields take one chat or a list. `telegram_calendly` receives only calls
+matched to a booking in the journal, whatever `ignore_telegram_when_planfix` says, and
+it does not force recognition: put the same supervisor chat on every employee who
+takes booked calls.
 
 Turning on `call_booking` and `planfix` means comments start being posted to real
 tasks on the first cycle. Check `gdstt doctor` for `planfix: url=set, token=set`

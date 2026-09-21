@@ -592,8 +592,9 @@ folders:                 # one entry per employee folder
   - folder_id: abc
     name: Олег Иванов    # optional; sent in the completion webhook
     email: oleg@example.com   # optional
-    telegram: "-1001234567890"  # optional; chat for the call summary,
+    telegram: "-1001234567890"  # optional; chat (or list) for the call summary,
                                 # and "recognize even without a booking"
+    telegram_calendly: []       # optional; chats for booked calls only
   - folder_id: def
 poll_interval: 600
 bitrate: 96k
@@ -669,7 +670,7 @@ variable is read at runtime:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `folders` | (required) | Google Drive folders to monitor, one entry per employee: `{folder_id, name, email, telegram}`. `name`/`email` are optional and default to empty; they identify the employee in the completion webhook. `telegram` is a chat id the call summary is posted to — see [Telegram summaries](#telegram-summaries) |
+| `folders` | (required) | Google Drive folders to monitor, one entry per employee: `{folder_id, name, email, telegram}`. `name`/`email` are optional and default to empty; they identify the employee in the completion webhook. `telegram` is a chat id (or a list) the call summary is posted to, `telegram_calendly` one for booked calls only — see [Telegram summaries](#telegram-summaries) |
 | `poll_interval` | `600` | Seconds between poll cycles |
 | `bitrate` | `96k` | MP3 audio bitrate passed to ffmpeg |
 | `stt.drive_mp3_artifact` | auto | Upload an MP3 artifact to Drive. Defaults to `false` for `stt.deepgram.audio_source=m4a_copy`; `true` otherwise |
@@ -1426,7 +1427,9 @@ Planfix. Give the folder a `telegram` chat id and set the bot token once:
 folders:
   - folder_id: abc
     name: Sales
-    telegram: "-1001234567890"   # numeric chat id, or @channelname
+    telegram: "-1001234567890"   # numeric chat id, or @channelname, or a list of them
+    telegram_calendly:           # optional; chats that get booked calls only
+      - "-1009876543210"
 notifications:
   telegram:
     bot_token: <bot token>       # the same bot the error notifications use
@@ -1452,9 +1455,22 @@ parse modes reject much of what a transcript-derived document contains, and a re
 message is a lost summary. Anything longer than one Telegram message is split across
 several, never truncated.
 
-Delivery is recorded on the recording's Drive file as `telegram_sent_chat_id`, so a
-later cycle that backfills a newly configured preset does not re-post the summary. A
-failed send writes no marker — `gdstt reprocess <file-id>` resends it.
+`telegram_calendly` is a separate channel for the calls a booking stands behind —
+say, a supervisor who reviews booked calls only. A recording matched to a booking in
+the journal (what `gdstt bookings list` shows) goes there; an unmatched one, or one
+routed by a `call_booking.name_rules` entry, does not. It ignores
+`ignore_telegram_when_planfix`, and unlike `telegram` it does not make the folder
+recognized unconditionally. A chat listed in both fields gets one message.
+
+The link in the header opens the recording's meeting subfolder, which holds the video
+and the transcript together, so a reader without access can request it for that one
+call. A recording lying directly in the configured folder keeps the link to the video.
+
+Delivery is recorded on the recording's Drive file as `telegram_sent_chat_id`, the
+chats that received it joined by commas, so a later cycle that backfills a newly
+configured preset does not re-post the summary. A failed send leaves that chat off the
+marker — `gdstt reprocess <file-id>` resends it there and nowhere else. The marker has
+room for about seven chat ids per folder; a config listing more is a startup error.
 
 ## Project layout
 

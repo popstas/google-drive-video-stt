@@ -113,16 +113,22 @@ class EmployeeFolder:
     ``name``/``email`` are optional: a folder whose employee is unknown still polls,
     and downstream consumers (the completion webhook) send empty strings for it.
 
-    ``telegram`` is a chat id (``-100...`` or ``@channel``) the call summary is posted
-    to. Setting it also forces recognition for the folder: its recordings are
-    transcribed even with no booking behind them, because the chat -- not a Planfix
-    task -- is the destination.
+    ``telegram`` holds the chat ids (``-100...`` or ``@channel``) every call summary
+    is posted to. Setting it also forces recognition for the folder: its recordings
+    are transcribed even with no booking behind them, because the chat -- not a
+    Planfix task -- is the destination.
+
+    ``telegram_calendly`` holds chats that get only the calls a booking stands
+    behind (``BookingDecision.is_booked``), whatever
+    ``planfix.ignore_telegram_when_planfix`` says. It forces nothing: a booked call is
+    recognized anyway, and an unbooked one is not what these chats are for.
     """
 
     folder_id: str
     name: str = ""
     email: str = ""
-    telegram: str = ""
+    telegram: tuple[str, ...] = ()
+    telegram_calendly: tuple[str, ...] = ()
     # Recordings of calls before this are out of scope for the polling loop. Set per
     # folder because onboarding is an event about a person: a cutoff that is right
     # for today's employees is wrong for the one who joins in three months with a
@@ -418,13 +424,53 @@ def _parse_folders(raw: object, *, delegated: bool = False) -> tuple[EmployeeFol
                 folder_id=folder_id,
                 name=_yaml_str(entry.get("name")),
                 email=email,
-                telegram=_yaml_str(entry.get("telegram")),
+                telegram=_chat_ids(entry.get("telegram"), f"folders[{index}].telegram"),
+                telegram_calendly=_chat_ids(
+                    entry.get("telegram_calendly"), f"folders[{index}].telegram_calendly"
+                ),
                 since=_since_text(
                     entry.get("since"), source=f"folders[{index}].since"
                 ),
             )
         )
     return tuple(folders)
+
+
+# Drive caps an appProperty's key plus value at 124 bytes, and the chats a summary
+# reached are recorded in one (``drive.TELEGRAM_SENT_CHAT_ID_PROPERTY``, comma-joined).
+# A folder whose chats do not fit would have its marker rejected after every send,
+# and each later cycle would post the same summary again.
+_SENT_CHATS_MAX_LENGTH = 124 - len("telegram_sent_chat_id")
+
+
+def _chat_ids(raw: object, source: str) -> tuple[str, ...]:
+    """Read one chat id or a list of them; blanks are dropped, order is kept.
+
+    A single value stays valid because that is how every existing config spells it.
+    YAML reads an unquoted ``-100123`` as a number, so each id goes through
+    ``_yaml_str`` rather than being required to be a string.
+    """
+    if raw is None:
+        return ()
+    values = raw if isinstance(raw, (list, tuple)) else [raw]
+    chats: list[str] = []
+    for value in values:
+        if isinstance(value, (dict, list, tuple)):
+            raise ValueError(f"{source} must be a chat id or a list of chat ids, got: {raw!r}")
+        chat = _yaml_str(value)
+        if "," in chat:
+            raise ValueError(
+                f"{source} has {chat!r}; list several chats as a YAML list, not "
+                "a comma-separated string"
+            )
+        if chat and chat not in chats:
+            chats.append(chat)
+    return tuple(chats)
+
+
+def _folder_chats(folder: EmployeeFolder) -> tuple[str, ...]:
+    """Every chat a folder's summaries may go to, each once."""
+    return tuple(dict.fromkeys(folder.telegram + folder.telegram_calendly))
 
 
 def _parse_name_rules(raw: object) -> tuple[NameRule, ...]:
@@ -495,7 +541,7 @@ def _validate_call_booking(
     emailless = [
         f.folder_id
         for f in folders
-        if not f.email.strip() and not f.telegram.strip()
+        if not f.email.strip() and not f.telegram
     ]
     if emailless:
         raise ValueError(
@@ -513,13 +559,25 @@ def _validate_folder_telegram(
     Without a token ``notify.send_message`` returns quietly, so an operator who set a
     chat id would see recordings transcribed at full cost and no message anywhere.
     """
+    crowded = [
+        f.folder_id or f.email
+        for f in folders
+        if len(",".join(_folder_chats(f))) > _SENT_CHATS_MAX_LENGTH
+    ]
+    if crowded:
+        raise ValueError(
+            "these folders list more Telegram chats than the delivery marker can "
+            f"record ({_SENT_CHATS_MAX_LENGTH} characters of ids, comma-joined); "
+            "every summary would be re-sent each cycle: " + ", ".join(crowded)
+        )
     if bot_token.strip():
         return
-    tokenless = [f.folder_id for f in folders if f.telegram.strip()]
+    tokenless = [f.folder_id or f.email for f in folders if _folder_chats(f)]
     if tokenless:
         raise ValueError(
-            "these folders set telegram but notifications.telegram.bot_token is "
-            "empty, so nothing can be delivered: " + ", ".join(tokenless)
+            "these folders set telegram or telegram_calendly but "
+            "notifications.telegram.bot_token is empty, so nothing can be "
+            "delivered: " + ", ".join(tokenless)
         )
 
 
@@ -1772,6 +1830,13 @@ def _entity_to_dict(entity: meta_entity.MetaEntity) -> dict[str, object]:
     return data
 
 
+def _chat_ids_to_yaml(chats: tuple[str, ...]) -> str | list[str]:
+    """One chat is written back as the scalar it was most likely read from."""
+    if len(chats) == 1:
+        return chats[0]
+    return list(chats) if chats else ""
+
+
 def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dict:
     """Serialize a Config into the grouped `config.yml` schema.
 
@@ -1786,7 +1851,8 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
                 "folder_id": folder.folder_id,
                 "name": folder.name,
                 "email": folder.email,
-                "telegram": folder.telegram,
+                "telegram": _chat_ids_to_yaml(folder.telegram),
+                "telegram_calendly": _chat_ids_to_yaml(folder.telegram_calendly),
                 "since": folder.since,
             }
             for folder in config.folders

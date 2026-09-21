@@ -3061,7 +3061,7 @@ TELEGRAM_BASE = {
 def test_folder_telegram_defaults_to_empty(tmp_path):
     config = load_config(config_path=write_config(tmp_path, CALL_BOOKING_BASE))
 
-    assert config.folders[0].telegram == ""
+    assert config.folders[0].telegram == ()
 
 
 def test_folder_telegram_is_parsed(tmp_path):
@@ -3079,7 +3079,7 @@ def test_folder_telegram_is_parsed(tmp_path):
 
     config = load_config(config_path=write_config(tmp_path, raw))
 
-    assert config.folders[0].telegram == "-1001234567890"
+    assert config.folders[0].telegram == ("-1001234567890",)
 
 
 def test_folder_telegram_without_a_bot_token_is_rejected(tmp_path):
@@ -3114,7 +3114,7 @@ def test_disable_recognition_allows_an_emailless_telegram_folder(tmp_path):
 
     config = load_config(config_path=write_config(tmp_path, raw))
 
-    assert config.folders[1].telegram == "-100123"
+    assert config.folders[1].telegram == ("-100123",)
 
 
 def test_folder_telegram_survives_a_config_round_trip(tmp_path):
@@ -3130,6 +3130,109 @@ def test_folder_telegram_survives_a_config_round_trip(tmp_path):
     dumped = _config_to_yaml_dict(config, config_file)
 
     assert dumped["folders"][0]["telegram"] == "-100123"
+
+
+def test_folder_telegram_accepts_a_list_of_chats(tmp_path):
+    """YAML reads an unquoted `-100123` as a number; it must come back as the id."""
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [
+            {"folder_id": "f1", "telegram": [-100123, "@team", "", "@team"]},
+        ],
+    }
+
+    config = load_config(config_path=write_config(tmp_path, raw))
+
+    assert config.folders[0].telegram == ("-100123", "@team")
+
+
+def test_folder_telegram_rejects_a_comma_separated_string(tmp_path):
+    """Silently reading it as one chat would send nowhere and mark it delivered."""
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [{"folder_id": "f1", "telegram": "-100123,-100456"}],
+    }
+
+    with pytest.raises(ValueError, match="YAML list"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_folder_telegram_calendly_defaults_to_empty(tmp_path):
+    config = load_config(config_path=write_config(tmp_path, CALL_BOOKING_BASE))
+
+    assert config.folders[0].telegram_calendly == ()
+
+
+def test_folder_telegram_calendly_accepts_one_chat_or_a_list(tmp_path):
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [
+            {"folder_id": "f1", "email": "a@example.com", "telegram_calendly": "-100123"},
+            {"folder_id": "f2", "email": "b@example.com", "telegram_calendly": ["-1", "-2"]},
+        ],
+    }
+
+    config = load_config(config_path=write_config(tmp_path, raw))
+
+    assert config.folders[0].telegram_calendly == ("-100123",)
+    assert config.folders[1].telegram_calendly == ("-1", "-2")
+    assert config.folders[0].telegram == ()
+
+
+def test_folder_telegram_calendly_without_a_bot_token_is_rejected(tmp_path):
+    raw = {
+        **CALL_BOOKING_BASE,
+        "folders": [{"folder_id": "f1", "telegram_calendly": "-100123"}],
+    }
+
+    with pytest.raises(ValueError, match="bot_token"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_disable_recognition_does_not_exempt_a_calendly_only_folder(tmp_path):
+    """A calendly chat wants booked calls only, so it is no reason to transcribe a
+    folder that can never match a booking."""
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [{"folder_id": "f1", "telegram_calendly": "-100123"}],
+        "call_booking": {
+            "enabled": True,
+            "authorization_token": "t",
+            "disable_recognition": True,
+        },
+    }
+
+    with pytest.raises(ValueError, match="disable_recognition"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_folder_chats_that_overflow_the_delivery_marker_are_rejected(tmp_path):
+    """The chats a summary reached are recorded in one Drive appProperty; one that
+    does not fit is refused by Drive, and every cycle would re-send the summary."""
+    chats = [f"-100{index:010d}" for index in range(8)]
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [{"folder_id": "f1", "telegram": chats[:4], "telegram_calendly": chats[4:]}],
+    }
+
+    with pytest.raises(ValueError, match="delivery marker"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_folder_chat_lists_survive_a_config_round_trip(tmp_path):
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [
+            {"folder_id": "f1", "telegram": ["-1", "-2"], "telegram_calendly": "-3"},
+        ],
+    }
+    config_file = write_config(tmp_path, raw)
+    config = load_config(config_path=config_file)
+
+    dumped = _config_to_yaml_dict(config, config_file)
+
+    assert dumped["folders"][0]["telegram"] == ["-1", "-2"]
+    assert dumped["folders"][0]["telegram_calendly"] == "-3"
 
 
 def test_ignore_telegram_when_planfix_defaults_to_off(tmp_path):

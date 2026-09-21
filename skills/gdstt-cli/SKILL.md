@@ -2,8 +2,8 @@
 name: gdstt-cli
 description: Используй при работе с google-drive-video-stt через gdstt - расшифровка записи с Google Drive или локального аудио через Deepgram, обработка самого свежего mp4 в папке, переразметка диаризованных спикеров и построение транскрипта с именами спикеров плюс документа Keypoints (Задачи / Тезисы / Открытые вопросы).
 license: MIT
-version: 2.12.0
-last_updated: 2026-09-18
+version: 2.13.0
+last_updated: 2026-09-21
 ---
 
 # gdstt CLI
@@ -530,11 +530,11 @@ call_booking:
 - Папки - `folders: [{folder_id, name, email, telegram}]`, по записи на сотрудника
   (всё кроме `folder_id` необязательно). Старый `folder_ids` **удалён**: конфиг с этим
   ключом падает на загрузке с подсказкой про `folders`; чинится только в `config.yml`.
-- `folders[].telegram` - chat id для саммари звонка (то же, что в комментарии
-  Planfix, но plain text; бот - `notifications.telegram.bot_token`). Такая папка
-  распознаётся всегда: booking не нужен, `booking_match=none` не пишется; повтор
-  отсекает appProperty `telegram_sent_chat_id`. `planfix.ignore_telegram_when_planfix:
-  true` делает чат запасным каналом.
+- `folders[].telegram` - chat id или список для саммари (как комментарий Planfix, но
+  plain text; бот - `notifications.telegram.bot_token`). Папка распознаётся всегда:
+  booking не нужен, `booking_match=none` не пишется; повтор отсекает appProperty
+  `telegram_sent_chat_id` (чаты через запятую). `planfix.ignore_telegram_when_planfix:
+  true` делает чат запасным. `telegram_calendly` - чаты только для звонков с бронью, без флага и форс-распознавания; ссылка в саммари - подпапка звонка.
 - `webhook.url` (+ опциональный `webhook.token` -> `Authorization: Bearer`) шлёт POST
   раз на файл и только при успехе: `{file, employee, transcript, artifacts}`, где
   `artifacts` - тексты пресетов по именам, а `meta` разобран в словарь «одна сущность - один ключ» (`config.meta_entities`).

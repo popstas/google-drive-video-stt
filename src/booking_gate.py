@@ -44,6 +44,15 @@ class BookingDecision:
     def is_matched(self) -> bool:
         return self.state == MATCHED
 
+    @property
+    def is_booked(self) -> bool:
+        """A booking from the journal stands behind this call.
+
+        Narrower than ``is_matched``: a name rule routes a recording to a task by its
+        name, with no booking made for it, so it is matched but not booked.
+        """
+        return self.is_matched and self.reason != NAME_RULE
+
 
 def _match_name_rule(file_name: str, config: Config) -> NameRule | None:
     """Return the first name rule the recording matches, or None.

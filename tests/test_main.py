@@ -4131,7 +4131,7 @@ def telegram_config(gate_config):
                 folder_id=GATE_FOLDER_ID,
                 name="Kate",
                 email="kate@example.com",
-                telegram=TELEGRAM_CHAT_ID,
+                telegram=(TELEGRAM_CHAT_ID,),
             ),
         ),
         telegram_bot_token="bot-token",
@@ -4364,6 +4364,210 @@ def test_a_failed_telegram_send_leaves_no_marker(monkeypatch, telegram_config):
     )
 
     marked.assert_not_called()
+
+
+# --- telegram as a list, and telegram_calendly ---------------------------------------
+
+CALENDLY_CHAT_ID = "-1009999999999"
+NAME_RULE_DECISION = BookingDecision(
+    state="matched", task_id="42", reason=main.booking_gate.NAME_RULE
+)
+
+
+def _chats_config(gate_config, *, telegram=(), telegram_calendly=(), **overrides):
+    return replace(
+        gate_config,
+        folders=(
+            EmployeeFolder(
+                folder_id=GATE_FOLDER_ID,
+                email="kate@example.com",
+                telegram=tuple(telegram),
+                telegram_calendly=tuple(telegram_calendly),
+            ),
+        ),
+        telegram_bot_token="bot-token",
+        planfix_presets=("keypoints",),
+        **overrides,
+    )
+
+
+def _send_to_chats(monkeypatch, config, decision, *, results=None, **item_fields):
+    """Run one delivery; return the chats it sent to and the markers it wrote."""
+    send = MagicMock(side_effect=results) if results else MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    marked = MagicMock()
+    monkeypatch.setattr(main.drive, "set_file_app_properties", marked)
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1", **item_fields), "v1", GATE_FOLDER_ID, config,
+        {"keypoints": "Задачи: раз"}, decision,
+    )
+    chats = [call.kwargs["chat_id"] for call in send.call_args_list]
+    markers = [call[0][2]["telegram_sent_chat_id"] for call in marked.call_args_list]
+    return chats, markers
+
+
+def test_every_telegram_chat_of_a_folder_gets_the_summary(monkeypatch, gate_config):
+    config = _chats_config(gate_config, telegram=("-1", "-2"))
+
+    chats, markers = _send_to_chats(monkeypatch, config, UNMATCHED_DECISION)
+
+    assert chats == ["-1", "-2"]
+    assert markers[-1] == "-1,-2"
+
+
+def test_a_booked_call_also_reaches_the_calendly_chat(monkeypatch, gate_config):
+    config = _chats_config(
+        gate_config, telegram=(TELEGRAM_CHAT_ID,), telegram_calendly=(CALENDLY_CHAT_ID,)
+    )
+
+    chats, _ = _send_to_chats(monkeypatch, config, MATCHED_DECISION)
+
+    assert chats == [TELEGRAM_CHAT_ID, CALENDLY_CHAT_ID]
+
+
+def test_an_unbooked_call_stays_out_of_the_calendly_chat(monkeypatch, gate_config):
+    config = _chats_config(gate_config, telegram_calendly=(CALENDLY_CHAT_ID,))
+
+    chats, _ = _send_to_chats(monkeypatch, config, UNMATCHED_DECISION)
+
+    assert chats == []
+
+
+def test_a_name_rule_match_is_not_a_booked_call(monkeypatch, gate_config):
+    """A name rule routes a recording to a task by its name; nobody booked it."""
+    config = _chats_config(gate_config, telegram_calendly=(CALENDLY_CHAT_ID,))
+
+    chats, _ = _send_to_chats(monkeypatch, config, NAME_RULE_DECISION)
+
+    assert chats == []
+
+
+def test_the_calendly_chat_ignores_ignore_telegram_when_planfix(monkeypatch, gate_config):
+    """That option makes the folder's chat a fallback for the CRM; the calendly chat is
+    a channel of its own and gets every booked call."""
+    config = _chats_config(
+        gate_config,
+        telegram=(TELEGRAM_CHAT_ID,),
+        telegram_calendly=(CALENDLY_CHAT_ID,),
+        planfix_create_comment_url="https://crm.example.com/planfix_create_comment",
+        planfix_ignore_telegram_when_planfix=True,
+    )
+
+    chats, _ = _send_to_chats(monkeypatch, config, MATCHED_DECISION)
+
+    assert chats == [CALENDLY_CHAT_ID]
+
+
+def test_a_chat_listed_in_both_fields_gets_one_message(monkeypatch, gate_config):
+    config = _chats_config(
+        gate_config, telegram=(TELEGRAM_CHAT_ID,), telegram_calendly=(TELEGRAM_CHAT_ID,)
+    )
+
+    chats, _ = _send_to_chats(monkeypatch, config, MATCHED_DECISION)
+
+    assert chats == [TELEGRAM_CHAT_ID]
+
+
+def test_a_single_chat_marker_still_counts_as_delivered(monkeypatch, gate_config):
+    """Recordings marked before chats became lists carry one bare id. That chat must
+    not get the summary again; a chat added since still gets it."""
+    config = _chats_config(
+        gate_config, telegram=(TELEGRAM_CHAT_ID,), telegram_calendly=(CALENDLY_CHAT_ID,)
+    )
+
+    chats, markers = _send_to_chats(
+        monkeypatch, config, MATCHED_DECISION, telegram_sent_chat_id=TELEGRAM_CHAT_ID
+    )
+
+    assert chats == [CALENDLY_CHAT_ID]
+    assert markers == [f"{TELEGRAM_CHAT_ID},{CALENDLY_CHAT_ID}"]
+
+
+def test_a_failed_chat_is_left_off_the_marker_and_the_others_are_kept(
+    monkeypatch, gate_config
+):
+    """The next reprocess retries the failed chat alone."""
+    config = _chats_config(gate_config, telegram=("-1", "-2"))
+
+    chats, markers = _send_to_chats(
+        monkeypatch, config, UNMATCHED_DECISION, results=[False, True]
+    )
+
+    assert chats == ["-1", "-2"]
+    assert markers == ["-2"]
+
+
+def test_run_once_parks_an_unbooked_recording_of_a_calendly_only_folder(
+    monkeypatch, gate_config
+):
+    """Only `telegram` means "recognize always". A calendly chat wants booked calls,
+    so it must not make the loop transcribe everything the folder records."""
+    config = replace(
+        _chats_config(gate_config, telegram_calendly=(CALENDLY_CHAT_ID,)),
+        call_booking_disable_recognition=True,
+    )
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_decision(monkeypatch, UNMATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    monkeypatch.setattr(main.booking_gate, "mark_unmatched", MagicMock())
+    process_item = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), config)
+
+    process_item.assert_not_called()
+
+
+def test_the_summary_links_the_meeting_folder_instead_of_the_video():
+    text = main._telegram_summary(
+        {"keypoints": "## Задачи"},
+        ("keypoints",),
+        {
+            "video_url": "https://drive.google.com/file/d/X/view",
+            "folder_url": "https://drive.google.com/drive/folders/M",
+            "source_name": "rec.mp4",
+        },
+        ("video_url",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "rec.mp4: https://drive.google.com/drive/folders/M" in text
+    assert "/file/d/X/view" not in text
+
+
+def test_the_summary_keeps_the_video_link_without_a_meeting_folder():
+    """A recording lying in the configured folder has no folder of its own."""
+    text = main._telegram_summary(
+        {"keypoints": "## Задачи"},
+        ("keypoints",),
+        {
+            "video_url": "https://drive.google.com/file/d/X/view",
+            "folder_url": "",
+            "source_name": "rec.mp4",
+        },
+        ("video_url",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "rec.mp4: https://drive.google.com/file/d/X/view" in text
+
+
+def test_the_planfix_comment_links_the_meeting_folder_too():
+    """One rendering serves both channels; calendly changes where, not what."""
+    description = main._planfix_description(
+        {"keypoints": "## Задачи"},
+        ("keypoints",),
+        {
+            "video_url": "https://drive.google.com/file/d/X/view",
+            "folder_url": "https://drive.google.com/drive/folders/M",
+            "source_name": "rec.mp4",
+        },
+        ("video_url",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "https://drive.google.com/drive/folders/M" in description
+    assert "/file/d/X/view" not in description
 
 
 def test_run_once_processes_an_unmatched_recording_in_a_telegram_folder(
@@ -5310,7 +5514,7 @@ def test_the_mp3_of_a_flat_folder_still_goes_where_it_always_did(mocker, tmp_pat
 
 def _telegram_config(tmp_path, chat="-1001234567890"):
     return make_config(
-        folders=[EmployeeFolder("root", name="Анжелика", email="a@b.c", telegram=chat)],
+        folders=[EmployeeFolder("root", name="Анжелика", email="a@b.c", telegram=(chat,))],
         data_dir=tmp_path,
         stt_provider="",
     )
@@ -5318,12 +5522,12 @@ def _telegram_config(tmp_path, chat="-1001234567890"):
 
 def test_a_folders_telegram_chat_is_found_for_a_video_in_a_subfolder(tmp_path):
     """The chat lives on the configured folder. Looking it up by the meeting
-    subfolder returns "" -- which also silently turns off the unconditional
+    subfolder returns () -- which also silently turns off the unconditional
     recognition that having a chat is supposed to mean."""
     cfg = _telegram_config(tmp_path)
 
-    assert main.folder_telegram_chat(cfg, "root") == "-1001234567890"
-    assert main.folder_telegram_chat(cfg, "meeting-1") == ""
+    assert main.folder_telegram_chats(cfg, "root") == ("-1001234567890",)
+    assert main.folder_telegram_chats(cfg, "meeting-1") == ()
 
 
 def test_a_telegram_folder_still_recognises_a_subfolder_recording_without_a_booking(
