@@ -4518,6 +4518,84 @@ def test_run_once_parks_an_unbooked_recording_of_a_calendly_only_folder(
     process_item.assert_not_called()
 
 
+def _deliver_after_run_once(monkeypatch, config, file_name):
+    """Run the real cycle, then deliver with the decision it reached.
+
+    The booking journal, ``booking_gate.resolve`` and ``run_once`` are real; only the
+    Drive listing, the transcription (``process_item``) and the Telegram API are not.
+    Returns the chats the summary went to.
+    """
+    item = gate_item("v1")
+    item["file"]["name"] = file_name
+    patch_folder_items(monkeypatch, [item])
+    reached = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", reached)
+    main.run_once(MagicMock(), config)
+    reached.assert_called_once()
+    decision = reached.call_args.kwargs["booking_decision"]
+
+    chats, _ = _send_to_chats(monkeypatch, config, decision)
+    return chats
+
+
+def _recording_name(start_utc):
+    return (
+        "Call with Kate - "
+        + (start_utc + timedelta(hours=4)).strftime("%Y/%m/%d %H:%M")
+        + " GMT+04:00 – Recording.mp4"
+    )
+
+
+def test_a_booking_in_the_journal_puts_the_call_in_the_calendly_chat(
+    monkeypatch, gate_config
+):
+    """From the booking a receiver got to the chat: the journal entry, matched by
+    manager and start time, is what makes a call booked."""
+    # Yesterday, not a pinned date: the journal drops old bookings on its own.
+    start = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+        hour=5, minute=0, second=0, microsecond=0
+    )
+    config = _chats_config(
+        gate_config, telegram=(TELEGRAM_CHAT_ID,), telegram_calendly=(CALENDLY_CHAT_ID,)
+    )
+    append_booking(
+        config.call_bookings_file,
+        CallBooking(
+            task_id="851030",
+            manager_email="kate@example.com",
+            start_time=start + timedelta(minutes=5),
+        ),
+    )
+
+    chats = _deliver_after_run_once(monkeypatch, config, _recording_name(start))
+
+    assert chats == [TELEGRAM_CHAT_ID, CALENDLY_CHAT_ID]
+
+
+def test_a_booking_for_another_time_leaves_the_calendly_chat_out(
+    monkeypatch, gate_config
+):
+    """A booking outside call_booking.threshold_minutes is not this call's booking."""
+    start = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+        hour=5, minute=0, second=0, microsecond=0
+    )
+    config = _chats_config(
+        gate_config, telegram=(TELEGRAM_CHAT_ID,), telegram_calendly=(CALENDLY_CHAT_ID,)
+    )
+    append_booking(
+        config.call_bookings_file,
+        CallBooking(
+            task_id="851030",
+            manager_email="kate@example.com",
+            start_time=start + timedelta(hours=3),
+        ),
+    )
+
+    chats = _deliver_after_run_once(monkeypatch, config, _recording_name(start))
+
+    assert chats == [TELEGRAM_CHAT_ID]
+
+
 def test_the_summary_links_the_meeting_folder_instead_of_the_video():
     text = main._telegram_summary(
         {"keypoints": "## Задачи"},
