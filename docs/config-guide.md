@@ -132,10 +132,37 @@ Planfix is an independent channel, not an alternative: with both configured, a c
 reaches the task **and** the chat. `planfix.ignore_telegram_when_planfix: true` makes
 the chat a fallback instead.
 
-Both folder fields take one chat or a list. `telegram_calendly` receives only calls
-matched to a booking in the journal, whatever `ignore_telegram_when_planfix` says, and
-it does not force recognition: put the same supervisor chat on every employee who
-takes booked calls.
+### Filling in the chats
+
+`telegram` gets every call of the employee and makes the folder recognized
+unconditionally. `telegram_calendly` gets only calls matched to a booking in the
+journal (what `gdstt bookings list` shows; a `name_rules` match does not count), ignores
+`ignore_telegram_when_planfix` and forces nothing. The message is the same in both; a
+chat listed in both fields of one folder gets it once. The field belongs to the folder,
+so a supervisor who reviews booked calls is repeated on every employee who takes them:
+
+```yaml
+folders:
+- email: ivan@company.example
+  telegram: '-1001111111111'          # one chat: a plain value
+  telegram_calendly: '-1002222222222'
+- email: maria@company.example
+  telegram:                           # several chats: a YAML list, one per line
+  - '-1001111111111'
+  - '@sales_channel'
+  telegram_calendly: ['-1002222222222', '-1003333333333']   # or on one line
+```
+
+- **Several chats are a YAML list.** A comma inside one string (`'-1001,-1002'`) is a
+  startup error, not two chats.
+- **Quote every id.** An unquoted `-1001234567890` still loads, but an unquoted
+  `@channel` breaks the whole file: `@` cannot start a plain YAML value.
+- **Where an id comes from:** add the bot, post a message in the chat, open
+  `https://api.telegram.org/bot<token>/getUpdates` and take `message.chat.id`. A
+  personal chat works only after that person pressed Start in the chat with the bot.
+- **Edit `config.yml` by hand**: `gdstt config set` cannot reach an entry inside the
+  `folders` list. Then run `gdstt doctor`, which fails on a bad file and prints every
+  folder's chats, and restart the service -- a running loop does not re-read the file.
 
 Turning on `call_booking` and `planfix` means comments start being posted to real
 tasks on the first cycle. Check `gdstt doctor` for `planfix: url=set, token=set`

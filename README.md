@@ -1435,6 +1435,8 @@ notifications:
     bot_token: <bot token>       # the same bot the error notifications use
 ```
 
+How to list several chats, quote the ids and find them: [Filling in the chats](docs/config-guide.md#filling-in-the-chats).
+
 The bot must be a member of the chat (an admin, for a channel). A folder with a
 `telegram` value and no `bot_token` is a startup error: nothing could be delivered.
 
