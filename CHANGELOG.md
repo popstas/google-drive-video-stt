@@ -67,6 +67,7 @@
 
 ### Documentation
 
+- The calendar scope and the new summary lines in the fleet guide
 - Plan client emails from the calendar and the us1 rerun
 - Design client emails from the calendar event
 - How to fill in the summary chats of a folder

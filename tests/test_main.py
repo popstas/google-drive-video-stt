@@ -4166,6 +4166,21 @@ def test_telegram_summary_strips_markdown_to_plain_text():
     assert text.index("Виза O-1") < text.index("Задачи")
 
 
+def test_telegram_summary_separates_header_fields_with_a_blank_line():
+    """Telegram runs consecutive lines together on a phone, so each header field
+    gets its own paragraph."""
+    text = main._telegram_summary(
+        {"keypoints": "Задачи: раз"},
+        ("keypoints",),
+        {**_LINKED_DOCUMENT, "duration": "00:21:06", "client_emails": ["a@x.com"]},
+        ("subject", "duration"),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "Виза O-1\n\n" in text
+    assert "Длительность: 00:21:06\n\nEmail клиента: a@x.com\n\nPlanfix:" in text
+
+
 def test_telegram_summary_drops_checkbox_markers_from_list_items():
     """Telegram shows `- [ ] call back` literally, so a task keeps only its dash."""
     text = main._telegram_summary(

@@ -1126,7 +1126,9 @@ def _telegram_summary(
         return ""
     lines = _planfix_meta_lines(meta_document, meta_fields, meta_entities)
     lines.extend(_telegram_extra_lines(meta_document))
-    header = "\n".join(lines)
+    # A blank line between fields: in a chat bubble consecutive lines run together
+    # and the labels stop standing out.
+    header = "\n\n".join(lines)
     blocks = [header] if header else []
     blocks.extend(sections)
     return _to_plain_text("\n\n".join(blocks)).strip()
