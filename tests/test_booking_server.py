@@ -264,3 +264,33 @@ def test_start_returns_a_bound_server_when_enabled(tmp_path):
         assert booking_server.is_running() is True
     finally:
         instance.shutdown()
+
+
+def test_keeps_the_calendly_event_uuid(server):
+    instance, journal = server
+
+    body = {**VALID, "calendly_event_uuid": "a1b2c3d4-e5f6-7890-abcd-ef0123456789"}
+    assert _post(instance, body) == 204
+
+    stored = load(journal, now=datetime(2026, 8, 11, 12, tzinfo=timezone.utc))
+    assert stored[0].calendly_event_uuid == "a1b2c3d4-e5f6-7890-abcd-ef0123456789"
+
+
+def test_a_booking_without_a_calendly_event_uuid_is_still_accepted(server):
+    instance, journal = server
+
+    assert _post(instance, VALID) == 204
+
+    stored = load(journal, now=datetime(2026, 8, 11, 12, tzinfo=timezone.utc))
+    assert stored[0].calendly_event_uuid == ""
+
+
+@pytest.mark.parametrize(
+    "uuid", ["../../x", "abc def", "abc?q=1", 12345, ["a"]]
+)
+def test_rejects_a_calendly_event_uuid_that_cannot_go_into_a_url(server, uuid):
+    """The uuid is pasted into a link template, so anything beyond letters, digits
+    and dashes would let the sender rewrite the link rather than name an event."""
+    instance, _ = server
+
+    assert _post(instance, {**VALID, "calendly_event_uuid": uuid}) == 400

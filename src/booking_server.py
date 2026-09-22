@@ -11,6 +11,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import re
 import threading
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -56,6 +57,9 @@ def _parse_start_time(raw: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+_CALENDLY_UUID_RE = re.compile(r"[A-Za-z0-9-]+")
+
+
 def _booking_from_payload(payload: object) -> CallBooking | None:
     """Validate the POST body into a booking, or ``None`` when it is unusable."""
     if not isinstance(payload, dict):
@@ -81,10 +85,20 @@ def _booking_from_payload(payload: object) -> CallBooking | None:
     if start_time is None:
         return None
 
+    # Optional, but when sent it is pasted into a link template, so it may only name
+    # an event: anything beyond letters, digits and dashes could rewrite the link.
+    calendly_event_uuid = payload.get("calendly_event_uuid", "")
+    if not isinstance(calendly_event_uuid, str):
+        return None
+    calendly_event_uuid = calendly_event_uuid.strip()
+    if calendly_event_uuid and not _CALENDLY_UUID_RE.fullmatch(calendly_event_uuid):
+        return None
+
     return CallBooking(
         task_id=task_id_text,
         manager_email=manager_email.strip(),
         start_time=start_time,
+        calendly_event_uuid=calendly_event_uuid,
     )
 
 

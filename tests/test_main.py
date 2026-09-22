@@ -4192,6 +4192,85 @@ def test_telegram_summary_is_blank_when_only_the_header_would_render():
     ) == ""
 
 
+_LINKED_DOCUMENT = {
+    "subject": "Виза O-1",
+    "planfix_task_url": "https://tagilcity.planfix.com/task/851030",
+    "calendly_url": "https://calendly.com/app/events/a1b2c3d4",
+}
+
+
+def test_telegram_summary_links_the_planfix_task_and_the_calendly_booking():
+    """A chat reader cannot get from the summary to the CRM task or the booking any
+    other way: both links go under the header, whatever ``meta_fields`` lists."""
+    text = main._telegram_summary(
+        {"keypoints": "## Задачи\n\n- Собрать документы"},
+        ("keypoints",),
+        _LINKED_DOCUMENT,
+        ("subject",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "Planfix: https://tagilcity.planfix.com/task/851030" in text
+    assert "Calendly: https://calendly.com/app/events/a1b2c3d4" in text
+    assert text.index("Виза O-1") < text.index("Planfix:") < text.index("Задачи")
+
+
+def test_telegram_summary_leaves_out_a_link_it_does_not_have():
+    text = main._telegram_summary(
+        {"keypoints": "Задачи: раз"},
+        ("keypoints",),
+        {**_LINKED_DOCUMENT, "calendly_url": ""},
+        ("subject",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "Planfix: https://tagilcity.planfix.com/task/851030" in text
+    assert "Calendly" not in text
+
+
+def test_telegram_summary_links_alone_are_not_a_summary():
+    """The links belong to the header, and a header alone is never sent."""
+    assert main._telegram_summary(
+        {},
+        ("keypoints",),
+        _LINKED_DOCUMENT,
+        ("subject",),
+        meta_entities=meta_entity.default_entities(),
+    ) == ""
+
+
+def test_planfix_comment_does_not_link_to_its_own_task():
+    """The comment lives inside the task it would link to; Calendly stays out too,
+    the links are a Telegram affordance."""
+    html = main._planfix_description(
+        {"keypoints": "Задачи: раз"},
+        ("keypoints",),
+        _LINKED_DOCUMENT,
+        ("subject",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "planfix.com/task" not in html
+    assert "calendly" not in html
+
+
+def test_the_meta_document_carries_the_bookings_calendly_link(tmp_path):
+    cfg = replace(
+        _stt_config(tmp_path),
+        call_booking_calendly_url="https://calendly.com/app/events/<uuid>",
+    )
+
+    document = main._write_call_documents(
+        MagicMock(), "fid1", _STT_NAME, "folderA", "folderA", _STT_TRANSCRIPT, {},
+        cfg, tmp_path, item={},
+        booking_decision=BookingDecision(
+            state="matched", task_id="851030", calendly_event_uuid="a1b2c3d4"
+        ),
+    )
+
+    assert document["calendly_url"] == "https://calendly.com/app/events/a1b2c3d4"
+
+
 def test_telegram_summary_is_sent_and_marked(monkeypatch, telegram_config):
     send = MagicMock(return_value=True)
     monkeypatch.setattr(main.notify, "send_message", send)

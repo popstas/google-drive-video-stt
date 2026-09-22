@@ -33,6 +33,7 @@ CODE_FIELDS = (
     "language",
     "planfix_task_id",
     "planfix_task_url",
+    "calendly_url",
     "video_id",
     "video_url",
     "folder_url",

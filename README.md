@@ -705,6 +705,7 @@ variable is read at runtime:
 | `webhook.url` | (empty) | Completion webhook endpoint; must be an absolute `http://` or `https://` URL. Empty disables it; a failure never fails the file |
 | `webhook.token` | (empty) | Optional bearer token sent as `Authorization: Bearer <token>` |
 | `planfix.meta_fields` | `[subject, tags, referral, referral_note, case_deadline, deadlines, target_filing, duration, video_url]` | Which meta fields open the Planfix comment, and in what order |
+| `call_booking.calendly_url` | (empty) | A Calendly event's web address with `<uuid>` where a booking's `calendly_event_uuid` goes. Fills `calendly_url` in the meta document and the `Calendly:` link of the Telegram summary. Empty leaves both blank |
 | `planfix.task_url` | (empty) | Where a task lives in the web UI, e.g. `https://<account>.planfix.com/task/<task-id>`. Fills `planfix_task_url` in the meta document and the link column of `gdstt planfix sent`. Empty leaves both blank |
 
 `tags.allowed` and `referrals.allowed` are read for one more version when
@@ -1367,14 +1368,28 @@ its Planfix task.
    `Authorization: Bearer <authorization_token>` and this body:
 
    ```json
-   {"start_time": "2026-08-11T07:00:00.000000Z", "task_id": "851030", "manager_email": "manager@example.com"}
+   {"start_time": "2026-08-11T07:00:00.000000Z", "task_id": "851030", "manager_email": "manager@example.com", "calendly_event_uuid": "a1b2c3d4-e5f6-7890-abcd-ef0123456789"}
    ```
 
-   `task_id` must be numeric. `GET /health` returns 200 for probes.
+   `task_id` must be numeric. `calendly_event_uuid` is optional and may hold only
+   letters, digits and dashes; with `call_booking.calendly_url` set it becomes a
+   Calendly link in the call's Telegram summary (see below). `GET /health` returns
+   200 for probes.
 
 4. `manager_email` is matched against the `email` of the `folders` entry the
    recording lives in, and `start_time` against the meeting time in the recording's
    name, within `threshold_minutes`.
+
+5. Optionally, tell gdstt how to link a booking's Calendly event. `<uuid>` is
+   replaced by the booking's `calendly_event_uuid` (a template without it gets the
+   uuid appended); blank, or a booking without a uuid, means no link:
+
+   ```yaml
+   call_booking:
+     calendly_url: https://calendly.com/<your event page>/<uuid>
+   ```
+
+   The result lands in the meta document as `calendly_url`.
 
 Set `disable_recognition: true` once bookings are flowing to stop transcribing
 recordings that match no booked call. Those get marked on Drive and skipped for good;
@@ -1463,6 +1478,13 @@ the journal (what `gdstt bookings list` shows) goes there; an unmatched one, or 
 routed by a `call_booking.name_rules` entry, does not. It ignores
 `ignore_telegram_when_planfix`, and unlike `telegram` it does not make the folder
 recognized unconditionally. A chat listed in both fields gets one message.
+
+Under the header come two links the CRM comment does not carry: `Planfix: <url>` to
+the call's task (from `planfix.task_url`, whenever the call was routed to a task) and
+`Calendly: <url>` to its booking (from `call_booking.calendly_url`, only for a booking
+that came with a `calendly_event_uuid`). Either is left out when there is nothing to
+link. They are not `planfix.meta_fields`: a Planfix comment linking to its own task is
+noise.
 
 The link in the header opens the recording's meeting subfolder, which holds the video
 and the transcript together, so a reader without access can request it for that one

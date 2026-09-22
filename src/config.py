@@ -235,6 +235,10 @@ class Config:
     # File-name overrides, in priority order: a recording whose Drive name matches one
     # is always processed and always commented into that rule's task. See NameRule.
     call_booking_name_rules: tuple[NameRule, ...] = ()
+    # A Calendly event's web address with ``<uuid>`` where a booking's
+    # ``calendly_event_uuid`` goes. Blank leaves ``calendly_url`` empty in the meta
+    # document: Calendly's own URL scheme is not something to hard-code a guess of.
+    call_booking_calendly_url: str = ""
     # Planfix comment target. A blank URL disables the comment; ``planfix_presets``
     # names the preset artifacts concatenated into the comment body, in order.
     planfix_create_comment_url: str = ""
@@ -1144,6 +1148,7 @@ def _config_from_yaml(
         call_booking.get("disable_recognition"), default=False
     )
     call_booking_name_rules = _parse_name_rules(call_booking.get("name_rules"))
+    call_booking_calendly_url = _yaml_str(call_booking.get("calendly_url"))
 
     planfix_create_comment_url = _yaml_str(planfix.get("create_comment_url"))
     planfix_token = _yaml_str(planfix.get("token"))
@@ -1389,6 +1394,7 @@ def _config_from_yaml(
         call_booking_threshold_minutes=call_booking_threshold_minutes,
         call_booking_disable_recognition=call_booking_disable_recognition,
         call_booking_name_rules=call_booking_name_rules,
+        call_booking_calendly_url=call_booking_calendly_url,
         planfix_create_comment_url=planfix_create_comment_url,
         planfix_token=planfix_token,
         planfix_presets=planfix_presets,
@@ -1711,6 +1717,9 @@ def _default_config_dict(
             #   - regex: "^Sale department B2B"
             #     task_id: "861300"
             "name_rules": [],
+            # Link to a booking's Calendly event in Telegram summaries; <uuid> is
+            # replaced by the booking's calendly_event_uuid.
+            "calendly_url": "",
         },
         # Seeded empty: a blank url disables the Planfix comment.
         "planfix": {

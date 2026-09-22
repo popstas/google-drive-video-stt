@@ -195,3 +195,37 @@ def test_build_carries_the_meeting_folder(config_with_folder):
 
 def test_build_leaves_the_meeting_folder_empty_without_a_container(config_with_folder):
     assert _document(config_with_folder)["folder_url"] == ""
+
+
+def test_calendly_url_substitutes_the_placeholder():
+    assert (
+        meta_doc.calendly_url("https://calendly.com/app/events/<uuid>", "a1b2c3d4")
+        == "https://calendly.com/app/events/a1b2c3d4"
+    )
+
+
+def test_calendly_url_appends_to_a_template_without_a_placeholder():
+    assert (
+        meta_doc.calendly_url("https://calendly.com/app/events/", "a1b2c3d4")
+        == "https://calendly.com/app/events/a1b2c3d4"
+    )
+
+
+def test_calendly_url_is_empty_without_a_template_or_a_uuid():
+    assert meta_doc.calendly_url("", "a1b2c3d4") == ""
+    assert meta_doc.calendly_url("https://calendly.com/app/events/<uuid>", "") == ""
+
+
+def test_build_carries_the_calendly_url(config_with_folder):
+    config = replace(
+        config_with_folder, call_booking_calendly_url="https://calendly.com/app/events/<uuid>"
+    )
+    document = _document(config, calendly_event_uuid="a1b2c3d4")
+    assert document["calendly_url"] == "https://calendly.com/app/events/a1b2c3d4"
+
+
+def test_build_leaves_the_calendly_url_empty_without_a_booking(config_with_folder):
+    config = replace(
+        config_with_folder, call_booking_calendly_url="https://calendly.com/app/events/<uuid>"
+    )
+    assert _document(config)["calendly_url"] == ""

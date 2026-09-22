@@ -502,6 +502,7 @@ def _write_call_documents(
         planfix_task_id=task_id,
         processed_at=datetime.now(timezone.utc),
         container_id=container_id,
+        calendly_event_uuid=booking_decision.calendly_event_uuid,
     )
     meta_yaml = meta_doc.to_yaml(document, config.meta_entities)
 
@@ -1018,6 +1019,24 @@ def _to_plain_text(markdown: str) -> str:
     return _MARKDOWN_BOLD_RE.sub(lambda m: m.group("text"), text)
 
 
+# Where a Telegram reader goes next: the CRM task and the booking. Not part of
+# ``planfix.meta_fields`` -- a Planfix comment linking to its own task is noise, and the
+# chat wants them whatever the CRM header is configured to show.
+_TELEGRAM_LINKS = (("Planfix", "planfix_task_url"), ("Calendly", "calendly_url"))
+
+
+def _telegram_link_lines(document: dict[str, object] | None) -> list[str]:
+    """Markdown links to the call's Planfix task and Calendly booking, those it has."""
+    if not document:
+        return []
+    lines = []
+    for label, field_name in _TELEGRAM_LINKS:
+        url = " ".join(str(document.get(field_name) or "").split())
+        if url:
+            lines.append(f"[{label}]({url})")
+    return lines
+
+
 def _telegram_summary(
     artifacts: dict[str, str],
     preset_names: tuple[str, ...],
@@ -1034,7 +1053,9 @@ def _telegram_summary(
     sections = _summary_sections(artifacts, preset_names)
     if not sections:
         return ""
-    header = "\n".join(_planfix_meta_lines(meta_document, meta_fields, meta_entities))
+    lines = _planfix_meta_lines(meta_document, meta_fields, meta_entities)
+    lines.extend(_telegram_link_lines(meta_document))
+    header = "\n".join(lines)
     blocks = [header] if header else []
     blocks.extend(sections)
     return _to_plain_text("\n\n".join(blocks)).strip()

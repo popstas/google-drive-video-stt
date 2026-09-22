@@ -330,3 +330,28 @@ def test_a_known_meeting_time_is_used_instead_of_the_name(config, mocker):
 
     assert decision.state == "matched"
     parse.assert_not_called()
+
+
+def test_a_matched_booking_carries_its_calendly_event_uuid(config):
+    append(
+        config.call_bookings_file,
+        CallBooking(
+            task_id="851030",
+            manager_email="kate@example.com",
+            start_time=MATCHED_START,
+            calendly_event_uuid="a1b2c3d4",
+        ),
+    )
+
+    decision = resolve({"id": "v1", "name": MATCHED_NAME}, "f1", config)
+
+    assert decision.calendly_event_uuid == "a1b2c3d4"
+
+
+def test_a_name_rule_carries_no_calendly_event_uuid(config):
+    """A name rule stands for no booking, so there is no Calendly event to link."""
+    config = _with_rules(config, (r"^Sale department B2B", "861300"))
+
+    decision = resolve({"id": "v1", "name": SALE_NAME}, "f1", config)
+
+    assert decision.calendly_event_uuid == ""

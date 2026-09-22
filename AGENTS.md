@@ -525,6 +525,12 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   `ignore_telegram_when_planfix`. It never forces recognition: that stays keyed on
   `telegram` alone (`folder_telegram_chats`), or a calendly chat would transcribe
   every unbooked call at full cost. Chats in both fields get one message.
+- The Telegram summary (only it, not the Planfix comment) ends its header with
+  `_telegram_link_lines`: `Planfix: <planfix_task_url>` and `Calendly: <calendly_url>`
+  from the meta document, each only when non-empty. `calendly_url` is
+  `call_booking.calendly_url` filled with the booking's optional `calendly_event_uuid`
+  (webhook field, `[A-Za-z0-9-]+`, stored in the journal only when present and carried
+  on `BookingDecision`); a name rule has no booking and so no Calendly link.
 - The summary's `video_url` line links `folder_url` (the meeting subfolder, empty for
   a recording lying in the configured folder) when there is one. It is substituted at
   render time, not added to `planfix.meta_fields`, so existing configs get it.
