@@ -59,6 +59,7 @@
 
 ### Documentation
 
+- Design client emails from the calendar event
 - How to fill in the summary chats of a folder
 - A setup walkthrough for a fleet, with the traps the reference omits
 - How to rejoin a history Meet split, and what it costs
