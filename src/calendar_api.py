@@ -62,22 +62,30 @@ def client_emails(
         timeMax=_rfc3339(start + window),
     ).execute()
 
-    nearest: tuple[dt.timedelta, dict] | None = None
+    own = {domain.strip().lower() for domain in own_domains}
+    best: tuple[tuple[bool, dt.timedelta], list[str]] | None = None
     for event in response.get("items") or []:
         if event.get("status") == "cancelled" or not _has_meet(event):
             continue
         begins = _event_start(event)
-        if begins is None:
+        # The listing returns every event *overlapping* the window, so a workshop
+        # that began hours earlier is in it; only one that starts near the call is
+        # the call.
+        if begins is None or abs(begins - start) > window:
             continue
-        distance = abs(begins - start)
-        if nearest is None or distance < nearest[0]:
-            nearest = (distance, event)
-    if nearest is None:
-        return []
+        emails = _outsiders(event, own)
+        # An event with outsiders first, then the nearest: a standing internal sync
+        # at the same slot must not hide the client call booked over it.
+        rank = (not emails, abs(begins - start))
+        if best is None or rank < best[0]:
+            best = (rank, emails)
+    return best[1] if best else []
 
-    own = {domain.strip().lower() for domain in own_domains}
+
+def _outsiders(event: dict, own: set[str]) -> list[str]:
+    """The event's attendees that are not its owner, a room, or a colleague."""
     emails: set[str] = set()
-    for attendee in nearest[1].get("attendees") or []:
+    for attendee in event.get("attendees") or []:
         if attendee.get("self") or attendee.get("resource"):
             continue
         email = str(attendee.get("email") or "").strip().lower()

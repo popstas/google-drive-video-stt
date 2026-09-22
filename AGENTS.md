@@ -530,7 +530,9 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   and `Calendly: <calendly_url>` from the meta document, each only when non-empty.
   `client_emails` comes from `calendar_api.client_emails` via `main._client_emails`
   (opt-in `calendar.client_emails`, delegated `calendar.events.readonly` as the folder's
-  email): the Meet-linked event nearest the call start, attendees minus
+  email): among Meet-linked events starting within the threshold of the call start, one
+  with outsiders first, then the nearest (the listing returns every *overlapping*
+  event, hence the explicit cap); attendees minus
   self/resources/the folders' own domains; any failure is a warning and `[]`, never a
   failed recording. `calendly_url` is
   `call_booking.calendly_url` filled with the booking's optional `calendly_event_uuid`

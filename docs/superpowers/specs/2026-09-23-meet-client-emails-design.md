@@ -4,7 +4,7 @@
 
 Every processed call carries the email addresses of the people from outside the
 company who were invited to it -- in practice, the client. They land in the meta
-document (`.meta.yml`, the `.stt` meta block, the completion webhook) and in the
+document (`.meta.yml` and the `.stt` meta block) and in the
 Telegram summary header. The Planfix comment is unchanged.
 
 ## Why the calendar
@@ -26,7 +26,10 @@ covers booked and ad-hoc calls alike.
     timeMax=start+window)`.
   - Candidate events: those with a Meet link (`hangoutLink`, or a `conferenceData`
     entry point of type `video`) and a `dateTime` start.
-  - Pick the candidate whose start is nearest to `start`. None -> `[]`.
+  - Keep candidates whose start is within the window (the listing returns every
+    event *overlapping* it). Prefer one with outside attendees, then the nearest.
+    None -> `[]`. (Amended after review: an uncapped nearest match picked a long
+    workshop over an unscheduled call, and a same-slot internal sync hid a client.)
   - From its `attendees`, drop `self`, `resource`, and any address whose domain is in
     `own_domains`. Lowercase, dedupe, sort.
 - Matching is by time, not by Meet code. The code would need a `spaces.get` call and

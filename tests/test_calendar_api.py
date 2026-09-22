@@ -96,3 +96,17 @@ def test_the_request_asks_the_primary_calendar_around_the_start():
     assert kwargs["singleEvents"] is True
     assert kwargs["timeMin"] == "2026-09-22T09:45:00Z"
     assert kwargs["timeMax"] == "2026-09-22T10:15:00Z"
+
+
+def test_an_event_that_starts_outside_the_window_is_not_the_call():
+    """events.list returns everything *overlapping* the window: a long workshop that
+    began two hours earlier is not the ad-hoc call recorded in the middle of it."""
+    workshop = _event(minutes=-120, attendees=[{"email": "partner@x.com"}])
+    assert _emails([workshop]) == []
+
+
+def test_an_event_with_outsiders_beats_an_internal_one_at_the_same_time():
+    """A standing internal sync must not hide the client call booked over it."""
+    sync = _event(minutes=0, attendees=[{"email": "kate@expertizeme.org"}])
+    client = _event(minutes=5, attendees=[{"email": "client@gmail.com"}])
+    assert _emails([sync, client]) == ["client@gmail.com"]

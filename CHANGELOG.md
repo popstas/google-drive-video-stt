@@ -5,6 +5,7 @@
 
 ### Features
 
+- Put the client's email from the calendar into meta and telegram
 - Add the calendar.client_emails switch
 - Read a call's outside invitees from its calendar event
 - Link the planfix task and calendly booking in telegram summaries
