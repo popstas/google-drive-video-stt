@@ -44,8 +44,8 @@ covers booked and ad-hoc calls alike.
     deployment does not use delegation, the folder has no `email`, or no meeting
     start is known (`item["meeting_start"]`, else parsed from the name).
   - `own_domains`: the domains of every `folders[].email`.
-  - `window_minutes`: `call_booking.threshold_minutes` (the same "how far can a
-    call drift from its slot" tolerance the booking matcher uses).
+  - `window_minutes`: 30, its own constant. (Amended: the booking threshold of 15
+    missed a real call on us1 that started 16 minutes before its slot.)
   - Any exception -> a warning naming the recording and the exception type, `[]`.
     Never `notify_error`, never a failed recording: the address is a nicety.
 - `meta_doc.build(..., client_emails=...)` -> field `client_emails` (list), added to

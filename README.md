@@ -1494,7 +1494,7 @@ its own task is noise.
 Meet names a call's participants but never gives their addresses. With
 `calendar.client_emails: true`, gdstt reads them from the calendar event behind the
 call instead: as the folder's employee, it takes the event with a Meet link whose start
-starts within `call_booking.threshold_minutes` of the call's -- one with outside
+starts within 30 minutes of the call's -- one with outside
 invitees first, then the nearest, so a standing internal sync at the same slot does
 not hide the client call -- and keeps the
 attendees that are not the employee, not a room, and not at a domain of any

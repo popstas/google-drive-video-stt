@@ -42,6 +42,7 @@
 
 ### Bug Fixes
 
+- A bad calendly uuid drops the link, not the booking
 - Match only a calendar event that starts near the call
 - Alert on a failed listing only when it persists
 - Say in the log when a summary reaches Telegram

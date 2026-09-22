@@ -6510,7 +6510,9 @@ def test_client_emails_ask_the_folders_calendar(mocker):
     kwargs = lookup.call_args.kwargs
     assert kwargs["start"] == _CALENDAR_START
     assert set(kwargs["own_domains"]) == {"expertizeme.org", "other-own.com"}
-    assert kwargs["window_minutes"] == 15
+    # Its own window, wider than the booking threshold: a real call measured on us1
+    # started 16 minutes before its slot.
+    assert kwargs["window_minutes"] == 30
 
 
 def test_client_emails_fall_back_to_the_time_in_the_name(mocker):

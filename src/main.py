@@ -466,6 +466,12 @@ def _artifact_text(
         return ""
 
 
+# How far a call's start may sit from its calendar slot. Wider than the booking
+# threshold on evidence: a real call on us1 started 16 minutes early. A workshop that
+# began hours before an unscheduled call still stays out.
+_CALENDAR_WINDOW_MINUTES = 30
+
+
 def _client_emails(item: dict, file_name: str, folder_id: str, config: Config) -> list[str]:
     """The call's invited outsiders, from the employee's calendar; ``[]`` on any doubt.
 
@@ -492,7 +498,7 @@ def _client_emails(item: dict, file_name: str, folder_id: str, config: Config) -
             service,
             start=start,
             own_domains=own_domains,
-            window_minutes=config.call_booking_threshold_minutes,
+            window_minutes=_CALENDAR_WINDOW_MINUTES,
         )
     except Exception as exc:
         logger.warning(
