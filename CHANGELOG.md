@@ -42,6 +42,7 @@
 
 ### Bug Fixes
 
+- Match only a calendar event that starts near the call
 - Alert on a failed listing only when it persists
 - Say in the log when a summary reaches Telegram
 - An attended call's recording is not ours to open, or to lose

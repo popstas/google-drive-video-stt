@@ -1372,8 +1372,9 @@ its Planfix task.
    {"start_time": "2026-08-11T07:00:00.000000Z", "task_id": "851030", "manager_email": "manager@example.com", "calendly_event_uuid": "a1b2c3d4-e5f6-7890-abcd-ef0123456789"}
    ```
 
-   `task_id` must be numeric. `calendly_event_uuid` is optional and may hold only
-   letters, digits and dashes; with `call_booking.calendly_url` set it becomes a
+   `task_id` must be numeric. `calendly_event_uuid` is optional: a uuid, or Calendly's
+   event URI (its last segment is taken). A value that is not letters, digits and
+   dashes is logged and dropped, never costing the booking itself; with `call_booking.calendly_url` set it becomes a
    Calendly link in the call's Telegram summary (see below). `GET /health` returns
    200 for probes.
 
@@ -1493,11 +1494,13 @@ its own task is noise.
 Meet names a call's participants but never gives their addresses. With
 `calendar.client_emails: true`, gdstt reads them from the calendar event behind the
 call instead: as the folder's employee, it takes the event with a Meet link whose start
-is nearest to the call's (within `call_booking.threshold_minutes`), and keeps the
+starts within `call_booking.threshold_minutes` of the call's -- one with outside
+invitees first, then the nearest, so a standing internal sync at the same slot does
+not hide the client call -- and keeps the
 attendees that are not the employee, not a room, and not at a domain of any
 `folders[].email`. A Calendly booking counts: Calendly writes the invitee into the
-host's calendar. The result is `client_emails` in the meta document (so `.meta.yml`,
-the `.stt` meta block and the completion webhook) and the `Email клиента:` line of the
+host's calendar. The result is `client_emails` in the meta document (`.meta.yml` and
+the `.stt` meta block; the completion webhook does not carry it) and the `Email клиента:` line of the
 Telegram summary; the Planfix comment is unchanged.
 
 It needs domain-wide delegation and, for the same client id, one more scope in Admin
