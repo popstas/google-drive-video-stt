@@ -16,12 +16,13 @@ caller can raise after persisting the successful artifacts.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 
 from src.config import Config
 from src.openai_pipeline import OpenAIPipeline, build_prompt
+from src import presets as presets_module
 from src.presets import Preset
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,8 @@ def _run_one(
     speaker_names: list[str] | None,
     manager_name: str,
     dep_results: Mapping[str, PresetResult],
+    participants: Sequence[str] | None = None,
+    speakers: Sequence[str] | None = None,
 ) -> PresetResult:
     if preset.depends_on:
         input_text = _dependency_input(preset, dep_results)
@@ -175,8 +178,14 @@ def _run_one(
         # global default (itself empty by default, which omits the parameter).
         reasoning_effort=preset.reasoning_effort or config.openai_reasoning_effort,
     )
+    # Rendered here, not where the config loads: these are this call's people, and
+    # a prompt resolved once at startup would carry the first call's participants
+    # into every later one.
+    instructions = presets_module.render_participants(
+        preset.instructions, participants, speakers
+    )
     try:
-        text, usage = pipeline.run(preset.instructions, input_text)
+        text, usage = pipeline.run(instructions, input_text)
     finally:
         pipeline.close()
     return PresetResult(name=preset.name, text=text, usage=usage)
@@ -188,6 +197,8 @@ def run_presets(
     config: Config,
     presets: Mapping[str, Preset] | Iterable[Preset],
     *,
+    participants: Sequence[str] | None = None,
+    speakers: Sequence[str] | None = None,
     speaker_names: list[str] | None = None,
     manager_name: str = "",
     only: Iterable[str] | None = None,
@@ -268,6 +279,8 @@ def run_presets(
                                 dep: results[dep]
                                 for dep in preset_map[name].depends_on
                             },
+                            participants=participants,
+                            speakers=speakers,
                         )
                         futures[fut] = name
                         pending.discard(name)

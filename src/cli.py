@@ -5,19 +5,32 @@ import json
 import logging
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TextIO
 
-from src import auth, booking_gate, call_booking, drive, meta_doc
+from src import (
+    auth,
+    booking_gate,
+    call_booking,
+    change_cursor,
+    delegation,
+    drive,
+    meet_api,
+    meet_mark,
+    meta_doc,
+)
 from src import main as main_module
 from src import preset_pipeline, relabel_transcript
 from src.config import (
+    Config,
     config_get,
     config_set,
     config_unset,
     import_google_credentials,
     init_config,
     load_config,
+    parse_since,
     resolve_config_file_path,
     set_run_enabled,
     use_google_files,
@@ -193,21 +206,59 @@ def cmd_start(args: argparse.Namespace) -> None:
     )
 
 
+def _since_argument(value: str) -> str:
+    """Validate `--since` at parse time so a typo fails before Drive is touched."""
+    try:
+        parsed = parse_since(value, source="--since")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return parsed.isoformat() if parsed is not None else ""
+
+
+def _fleet(config: Config) -> delegation.Fleet:
+    """Resolve the config a command is about to work with.
+
+    A command sees the same effective config a cycle does: every entry carrying an
+    id, and the client each folder must be read with. Without delegation this is the
+    shared client and the config as written, which is what every command did before.
+    """
+    return delegation.resolve(config, delegation.shared_service(config))
+
+
+def _service_for_file(fleet: delegation.Fleet, file_id: str):
+    """The client that can open ``file_id``, or exit saying nobody can."""
+    service = delegation.service_for_file(fleet, file_id)
+    if service is None:
+        logger.error(
+            "%s is not visible to any configured employee; check the id, or add the "
+            "employee whose Drive it lives in to folders:",
+            file_id,
+        )
+        raise SystemExit(1)
+    return service
+
+
 def cmd_run_once(args: argparse.Namespace) -> None:
     config = load_config(config_path=args.config)
-    service = auth.build_drive_service(config=config)
+    service = delegation.shared_service(config)
     main_module.run_once(
         service,
         config,
         dry_run=args.dry_run,
         max_size_bytes=args.max_size,
         confirm_large=args.confirm_large,
+        # No --mode means "do what the service would do", so a deployment pinned to
+        # `run.discovery: walk` is not silently exercised on the other path.
+        mode=args.mode or config.run_discovery,
+        since=args.since or "",
     )
 
 
 def cmd_process(args: argparse.Namespace) -> None:
     config = load_config(config_path=args.config)
-    service = auth.build_drive_service(config=config)
+    fleet = _fleet(config)
+    config = fleet.config
+    service = _service_for_file(fleet, args.target)
     is_folder = True if args.folder else None
     telemetry = main_module.process_target(
         service,
@@ -224,17 +275,22 @@ def cmd_process(args: argparse.Namespace) -> None:
 
 def cmd_latest(args: argparse.Namespace) -> None:
     config = load_config(config_path=args.config)
+    if not args.folder and not config.folders:
+        logger.error("No folder to inspect; configure folders or pass --folder")
+        raise SystemExit(1)
+    fleet = _fleet(config)
+    config = fleet.config
     folder_id = args.folder or (config.folders[0].folder_id if config.folders else None)
     if not folder_id:
-        logger.error("No folder to inspect; configure folders or pass --folder")
+        logger.error("No folder to inspect; no configured employee could be resolved")
         raise SystemExit(1)
     if not args.folder and len(config.folders) > 1:
         logger.info(
             "%d folders configured; using the first (%s). Pass --folder to pick another.",
             len(config.folders), folder_id,
         )
-    service = auth.build_drive_service(config=config)
-    newest = drive.find_newest_mp4(service, folder_id)
+    service = _service_for_file(fleet, folder_id)
+    newest = drive.find_newest_mp4_in_tree(service, folder_id)
     if newest is None:
         logger.info("Folder %s has no mp4 files", folder_id)
         return
@@ -337,7 +393,9 @@ def cmd_reprocess(args: argparse.Namespace) -> None:
         raise SystemExit(1)
     plan = "transcript + all presets" if reprocess_txt else ", ".join(preset_names)
     print(f"Reprocess plan for {args.target}: {plan}")
-    service = auth.build_drive_service(config=config)
+    fleet = _fleet(config)
+    config = fleet.config
+    service = _service_for_file(fleet, args.target)
     is_folder = True if args.folder else None
     telemetry = main_module.process_target(
         service,
@@ -395,6 +453,93 @@ def _describe_employee(folder) -> str:
     return folder.name or folder.email or "(no employee configured)"
 
 
+def _print_folder_chats(folder) -> None:
+    """Where this folder's summaries go, and which calls each chat gets.
+
+    Chat ids are addresses, not secrets; printing them is how an operator catches a
+    summary going to the wrong group before anybody reads it there.
+    """
+    if folder.telegram:
+        print(f"    telegram (every call): {', '.join(folder.telegram)}")
+    if folder.telegram_calendly:
+        print(f"    telegram_calendly (booked calls): {', '.join(folder.telegram_calendly)}")
+
+
+def _print_root_sharing(service, folder_id: str) -> None:
+    """Say so when a recordings root is shared, because Meet is about to leave it.
+
+    Measured, not guessed: a root that carries any access beyond its owner keeps
+    every recording it already has and receives no new one, from the next call on.
+    Reporting it while the next call has not happened yet is the only moment when
+    removing the share still saves the folder.
+    """
+    try:
+        others = drive.shared_with(service, folder_id)
+    except Exception as exc:  # noqa: BLE001 -- a diagnostic reports, it does not raise
+        print(f"  sharing: could not be read ({exc})")
+        return
+    if not others:
+        return
+    print(
+        f"  WARNING: shared with {', '.join(others)} -- Meet abandons a shared "
+        "recordings folder at the next recording and starts a new one. Remove the "
+        "access to keep this folder alive; share single meeting subfolders instead."
+    )
+
+
+def _print_folder_diagnosis(service, folder_id: str) -> None:
+    """One line per configured folder, saying enough to spot a folder gone quiet.
+
+    Reachability alone is what made this service look healthy while it was finding
+    nothing, so this reports what the folder *is* and when it last received anything,
+    not only that it answered.
+    """
+    try:
+        meta = drive.describe_folder(service, folder_id)
+    except Exception as exc:  # noqa: BLE001 -- a diagnostic must report, not raise
+        print(f"Folder {folder_id}: UNREACHABLE ({exc})")
+        return
+
+    name = meta.get("name") or "(no name)"
+    parents = ", ".join(meta.get("parents") or []) or "none"
+    trashed = " TRASHED" if meta.get("trashed") else ""
+    try:
+        items = drive.list_folder_tree_state(service, folder_id)
+        subfolders = drive.list_subfolders(service, folder_id)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Folder {folder_id}: {name!r}{trashed}, parent {parents}, listing failed ({exc})")
+        return
+
+    newest = max(
+        (it["file"].get("createdTime", "") for it in items), default=""
+    )
+    print(
+        f"Folder {folder_id}: {name!r}{trashed}, parent {parents}, "
+        f"{len(subfolders)} subfolder(s), {len(items)} mp4 file(s), "
+        f"newest {newest or 'never'}"
+    )
+
+    # The calls this folder does not process, said out loud. Without it a manager's
+    # folder reports every recording it holds as handled while the meetings they
+    # only attended -- a shortcut each -- go missing without a trace.
+    try:
+        shortcuts = drive.list_recording_shortcuts(service, folder_id)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  shortcuts to recordings: could not list ({exc})")
+        return
+    if not shortcuts:
+        return
+    unreadable = sum(
+        1 for shortcut in shortcuts
+        if not shortcut["target_id"] or not drive.is_readable(service, shortcut["target_id"])
+    )
+    print(
+        f"  {len(shortcuts)} shortcut(s) to recordings, not processed from this folder "
+        f"({unreadable} not readable by this account): calls organized by someone "
+        "else -- configure the organizer's folder to capture them"
+    )
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     config_path = resolve_config_file_path(args.config)
     try:
@@ -417,9 +562,18 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     # token / refresh_token stay masked; only the source kind/location is shown).
     print(f"Google credentials: {_describe_google_credentials(config)}")
     print(f"Google token: {_describe_google_token(config)}")
+    if config.uses_delegation:
+        # Otherwise the two lines above read as a broken setup, when in fact a
+        # delegated deployment needs no user token at all.
+        print(
+            "  (a service account is configured; the OAuth token above is only "
+            "needed for folders with no employee attached)"
+        )
     print(f"folders: {len(config.folders)} configured")
     for folder in config.folders:
-        print(f"  {folder.folder_id}: {_describe_employee(folder)}")
+        where = folder.folder_id or "(found at run time)"
+        print(f"  {where}: {_describe_employee(folder)}")
+        _print_folder_chats(folder)
     print(f"stt.provider: {config.stt_provider or 'not configured'}")
     _print_preset_dag(config)
     print(
@@ -440,11 +594,156 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         print("Drive auth: not checked (use --drive)")
         return
 
-    service = auth.build_drive_service(config=config)
+    if config.uses_delegation:
+        account = (config.google_service_account or {}).get("client_email", "")
+        source = account or str(config.google_service_account_file or "")
+        print(f"delegation: on, acting as each employee via {source or 'a key'}")
+    failures: list[str] = []
+    fleet = delegation.resolve(
+        config,
+        delegation.shared_service(config),
+        on_error=lambda folder, exc: failures.append(f"{folder.email}: {exc}"),
+    )
+    config = fleet.config
     print("Drive auth: OK")
+    for failure in failures:
+        print(f"  UNREACHABLE {failure}")
+    cursor_path = change_cursor.path_for(config.data_dir)
+    saved_cursor = change_cursor.read(cursor_path)
+    if not saved_cursor:
+        state = "absent, next cycle sweeps"
+    elif change_cursor.read_folders(
+        change_cursor.folders_path_for(config.data_dir)
+    ) == change_cursor.fingerprint(
+        folder.folder_id for folder in config.folders
+    ):
+        state = "set, covers the configured folders"
+    else:
+        state = "set, but the configured folders changed -- next cycle sweeps once"
+    if config.run_discovery == "meet":
+        state = "not used: Meet is asked what was recorded instead"
+    elif config.uses_delegation:
+        state = "not used: each folder is read as its owner, so every cycle walks"
+    print(f"changes cursor: {cursor_path} ({state})")
+    discovery = config.run_discovery
+    if config.uses_delegation and discovery != "meet":
+        discovery = f"{discovery}, but delegation always walks"
+    print(f"discovery: run.discovery={discovery}")
+    if config.run_discovery == "meet":
+        mark_path = meet_mark.path_for(config.data_dir)
+        mark = meet_mark.read(mark_path)
+        where = (
+            mark.isoformat()
+            if mark is not None
+            else f"absent, the next cycle looks back {config.meet_first_look_hours}h"
+        )
+        print(f"Meet mark: {mark_path} ({where})")
+        print(
+            f"Meet waits {config.meet_wait_hours}h for a recording's file; "
+            f"an employee Meet refuses is {config.meet_fallback}"
+        )
+    print(f"since: run.since={config.run_since or 'unset, every recording in scope'}")
+    meet_since = _meet_window(config) if config.run_discovery == "meet" else None
     for folder in config.folders:
-        items = drive.list_folder_state(service, folder.folder_id)
-        print(f"Folder {folder.folder_id}: OK, {len(items)} mp4 file(s)")
+        folder_service = fleet.service_for(folder.folder_id)
+        if folder.email:
+            print(f"Employee {folder.email}: {_describe_employee(folder)}")
+        _print_folder_diagnosis(folder_service, folder.folder_id)
+        _print_root_sharing(folder_service, folder.folder_id)
+        if meet_since is not None and folder.email:
+            _print_meet_health(config, fleet, folder, meet_since)
+
+
+def _meet_window(config) -> datetime:
+    """The moment doctor asks Meet about: the saved mark, or the first-look window."""
+    mark = meet_mark.read(meet_mark.path_for(config.data_dir))
+    if mark is not None:
+        return mark
+    return datetime.now(timezone.utc) - timedelta(hours=config.meet_first_look_hours)
+
+
+def _print_meet_health(config, fleet, folder, since: datetime) -> None:
+    """Whether Meet answers for this employee, and what it has to say.
+
+    The counts are the whole diagnosis: conferences answered, how many recorded, how
+    many of those Meet has finished writing, and how many already have a call
+    document beside them. A mode that returns nothing looks exactly like a quiet
+    week, so "the API answered, and here is what it said" is the thing to print.
+    """
+    try:
+        service = auth.build_meet_service(config=config, subject=folder.email)
+        conferences = meet_api.conferences_since(service, since)
+    except (auth.AuthError, meet_api.MeetError) as exc:
+        print(f"  Meet: UNREACHABLE -- {exc}")
+        return
+    recorded = [c for c in conferences if c.recordings]
+    ready = [r for c in recorded for r in c.recordings if r.ready]
+    waiting = [r for c in recorded for r in c.recordings if not r.ready]
+    running = [c for c in conferences if not c.ended]
+    print(
+        f"  Meet: {len(conferences)} conference(s) since {since.isoformat(timespec='seconds')}, "
+        f"{len(recorded)} recorded, {len(ready)} file(s) ready, {len(waiting)} still being written"
+    )
+    if running:
+        print(f"  Meet: {len(running)} still in progress, holding the mark")
+    if not ready:
+        return
+    if config.meet_skip_empty_calls:
+        # The same client the conferences came from: attendance is a Meet question,
+        # and the Drive client below cannot answer it.
+        alone = 0
+        unknown = 0
+        for conference in recorded:
+            try:
+                who = meet_api.attendance(service, conference.name)
+            except (auth.AuthError, meet_api.MeetError):
+                unknown += 1
+                continue
+            if who.people and not meet_api.ever_together(who):
+                alone += 1
+        print(
+            f"  Meet: {alone} call(s) nobody but the organiser came to"
+            + (f", {unknown} whose attendance could not be read" if unknown else "")
+        )
+    drive_service = fleet.service_for(folder.folder_id)
+    owners = {f.email.lower() for f in config.folders if f.email}
+    done = 0
+    unreadable = 0
+    outside = 0
+    marked = 0
+    for recording in ready:
+        try:
+            parents, owner = drive.file_placement(drive_service, recording.file_id)
+            if owner.lower() not in owners:
+                outside += 1
+                continue
+            items = [
+                item
+                for parent in parents
+                for item in drive.list_folder_state(drive_service, parent)
+                if item["file"]["id"] == recording.file_id
+            ]
+        except Exception as exc:  # noqa: BLE001 - a diagnosis says what it could not see
+            unreadable += 1
+            logger.debug("Could not read a recording Meet named: %s", exc)
+            continue
+        if items and items[0].get("skipped_id"):
+            marked += 1
+        elif items and items[0].get("stt_id"):
+            done += 1
+    # Only the recordings this account can actually act on are a denominator worth
+    # printing: counting one it cannot open as "not processed yet" reads as a backlog.
+    ours = len(ready) - outside - unreadable
+    print(f"  Meet: {done} of {ours} already processed")
+    if marked:
+        print(f"  Meet: {marked} recording(s) marked as not worth transcribing")
+    if outside:
+        print(
+            f"  Meet: {outside} recording(s) owned outside the fleet, left to their "
+            "owner -- the walk leaves them too"
+        )
+    if unreadable:
+        print(f"  Meet: {unreadable} recording(s) this account cannot open")
 
 
 def cmd_config_init(args: argparse.Namespace) -> None:
@@ -499,7 +798,7 @@ def cmd_config_unset(args: argparse.Namespace) -> None:
 
 def cmd_speakers_set(args: argparse.Namespace) -> None:
     config = load_config(validate_providers=False, config_path=args.config)
-    service = auth.build_drive_service(config=config)
+    service = _service_for_file(_fleet(config), args.target)
     names = json.dumps(args.names, ensure_ascii=False)
     drive.set_file_app_properties(
         service,
@@ -530,12 +829,68 @@ def cmd_bookings_list(args: argparse.Namespace) -> None:
 def cmd_bookings_rematch(args: argparse.Namespace) -> None:
     """Clear the unmatched mark so the polling loop reconsiders a recording."""
     config = load_config(config_path=args.config, validate_providers=False)
-    service = auth.build_drive_service(config=config)
+    service = _service_for_file(_fleet(config), args.target)
     booking_gate.clear_mark(service, args.target)
     print(
         f"Cleared the unmatched mark on {args.target}; "
         f"the next polling cycle will reconsider it"
     )
+
+
+def _recording_link(item: dict, folder_id: str) -> str:
+    """The link a summary gives for a recording: its meeting folder, else the video."""
+    container = item.get("container_id") or folder_id
+    return meta_doc.folder_url(container, folder_id) or meta_doc.video_url(
+        item.get("id", "")
+    )
+
+
+def _sent_rows(args: argparse.Namespace, property_name: str) -> tuple[object, list[tuple]]:
+    """Every recording carrying ``property_name``, newest first.
+
+    Each row is ``(createdTime, marker value, manager, link, name)``.
+    """
+    config = load_config(config_path=args.config, validate_providers=False)
+    fleet = _fleet(config)
+    config = fleet.config
+    rows: list[tuple[str, str, str, str, str]] = []
+    for folder in config.folders:
+        service = fleet.service_for(folder.folder_id)
+        for item in drive.list_mp4_timestamps_in_tree(service, folder.folder_id):
+            value = (item.get("appProperties") or {}).get(property_name, "")
+            if value:
+                rows.append(
+                    (
+                        item.get("createdTime", ""),
+                        value,
+                        folder.name,
+                        _recording_link(item, folder.folder_id),
+                        item.get("name", ""),
+                    )
+                )
+    # Newest first: this is a "what happened lately" listing, and the calls an operator
+    # is asking about are the ones that just happened.
+    rows.sort(reverse=True)
+    return config, rows
+
+
+def _print_sent(rows: list[tuple], limit: int, describe) -> None:
+    """Print one block per recording; ``describe`` renders the marker's line."""
+    shown = rows if limit <= 0 else rows[:limit]
+    # One record per block rather than one per line: the links are the point of these
+    # commands, and a terminal only makes them clickable when they stand alone.
+    for index, (created, value, manager, link, name) in enumerate(shown):
+        if index:
+            print()
+        print(f"{created}\t{manager}")
+        print(describe(value))
+        print(link)
+        print(name)
+
+    # Say what was left out. A truncated list that looks complete is worse than a long
+    # one, because nobody goes looking for the calls they were never told about.
+    if len(shown) < len(rows):
+        print(f"\n{len(shown)} of {len(rows)} shown; --limit 0 for all")
 
 
 def cmd_planfix_sent(args: argparse.Namespace) -> None:
@@ -549,48 +904,34 @@ def cmd_planfix_sent(args: argparse.Namespace) -> None:
     Newest first and capped by ``--limit``, because the question this answers is almost
     always "what happened lately".
     """
-    config = load_config(config_path=args.config, validate_providers=False)
-    service = auth.build_drive_service(config=config)
-    rows: list[tuple[str, str, str, str, str]] = []
-    for folder in config.folders:
-        for item in drive.list_mp4_timestamps(service, folder.folder_id):
-            task_id = (item.get("appProperties") or {}).get(
-                drive.PLANFIX_COMMENT_TASK_ID_PROPERTY, ""
-            )
-            if task_id:
-                rows.append(
-                    (
-                        item.get("createdTime", ""),
-                        task_id,
-                        folder.name,
-                        item.get("name", ""),
-                        item.get("id", ""),
-                    )
-                )
-
+    config, rows = _sent_rows(args, drive.PLANFIX_COMMENT_TASK_ID_PROPERTY)
     if not rows:
         print("No recording carries a sent-comment marker.")
         return
+    _print_sent(
+        rows,
+        args.limit,
+        lambda task_id: meta_doc.task_url(config.planfix_task_url, task_id)
+        or f"task {task_id}",
+    )
 
-    # Newest first: this is a "what happened lately" listing, and the calls an operator
-    # is asking about are the ones that just happened.
-    rows.sort(reverse=True)
-    shown = rows if args.limit <= 0 else rows[: args.limit]
 
-    # One record per block rather than one per line: the two links are the point of
-    # this command, and a terminal only makes them clickable when they stand alone.
-    for index, (created, task_id, manager, name, file_id) in enumerate(shown):
-        if index:
-            print()
-        print(f"{created}\t{manager}")
-        print(meta_doc.task_url(config.planfix_task_url, task_id) or f"task {task_id}")
-        print(meta_doc.video_url(file_id))
-        print(name)
+def cmd_telegram_sent(args: argparse.Namespace) -> None:
+    """List every recording whose Telegram summary reached at least one chat.
 
-    # Say what was left out. A truncated list that looks complete is worse than a long
-    # one, because nobody goes looking for the calls they were never told about.
-    if len(shown) < len(rows):
-        print(f"\n{len(shown)} of {len(rows)} shown; --limit 0 for all")
+    Read from the ``telegram_sent_chat_id`` appProperty, which names each chat only
+    after its send succeeded -- so a chat missing from a line is one ``gdstt
+    reprocess`` would still deliver to.
+    """
+    _, rows = _sent_rows(args, drive.TELEGRAM_SENT_CHAT_ID_PROPERTY)
+    if not rows:
+        print("No recording carries a sent-summary marker.")
+        return
+    _print_sent(
+        rows,
+        args.limit,
+        lambda chats: "chats: " + ", ".join(c for c in chats.split(",") if c),
+    )
 
 
 def cmd_bookings_restore_dates(args: argparse.Namespace) -> None:
@@ -602,10 +943,12 @@ def cmd_bookings_restore_dates(args: argparse.Namespace) -> None:
     createdTime -- the closest recoverable value, since the original was overwritten.
     """
     config = load_config(config_path=args.config, validate_providers=False)
-    service = auth.build_drive_service(config=config)
+    fleet = _fleet(config)
+    config = fleet.config
     total = 0
     for folder in config.folders:
-        files = drive.list_mp4_timestamps(service, folder.folder_id)
+        service = fleet.service_for(folder.folder_id)
+        files = drive.list_mp4_timestamps_in_tree(service, folder.folder_id)
         for file_id, name, created in booking_gate.select_stale_marks(files):
             total += 1
             if args.dry_run:
@@ -646,21 +989,195 @@ def cmd_relabel(args: argparse.Namespace) -> None:
     logger.info("Relabeled transcript written to %s", args.out)
 
 
+def cmd_changes(args: argparse.Namespace) -> None:
+    """Show what the changes feed reports, without acting on it or moving the cursor.
+
+    The question this answers is "does Drive think anything happened", asked before
+    the next cycle rather than after it. Read-only on purpose: an operator looking
+    into the feed must not consume it, or the cycle that follows would find nothing
+    and the recording would be skipped.
+    """
+    config = load_config(validate_providers=False, config_path=args.config)
+    if config.uses_delegation:
+        logger.error(
+            "The changes feed belongs to one account, and delegation reads each "
+            "folder as its owner, so no cursor is kept. Use `gdstt list` to see what "
+            "is in the folders."
+        )
+        raise SystemExit(1)
+    cursor_path = change_cursor.path_for(config.data_dir)
+    cursor = change_cursor.read(cursor_path)
+    if cursor is None:
+        print(f"No cursor at {cursor_path}; the next cycle sweeps every folder.")
+        return
+
+    # Same question the cycle asks itself. Without it this command would report
+    # "nothing of ours" for a folder just added to the config and be right about the
+    # feed while being useless to the operator.
+    if change_cursor.read_folders(
+        change_cursor.folders_path_for(config.data_dir)
+    ) != change_cursor.fingerprint(
+        folder.folder_id for folder in config.folders
+    ):
+        print(
+            "The configured folders changed since this cursor was taken; the feed "
+            "cannot show what was already in a folder added since. The next cycle "
+            "sweeps once."
+        )
+
+    service = auth.build_drive_service(config=config)
+    entries, next_cursor = drive.list_changes(service, cursor)
+    print(f"{len(entries)} change(s) since the saved cursor")
+
+    if args.raw:
+        for entry in entries:
+            file_info = entry.get("file") or {}
+            state = "removed" if entry.get("removed") else file_info.get("mimeType", "?")
+            print(f"  {entry.get('fileId')}  {state}  {file_info.get('name', '')}")
+    else:
+        configured = {folder.folder_id for folder in config.folders}
+        ancestors: dict[str, str | None] = {}
+        shown = 0
+        for entry in entries:
+            file_info = entry.get("file") or {}
+            if entry.get("removed") or file_info.get("trashed"):
+                continue
+            if file_info.get("mimeType") != drive.MP4_MIME:
+                continue
+            parents = file_info.get("parents") or []
+            if not parents:
+                continue
+            owner = drive.find_configured_ancestor(
+                service, parents[0], configured, cache=ancestors
+            )
+            if owner is None:
+                continue
+            shown += 1
+            print(f"  {file_info.get('name')}  in {parents[0]}  (folder {owner})")
+        if not shown:
+            print("  nothing of ours; pass --raw to see every entry")
+
+    print(f"cursor would move to {next_cursor}; not saved")
+
+
+def cmd_meet_mark_show(args: argparse.Namespace) -> None:
+    """Print where Meet discovery has finished, and what an absent mark would mean."""
+    config = load_config(validate_providers=False, config_path=args.config)
+    path = meet_mark.path_for(config.data_dir)
+    mark = meet_mark.read(path)
+    print(f"path: {path}")
+    if mark is None:
+        print(
+            "mark: absent -- the next cycle looks back "
+            f"{config.meet_first_look_hours}h, and never further than run.since"
+        )
+        return
+    print(f"mark: {mark.isoformat()}")
+    print(
+        "Everything that started before this has been processed. A conference that is "
+        "still running, or whose recording has no file yet, holds the mark here until "
+        "it is done."
+    )
+
+
+def cmd_meet_mark_reset(args: argparse.Namespace) -> None:
+    """Forget the mark so the next cycle looks back over the first-look window.
+
+    Deliberately not "start from the beginning": what is in scope is run.since's job,
+    and a reset that re-read the whole archive would be a bill rather than a check.
+    """
+    config = load_config(validate_providers=False, config_path=args.config)
+    path = meet_mark.path_for(config.data_dir)
+    if meet_mark.clear(path):
+        print(
+            f"Forgot the Meet mark at {path}; the next cycle looks back "
+            f"{config.meet_first_look_hours}h."
+        )
+    else:
+        print(f"No Meet mark at {path}; the next cycle already looks back.")
+
+
+def cmd_cursor_show(args: argparse.Namespace) -> None:
+    config = load_config(validate_providers=False, config_path=args.config)
+    path = change_cursor.path_for(config.data_dir)
+    cursor = change_cursor.read(path)
+    print(f"path: {path}")
+    if cursor is None:
+        print("cursor: absent -- the next cycle sweeps every folder")
+        return
+    print(f"cursor: {cursor}")
+    watched = change_cursor.fingerprint(
+        folder.folder_id for folder in config.folders
+    )
+    vouched = change_cursor.read_folders(
+        change_cursor.folders_path_for(config.data_dir)
+    )
+    if vouched is None:
+        print(
+            "folders: not recorded -- the next cycle sweeps once and records them"
+        )
+    elif vouched == watched:
+        print(f"folders: {len(watched.splitlines())} watched, all covered")
+    else:
+        added = sorted(set(watched.splitlines()) - set(vouched.splitlines()))
+        dropped = sorted(set(vouched.splitlines()) - set(watched.splitlines()))
+        print(
+            "folders: changed since the cursor was taken -- the next cycle sweeps "
+            "once so nothing already sitting in a new folder is missed"
+        )
+        for folder_id in added:
+            print(f"  added:   {folder_id}")
+        for folder_id in dropped:
+            print(f"  dropped: {folder_id}")
+
+
+def cmd_cursor_reset(args: argparse.Namespace) -> None:
+    """Forget the cursor so the next cycle re-reads every folder.
+
+    The one safe big hammer in this service: a sweep re-derives what is done from
+    what is next to each video, so the worst it costs is a slower cycle.
+    """
+    config = load_config(validate_providers=False, config_path=args.config)
+    path = change_cursor.path_for(config.data_dir)
+    # The folder set goes with it: left behind, it would vouch for a cursor that no
+    # longer exists.
+    change_cursor.clear_folders(change_cursor.folders_path_for(config.data_dir))
+    if change_cursor.clear(path):
+        print(f"Removed {path}; the next cycle sweeps every folder.")
+    else:
+        print(f"No cursor at {path}; the next cycle already sweeps.")
+
+
 def cmd_list(args: argparse.Namespace) -> None:
     config = load_config(validate_providers=False, config_path=args.config)
-    folder_ids = [args.folder] if args.folder else [f.folder_id for f in config.folders]
-    if not folder_ids:
+    if not args.folder and not config.folders:
         logger.error("No folders to inspect; configure folders or pass --folder")
         raise SystemExit(1)
-    service = auth.build_drive_service(config=config)
+    fleet = _fleet(config)
+    config = fleet.config
+    folder_ids = [args.folder] if args.folder else [f.folder_id for f in config.folders]
+    if not folder_ids:
+        logger.error("No folders to inspect; no configured employee could be resolved")
+        raise SystemExit(1)
     for folder_id in folder_ids:
-        items = drive.list_folder_state(service, folder_id)
+        items = drive.list_folder_tree_state(fleet.service_for(folder_id), folder_id)
+        # Without this the report and the service disagree: `list` would show eight
+        # recordings with no transcript while every cycle skipped all eight, and the
+        # operator would be left wondering which one was lying.
+        cutoff = parse_since(config.since_for(folder_id), source="since")
         print(f"Folder {folder_id}: {len(items)} mp4 file(s)")
         for item in items:
             name = item["file"]["name"]
+            when = main_module._recording_datetime(item)
+            out_of_scope = cutoff is not None and when is not None and when < cutoff
             mp3 = "mp3" if item.get("has_mp3") else "---"
             txt = "txt" if item.get("has_txt") else "---"
-            print(f"  [{mp3}] [{txt}] {name}")
+            # The container is worth showing even when it equals the folder asked
+            # about: it is where the artifacts went, and with meeting subfolders the
+            # operator can no longer assume which folder that was.
+            where = item.get("container_id") or folder_id
+            scope = "  before since, not processed" if out_of_scope else ""
+            print(f"  [{mp3}] [{txt}] {name}  ({where}){scope}")
 
 
 def _add_processing_safety_args(parser: argparse.ArgumentParser) -> None:
@@ -785,6 +1302,31 @@ def build_parser() -> argparse.ArgumentParser:
             "first and add --max-size only as an optional manual limit for larger folder runs."
         ),
     )
+    p_run_once.add_argument(
+        "--mode",
+        choices=("auto", "walk", "changes", "meet"),
+        default=None,
+        help=(
+            "How to find work: 'auto' reads the changes feed when a cursor exists and "
+            "sweeps otherwise; 'walk' sweeps every folder without touching the cursor; "
+            "'changes' only reads the feed and fails when there is no cursor; "
+            "'meet' asks each employee's Meet what they have been in, which needs a "
+            "service account. "
+            "Defaults to run.discovery from the config, which the service itself uses"
+        ),
+    )
+    p_run_once.add_argument(
+        "--since",
+        type=_since_argument,
+        default=None,
+        metavar="DATE",
+        help=(
+            "Ignore recordings of calls before this date (2026-09-12 or an ISO "
+            "timestamp), overriding run.since and any folder's own since for this "
+            "run. The date is read from the recording's name, falling back to when "
+            "Drive received it"
+        ),
+    )
     _add_processing_safety_args(p_run_once)
     p_run_once.set_defaults(func=cmd_run_once)
 
@@ -862,7 +1404,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _set_parser_safety_description(
         p_latest,
-        summary="Process the most recently created mp4 in a folder.",
+        summary=(
+            "Process the most recently created mp4 in a folder or any of its meeting "
+            "subfolders."
+        ),
         safety_note=(
             "this command spends STT credits on the newest mp4. Use --dry-run first to "
             "confirm which file would be processed."
@@ -899,7 +1444,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument(
         "--drive",
         action="store_true",
-        help="Also authenticate and list configured Drive folders",
+        help=(
+            "Also authenticate and report each configured folder: its name, its "
+            "parent, how many subfolders and recordings it holds, when it last "
+            "received one, and the state of the changes cursor"
+        ),
     )
     p_doctor.set_defaults(func=cmd_doctor)
 
@@ -1006,6 +1555,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_planfix_sent.set_defaults(func=cmd_planfix_sent)
 
+    p_telegram = sub.add_parser(
+        "telegram",
+        help="Inspect what was sent to Telegram",
+    )
+    telegram_sub = p_telegram.add_subparsers(dest="telegram_command", required=True)
+    p_telegram_sent = telegram_sub.add_parser(
+        "sent", help="List recordings whose Telegram summary was delivered, and where"
+    )
+    p_telegram_sent.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="How many of the newest to print; 0 for all (default: 20)",
+    )
+    p_telegram_sent.set_defaults(func=cmd_telegram_sent)
+
     p_bookings = sub.add_parser(
         "bookings",
         help="Inspect received call bookings and revive skipped recordings",
@@ -1064,10 +1629,69 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_relabel.set_defaults(func=cmd_relabel)
 
+    p_changes = sub.add_parser(
+        "changes",
+        help="Show what the changes feed reports, without consuming it",
+        description=(
+            "Show what Drive's changes feed reports since the saved cursor. Read-only: "
+            "the cursor is not moved, so the next cycle still sees these changes. "
+            "Without a cursor there is nothing to read and the next cycle sweeps."
+        ),
+    )
+    p_changes.add_argument(
+        "--raw",
+        action="store_true",
+        help="Show every entry, not just the videos in configured folders",
+    )
+    p_changes.set_defaults(func=cmd_changes)
+
+    p_meet = sub.add_parser(
+        "meet",
+        help="Inspect or forget the Meet discovery mark",
+        description=(
+            "Where discovery by the Meet API has finished. Unlike the changes cursor "
+            "it is a readable moment, and it never moves past a conference whose "
+            "recording has not been processed yet."
+        ),
+    )
+    meet_sub = p_meet.add_subparsers(dest="meet_command", required=True)
+    p_meet_mark = meet_sub.add_parser("mark", help="Inspect or forget the mark")
+    meet_mark_sub = p_meet_mark.add_subparsers(dest="meet_mark_command", required=True)
+    p_meet_mark_show = meet_mark_sub.add_parser("show", help="Print the mark and its path")
+    p_meet_mark_show.set_defaults(func=cmd_meet_mark_show)
+    p_meet_mark_reset = meet_mark_sub.add_parser(
+        "reset", help="Forget the mark so the next cycle looks back"
+    )
+    p_meet_mark_reset.set_defaults(func=cmd_meet_mark_reset)
+
+    p_cursor = sub.add_parser(
+        "cursor",
+        help="Inspect or forget the changes-feed cursor",
+        description=(
+            "The cursor is where the changes feed resumes from, and the only "
+            "discovery state this service keeps. It is safe to forget: without one "
+            "a cycle reads every configured folder and takes a fresh cursor, so the "
+            "worst a reset costs is one slower cycle."
+        ),
+    )
+    cursor_sub = p_cursor.add_subparsers(dest="cursor_command", required=True)
+    p_cursor_show = cursor_sub.add_parser("show", help="Print the cursor and its path")
+    p_cursor_show.set_defaults(func=cmd_cursor_show)
+    p_cursor_reset = cursor_sub.add_parser(
+        "reset", help="Forget the cursor so the next cycle sweeps every folder"
+    )
+    p_cursor_reset.set_defaults(func=cmd_cursor_reset)
+
     p_list = sub.add_parser(
         "list",
         aliases=["status"],
         help="Show folder state (sibling MP3/TXT presence) without doing work",
+        description=(
+            "Show each folder's recordings and whether their MP3/TXT siblings exist, "
+            "without doing any work. Reads the folder together with its meeting "
+            "subfolders, prints the folder each recording actually lives in, and "
+            "marks the ones a since cutoff puts out of scope."
+        ),
     )
     p_list.add_argument(
         "--folder",

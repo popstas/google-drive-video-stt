@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime
 from importlib.resources import files
 from pathlib import Path
 from urllib.parse import urlparse
@@ -36,6 +37,12 @@ CONFIG_HOME_ENV_VAR = "GDSTT_HOME"
 DEFAULT_CONFIG_HOME = Path("data")
 
 SUPPORTED_STT_PROVIDERS = ("", "deepgram")
+# How the polling loop finds work. The CLI has a third, ``changes``, which only
+# makes sense as a one-off diagnostic -- a service that refuses to fall back would
+# stop finding recordings the moment a cursor went stale.
+DISCOVERY_MODES = ("auto", "walk", "meet")
+# What an employee whose Meet query failed falls back to for that cycle.
+MEET_FALLBACKS = ("walk", "none")
 OUTPUT_TARGETS = ("drive", "folder")
 DEEPGRAM_DIARIZE_MODELS = ("latest", "v1")
 DEEPGRAM_AUDIO_SOURCES = ("m4a_copy", "mp3_96k", "mp3_192k")
@@ -48,6 +55,46 @@ DEEPGRAM_MAX_KEYTERMS = 100
 # the response template plus each field's rules -- rendered at config load time.
 # The built-in ``meta`` prompt uses it; any prompt may.
 ENTITIES_PLACEHOLDER = "{{entities}}"
+
+
+def parse_since(value: object, *, source: str) -> datetime | None:
+    """Read a ``since`` cutoff, or ``None`` when unset.
+
+    Accepts what an operator writes and what YAML hands back for it: bare
+    ``2026-09-12`` comes through as a ``date``, a timestamp as a ``datetime``, and a
+    quoted value as a string. A date means midnight UTC that day; a naive timestamp
+    is read as UTC, because every time this is compared against -- the meeting time
+    parsed out of a recording's name, and Drive's ``createdTime`` -- is UTC already.
+
+    Unparseable raises rather than being ignored. A cutoff that silently did nothing
+    would be discovered as a Deepgram bill for someone's entire backlog.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, date):
+        parsed = datetime(value.year, value.month, value.day)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(
+                f"{source} must be a date (2026-09-12) or an ISO timestamp, "
+                f"got: {value!r}"
+            ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _since_text(value: object, *, source: str) -> str:
+    """Normalize a ``since`` value to the string kept in the config object."""
+    parsed = parse_since(value, source=source)
+    return parsed.isoformat() if parsed is not None else ""
 
 
 FOLDER_IDS_MIGRATION_ERROR = (
@@ -65,11 +112,28 @@ class EmployeeFolder:
 
     ``name``/``email`` are optional: a folder whose employee is unknown still polls,
     and downstream consumers (the completion webhook) send empty strings for it.
+
+    ``telegram`` holds the chat ids (``-100...`` or ``@channel``) every call summary
+    is posted to. Setting it also forces recognition for the folder: its recordings
+    are transcribed even with no booking behind them, because the chat -- not a
+    Planfix task -- is the destination.
+
+    ``telegram_calendly`` holds chats that get only the calls a booking stands
+    behind (``BookingDecision.is_booked``), whatever
+    ``planfix.ignore_telegram_when_planfix`` says. It forces nothing: a booked call is
+    recognized anyway, and an unbooked one is not what these chats are for.
     """
 
     folder_id: str
     name: str = ""
     email: str = ""
+    telegram: tuple[str, ...] = ()
+    telegram_calendly: tuple[str, ...] = ()
+    # Recordings of calls before this are out of scope for the polling loop. Set per
+    # folder because onboarding is an event about a person: a cutoff that is right
+    # for today's employees is wrong for the one who joins in three months with a
+    # backlog of their own. Empty means "whatever ``run.since`` says".
+    since: str = ""
 
 
 @dataclass(frozen=True)
@@ -102,6 +166,18 @@ class Config:
     # Runtime control flag for the polling loop. ``gdstt stop`` sets ``run.enabled``
     # to false in the config; the loop re-reads it each cycle and exits cleanly.
     run_enabled: bool = True
+    # Which discovery path the polling loop takes. ``auto`` reads Drive's changes
+    # feed once a cursor exists; ``walk`` always lists every watched folder and its
+    # meeting subfolders. Walking costs a request per folder per cycle and stays
+    # well inside quota even at a thousand subfolders, so this is the switch to
+    # reach for if the feed ever turns out not to report what a deployment needs --
+    # notably folders shared *to* the service rather than owned by it.
+    run_discovery: str = "auto"
+    # Default cutoff for folders that do not set their own. Absolute rather than a
+    # rolling window on purpose: with ``max_age_days`` a recording still pending
+    # today would drop out of scope overnight with nothing having happened, and a
+    # service stopped for a month would skip everything on restart.
+    run_since: str = ""
     output_target: str = "drive"
     output_dir: Path | None = None
     # Publish artifacts to Drive as well while keeping the local folder authoritative.
@@ -177,6 +253,11 @@ class Config:
     # host, so this cannot be derived from the comment webhook URL. Blank leaves
     # ``planfix_task_url`` empty in the meta document rather than guessing a host.
     planfix_task_url: str = ""
+    # When true, a recording that reached Planfix does not also reach the folder's
+    # Telegram chat -- the CRM comment is the record and the chat would duplicate it.
+    # Default false: the two are independent channels and a folder that asked for a
+    # chat gets every call in it.
+    planfix_ignore_telegram_when_planfix: bool = False
     presets: tuple[Preset, ...] = ()
     # Google OAuth is config-owned and inline-first. ``google_credentials``/
     # ``google_token`` hold inline mappings (the OAuth client JSON and the saved
@@ -188,7 +269,47 @@ class Config:
     google_token: dict | None = None
     google_credentials_file: Path | None = None
     google_token_file: Path | None = None
+    # A service account key, inline or on disk. Its presence is what turns on
+    # delegation: each folder is then read while impersonating the employee that
+    # owns it, instead of through one shared user token. The OAuth keys above stay
+    # in use for every folder that is not delegated.
+    google_service_account: dict | None = None
+    google_service_account_file: Path | None = None
+    # The folder names Google Meet gives its recordings root. Only the current one by
+    # default: the legacy layouts (``Meet Recordings``, ``Meet <n> - <person>``) hold
+    # no meetings, so matching them would only add candidates to choose between.
+    meet_folder_names: tuple[str, ...] = ("Google Meet",)
+    # How long a recording Meet has named but not yet written is waited for. Meet
+    # takes minutes; a day is the point at which one recording that will never
+    # arrive stops holding discovery still.
+    meet_wait_hours: int = 24
+    # How far back to look when there is no mark: a first run, a wiped data dir, a
+    # new machine. A week is enough to cover a restart without turning a lost file
+    # into a re-reading of the archive; what is in *scope* is still run.since alone.
+    meet_first_look_hours: int = 168
+    # What happens to an employee whose Meet query fails: ``walk`` reads their
+    # folders the old way this cycle, ``none`` counts the error and moves on. The
+    # failure is logged either way -- a fallback that hides the problem is how a
+    # service ends up quietly paying twice.
+    meet_fallback: str = "walk"
+    # Whether a call nobody but the organiser attended is marked and left alone.
+    # On by default because it is pure saving; switchable because a deployment
+    # that wants every recording transcribed must be able to say so.
+    meet_skip_empty_calls: bool = True
     config_file: Path | None = None
+
+    @property
+    def uses_delegation(self) -> bool:
+        """Whether a service account is configured, i.e. folders may be resolved.
+
+        A property rather than a flag in the YAML: an operator who has supplied a key
+        has already said everything needed, and a second switch would only create the
+        state where the key is present and ignored.
+        """
+        return (
+            self.google_service_account is not None
+            or self.google_service_account_file is not None
+        )
 
     def folder_by_id(self, folder_id: str) -> EmployeeFolder | None:
         """Return the folder with ``folder_id``, or None when it isn't configured."""
@@ -196,6 +317,13 @@ class Config:
             if folder.folder_id == folder_id:
                 return folder
         return None
+
+    def since_for(self, folder_id: str) -> str:
+        """The cutoff that applies to one folder: its own, else the global default."""
+        folder = self.folder_by_id(folder_id)
+        if folder is not None and folder.since:
+            return folder.since
+        return self.run_since
 
     @property
     def call_bookings_file(self) -> Path:
@@ -237,11 +365,18 @@ def _parse_config_yaml(text: str) -> object:
     return yaml.load(text, Loader=UniqueKeyLoader)
 
 
-def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
+def _parse_folders(raw: object, *, delegated: bool = False) -> tuple[EmployeeFolder, ...]:
     """Parse the ``folders:`` block into ``EmployeeFolder`` entries.
 
-    Each entry must be a mapping carrying a non-empty, unique ``folder_id``; ``name``
-    and ``email`` are optional and default to empty strings.
+    An entry is a mapping; ``name``, ``email`` and ``telegram`` are optional and
+    default to empty strings.
+
+    ``folder_id`` is required unless a service account is configured (``delegated``),
+    in which case an entry may instead carry just an ``email``: the folder is then
+    resolved at run time by impersonating that employee, which is the only way to
+    survive Meet abandoning a shared recordings root (see
+    ``docs/meet-recordings-folder.md``). Such an entry keeps an empty ``folder_id``
+    until it is resolved.
     """
     if raw is None:
         return ()
@@ -258,9 +393,26 @@ def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
                 f"got: {entry!r}"
             )
         folder_id = _yaml_str(entry.get("folder_id"))
+        email = _yaml_str(entry.get("email"))
         if not folder_id:
-            raise ValueError(f"folders[{index}] must define a non-empty folder_id")
-        if any(folder.folder_id == folder_id for folder in folders):
+            if not delegated:
+                raise ValueError(f"folders[{index}] must define a non-empty folder_id")
+            if not email:
+                raise ValueError(
+                    f"folders[{index}] must define either a folder_id or an email; "
+                    "with a service account an email is enough, and the folder is "
+                    "found by impersonating that employee"
+                )
+            if any(
+                not folder.folder_id and folder.email == email for folder in folders
+            ):
+                # Both entries resolve to the same folder, and folder_by_id would
+                # attribute every file in it to whichever was listed first.
+                raise ValueError(
+                    f"folders[{index}] repeats email {email!r}; "
+                    "each employee must be listed once"
+                )
+        elif any(folder.folder_id == folder_id for folder in folders):
             # Otherwise the folder is polled once per entry and folder_by_id silently
             # attributes every file in it to whichever employee was listed first.
             raise ValueError(
@@ -271,10 +423,52 @@ def _parse_folders(raw: object) -> tuple[EmployeeFolder, ...]:
             EmployeeFolder(
                 folder_id=folder_id,
                 name=_yaml_str(entry.get("name")),
-                email=_yaml_str(entry.get("email")),
+                email=email,
+                telegram=_chat_ids(entry.get("telegram"), f"folders[{index}].telegram"),
+                telegram_calendly=_chat_ids(
+                    entry.get("telegram_calendly"), f"folders[{index}].telegram_calendly"
+                ),
+                since=_since_text(
+                    entry.get("since"), source=f"folders[{index}].since"
+                ),
             )
         )
     return tuple(folders)
+
+
+# Drive caps an appProperty's key plus value at 124 bytes, and the chats a summary
+# reached are recorded in one (``drive.TELEGRAM_SENT_CHAT_ID_PROPERTY``, comma-joined).
+# A folder whose chats do not fit would have its marker rejected after every send,
+# and each later cycle would post the same summary again.
+_SENT_CHATS_MAX_LENGTH = 124 - len("telegram_sent_chat_id")
+
+
+def _chat_ids(raw: object, source: str) -> tuple[str, ...]:
+    """Read one chat id or several; blanks and repeats are dropped, order is kept.
+
+    Several chats may be a YAML list or one comma-separated string -- no chat id,
+    numeric or ``@name``, can contain a comma, so splitting on it never cuts one in
+    two. A single value stays valid because that is how every existing config spells
+    it. YAML reads an unquoted ``-100123`` as a number, so each id goes through
+    ``_yaml_str`` rather than being required to be a string.
+    """
+    if raw is None:
+        return ()
+    values = raw if isinstance(raw, (list, tuple)) else [raw]
+    chats: list[str] = []
+    for value in values:
+        if isinstance(value, (dict, list, tuple)):
+            raise ValueError(f"{source} must be a chat id or a list of chat ids, got: {raw!r}")
+        for chat in _yaml_str(value).split(","):
+            chat = chat.strip()
+            if chat and chat not in chats:
+                chats.append(chat)
+    return tuple(chats)
+
+
+def _folder_chats(folder: EmployeeFolder) -> tuple[str, ...]:
+    """Every chat a folder's summaries may go to, each once."""
+    return tuple(dict.fromkeys(folder.telegram + folder.telegram_calendly))
 
 
 def _parse_name_rules(raw: object) -> tuple[NameRule, ...]:
@@ -340,12 +534,48 @@ def _validate_call_booking(
         )
     if not disable_recognition:
         return
-    emailless = [f.folder_id for f in folders if not f.email.strip()]
+    # A folder with a ``telegram`` chat is exempt: it never needs to match a booking,
+    # because its recordings are recognized unconditionally and delivered to the chat.
+    emailless = [
+        f.folder_id
+        for f in folders
+        if not f.email.strip() and not f.telegram
+    ]
     if emailless:
         raise ValueError(
             "call_booking.disable_recognition is true, so every folder must have an "
-            "email to match bookings against; these do not: "
-            + ", ".join(emailless)
+            "email to match bookings against (or a telegram chat to deliver to); "
+            "these have neither: " + ", ".join(emailless)
+        )
+
+
+def _validate_folder_telegram(
+    folders: tuple[EmployeeFolder, ...], bot_token: str
+) -> None:
+    """Reject folder chats that no bot could ever post to.
+
+    Without a token ``notify.send_message`` returns quietly, so an operator who set a
+    chat id would see recordings transcribed at full cost and no message anywhere.
+    """
+    crowded = [
+        f.folder_id or f.email
+        for f in folders
+        if len(",".join(_folder_chats(f))) > _SENT_CHATS_MAX_LENGTH
+    ]
+    if crowded:
+        raise ValueError(
+            "these folders list more Telegram chats than the delivery marker can "
+            f"record ({_SENT_CHATS_MAX_LENGTH} characters of ids, comma-joined); "
+            "every summary would be re-sent each cycle: " + ", ".join(crowded)
+        )
+    if bot_token.strip():
+        return
+    tokenless = [f.folder_id or f.email for f in folders if _folder_chats(f)]
+    if tokenless:
+        raise ValueError(
+            "these folders set telegram or telegram_calendly but "
+            "notifications.telegram.bot_token is empty, so nothing can be "
+            "delivered: " + ", ".join(tokenless)
         )
 
 
@@ -582,6 +812,72 @@ def _resolve_relative_to(raw: str, base: Path) -> Path:
     return base / path
 
 
+def _parse_meet_folder_names(raw: object) -> tuple[str, ...]:
+    """Read ``meet.folder_names``, or the single name Meet uses today.
+
+    An empty list is refused rather than accepted as "match nothing": it would
+    resolve every delegated employee to no folder at all, and the cycle would keep
+    reporting success while transcribing nothing -- the exact failure this whole area
+    exists to remove.
+    """
+    meet = _as_mapping(raw, "meet")
+    value = meet.get("folder_names")
+    if value is None:
+        return ("Google Meet",)
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise ValueError(f"meet.folder_names must be a list of names, got: {value!r}")
+    names = tuple(name for name in (_yaml_str(item) for item in value) if name)
+    if not names:
+        raise ValueError("meet.folder_names must name at least one folder")
+    return names
+
+
+def _parse_meet_wait(raw: object) -> tuple[int, int]:
+    """Read ``meet.wait_hours`` and ``meet.first_look_hours``."""
+    meet = _as_mapping(raw, "meet")
+    return (
+        _parse_positive_int(meet.get("wait_hours"), default=24, name="meet.wait_hours"),
+        _parse_positive_int(
+            meet.get("first_look_hours"), default=168, name="meet.first_look_hours"
+        ),
+    )
+
+
+def _parse_meet_fallback(raw: object) -> str:
+    meet = _as_mapping(raw, "meet")
+    value = (_yaml_str(meet.get("fallback"), "walk") or "walk").lower()
+    if value not in MEET_FALLBACKS:
+        raise ValueError(
+            f"meet.fallback must be one of {MEET_FALLBACKS!r}, got: {value!r}"
+        )
+    return value
+
+
+def _resolve_service_account(
+    google: dict,
+    base: Path | None,
+) -> tuple[dict | None, Path | None]:
+    """Resolve ``google.service_account`` / ``service_account_file``.
+
+    Same inline-first shape as the OAuth pair, and the same refusal to accept both:
+    a key that is read from one place while an operator edits the other is the kind
+    of ambiguity that only surfaces as an authorization failure in production.
+    """
+    inline = google.get("service_account")
+    if inline is not None and not isinstance(inline, dict):
+        raise ValueError("google.service_account must be a mapping in " + CONFIG_FILE_NAME)
+    path_raw = _yaml_str(google.get("service_account_file"))
+    if inline is not None and path_raw:
+        raise ValueError(
+            "google.service_account and google.service_account_file are both set; "
+            "use an inline key or a file, not both."
+        )
+    if not path_raw:
+        return inline, None
+    path = _resolve_relative_to(path_raw, base) if base is not None else Path(path_raw)
+    return None, path
+
+
 def _resolve_google_auth(
     google: dict,
     base: Path | None,
@@ -806,6 +1102,8 @@ def _config_from_yaml(
     config_presets = _as_mapping(raw.get("presets"), "presets")
 
     run_enabled = _yaml_bool(run.get("enabled"), default=True)
+    run_discovery = (_yaml_str(run.get("discovery"), "auto") or "auto").lower()
+    run_since = _since_text(run.get("since"), source="run.since")
 
     telegram_bot_token = _yaml_str(telegram.get("bot_token"))
     telegram_chat_id = _yaml_str(telegram.get("chat_id"))
@@ -852,6 +1150,9 @@ def _config_from_yaml(
     planfix_presets = _parse_planfix_presets(planfix.get("presets"))
     planfix_meta_fields = _parse_planfix_meta_fields(planfix.get("meta_fields"))
     planfix_task_url = _yaml_str(planfix.get("task_url"))
+    planfix_ignore_telegram_when_planfix = _yaml_bool(
+        planfix.get("ignore_telegram_when_planfix"), default=False
+    )
 
     (
         google_credentials,
@@ -859,18 +1160,32 @@ def _config_from_yaml(
         google_credentials_file,
         google_token_file,
     ) = _resolve_google_auth(google, base)
+    google_service_account, google_service_account_file = _resolve_service_account(
+        google, base
+    )
+    meet_folder_names = _parse_meet_folder_names(raw.get("meet"))
+    meet_wait_hours, meet_first_look_hours = _parse_meet_wait(raw.get("meet"))
+    meet_fallback = _parse_meet_fallback(raw.get("meet"))
+    meet_skip_empty_calls = _yaml_bool(
+        _as_mapping(raw.get("meet"), "meet").get("skip_empty_calls"), default=True
+    )
 
     # Clean break: a config still on the old flat list must be rewritten by hand so
     # each folder gains its employee, rather than silently polling nameless folders.
     if "folder_ids" in raw:
         raise ValueError(FOLDER_IDS_MIGRATION_ERROR)
-    folders = _parse_folders(raw.get("folders"))
+    folders = _parse_folders(
+        raw.get("folders"),
+        delegated=google_service_account is not None
+        or google_service_account_file is not None,
+    )
     _validate_call_booking(
         enabled=call_booking_enabled,
         token=call_booking_token,
         disable_recognition=call_booking_disable_recognition,
         folders=folders,
     )
+    _validate_folder_telegram(folders, telegram_bot_token)
 
     poll_raw = raw.get("poll_interval", 600)
     try:
@@ -962,6 +1277,35 @@ def _config_from_yaml(
         )
     stt_presets = _parse_stt_presets(output.get("stt_presets"))
 
+    if run_discovery not in DISCOVERY_MODES:
+        raise ValueError(
+            f"run.discovery must be one of {DISCOVERY_MODES!r}, got: {run_discovery!r}"
+        )
+    if (
+        google_service_account is not None or google_service_account_file is not None
+    ) and "discovery" in run and run_discovery == "auto":
+        # The cursor is a position in one account's journal, and delegation reads
+        # every folder as a different account. Asking for the feed here would be
+        # answered by a walk anyway, so say so instead of quietly disagreeing. Only
+        # an explicit `auto` is refused: a config that never mentions discovery is
+        # simply walked.
+        raise ValueError(
+            "run.discovery: auto cannot be used with google.service_account: the "
+            "changes feed belongs to a single account, while delegation reads each "
+            "folder as its owner. Use 'walk', or drop the key and let it default."
+        )
+    if run_discovery == "meet" and not (
+        google_service_account is not None or google_service_account_file is not None
+    ):
+        # The Meet API answers for the account that asks, so there is no shared way
+        # to read an employee's conferences. Without a key this mode would return
+        # nothing at all, which looks exactly like a quiet week.
+        raise ValueError(
+            "run.discovery: meet needs google.service_account (or "
+            "google.service_account_file): the Meet API answers only for the account "
+            "that asks, so each employee's conferences are read as that employee."
+        )
+
     if validate_providers:
         if presets and not openai_api_key:
             raise ValueError(
@@ -1012,6 +1356,8 @@ def _config_from_yaml(
         stt_postprocess=stt_postprocess,
         drive_mp3_artifact=drive_mp3_artifact,
         run_enabled=run_enabled,
+        run_discovery=run_discovery,
+        run_since=run_since,
         output_target=output_target,
         output_dir=output_dir,
         output_also_drive=output_also_drive,
@@ -1048,11 +1394,19 @@ def _config_from_yaml(
         planfix_presets=planfix_presets,
         planfix_meta_fields=planfix_meta_fields,
         planfix_task_url=planfix_task_url,
+        planfix_ignore_telegram_when_planfix=planfix_ignore_telegram_when_planfix,
         presets=presets,
         google_credentials=google_credentials,
         google_token=google_token,
         google_credentials_file=google_credentials_file,
         google_token_file=google_token_file,
+        google_service_account=google_service_account,
+        google_service_account_file=google_service_account_file,
+        meet_folder_names=meet_folder_names,
+        meet_wait_hours=meet_wait_hours,
+        meet_first_look_hours=meet_first_look_hours,
+        meet_fallback=meet_fallback,
+        meet_skip_empty_calls=meet_skip_empty_calls,
         config_file=config_file,
     )
 
@@ -1222,7 +1576,7 @@ def _default_config_dict(
             "batch": True,
             "max_parallel": 4,
         },
-        "run": {"enabled": True},
+        "run": {"enabled": True, "discovery": "auto", "since": ""},
         "notifications": {
             "telegram": {
                 "bot_token": "",
@@ -1370,6 +1724,9 @@ def _default_config_dict(
             ],
             # e.g. https://<account>.planfix.com/task/<task-id>
             "task_url": "",
+            # true = a call that reached Planfix is not also posted to the folder's
+            # telegram chat.
+            "ignore_telegram_when_planfix": False,
         },
         # Google auth is inline-first and config-owned. The generated config ships an
         # empty block (no *_file pointers) so the data_dir fallback applies until the
@@ -1447,6 +1804,12 @@ def _google_to_yaml_dict(config: Config, config_file: Path | None) -> dict:
         block["token"] = config.google_token
     elif config.google_token_file is not None:
         block["token_file"] = _relpath_for_config(config.google_token_file, config_file)
+    if config.google_service_account is not None:
+        block["service_account"] = config.google_service_account
+    elif config.google_service_account_file is not None:
+        block["service_account_file"] = _relpath_for_config(
+            config.google_service_account_file, config_file
+        )
     return block
 
 
@@ -1465,6 +1828,13 @@ def _entity_to_dict(entity: meta_entity.MetaEntity) -> dict[str, object]:
     return data
 
 
+def _chat_ids_to_yaml(chats: tuple[str, ...]) -> str | list[str]:
+    """One chat is written back as the scalar it was most likely read from."""
+    if len(chats) == 1:
+        return chats[0]
+    return list(chats) if chats else ""
+
+
 def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dict:
     """Serialize a Config into the grouped `config.yml` schema.
 
@@ -1475,7 +1845,14 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
     """
     return {
         "folders": [
-            {"folder_id": folder.folder_id, "name": folder.name, "email": folder.email}
+            {
+                "folder_id": folder.folder_id,
+                "name": folder.name,
+                "email": folder.email,
+                "telegram": _chat_ids_to_yaml(folder.telegram),
+                "telegram_calendly": _chat_ids_to_yaml(folder.telegram_calendly),
+                "since": folder.since,
+            }
             for folder in config.folders
         ],
         "poll_interval": config.poll_interval,
@@ -1525,7 +1902,11 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "max_parallel": config.openai_max_parallel,
             "keypoints": config.openai_keypoints,
         },
-        "run": {"enabled": config.run_enabled},
+        "run": {
+            "enabled": config.run_enabled,
+            "discovery": config.run_discovery,
+            "since": config.run_since,
+        },
         "notifications": {
             "telegram": {
                 "bot_token": config.telegram_bot_token,
@@ -1554,6 +1935,14 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "presets": list(config.planfix_presets),
             "meta_fields": list(config.planfix_meta_fields),
             "task_url": config.planfix_task_url,
+            "ignore_telegram_when_planfix": config.planfix_ignore_telegram_when_planfix,
+        },
+        "meet": {
+            "folder_names": list(config.meet_folder_names),
+            "wait_hours": config.meet_wait_hours,
+            "first_look_hours": config.meet_first_look_hours,
+            "fallback": config.meet_fallback,
+            "skip_empty_calls": config.meet_skip_empty_calls,
         },
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
@@ -1727,6 +2116,10 @@ MASKED_LEAF_KEYS: frozenset[str] = frozenset(
         "api_key",
         "bot_token",
         "authorization_token",
+        # A service account key: whoever holds it can read every Drive the domain
+        # authorized it for, so it must never reach terminal scrollback or CI logs.
+        "private_key",
+        "private_key_id",
     }
 )
 MASK = "***"

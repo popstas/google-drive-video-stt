@@ -35,6 +35,7 @@ CODE_FIELDS = (
     "planfix_task_url",
     "video_id",
     "video_url",
+    "folder_url",
     "source_name",
     "stt_model",
     "llm_model",

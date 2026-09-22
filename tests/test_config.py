@@ -3,6 +3,8 @@ import logging
 import os
 from pathlib import Path
 
+import datetime
+
 import pytest
 import yaml
 
@@ -2095,6 +2097,224 @@ def test_yaml_google_back_compat_data_dir_fallback(tmp_path):
     assert cfg.google_token_file is None
 
 
+# --- delegation: a service account, and folders that carry only an e-mail ----
+
+
+_SERVICE_ACCOUNT = {
+    "type": "service_account",
+    "client_email": "reader@project.iam.gserviceaccount.com",
+    "client_id": "123456789",
+    "private_key": "-----BEGIN PRIVATE KEY----- x -----END PRIVATE KEY-----",
+}
+
+
+def _delegated_config(folders, **google):
+    return {
+        "stt": {"provider": "disabled"},
+        "presets": _disabled_builtins(),
+        "folders": folders,
+        "google": google,
+    }
+
+
+def test_yaml_google_inline_service_account(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _delegated_config(
+            [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+        ),
+    )
+
+    assert cfg.google_service_account == _SERVICE_ACCOUNT
+    assert cfg.google_service_account_file is None
+    assert cfg.uses_delegation is True
+
+
+def test_yaml_google_service_account_file_resolves_relative(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _delegated_config(
+            [{"email": "one@example.com"}], service_account_file="secrets/sa.json"
+        ),
+    )
+
+    assert cfg.google_service_account is None
+    assert cfg.google_service_account_file == tmp_path / "secrets" / "sa.json"
+    assert cfg.uses_delegation is True
+
+
+def test_yaml_google_service_account_both_inline_and_file_fails(tmp_path):
+    with pytest.raises(ValueError, match="both set"):
+        _load_config(
+            tmp_path,
+            _delegated_config(
+                [{"email": "one@example.com"}],
+                service_account=_SERVICE_ACCOUNT,
+                service_account_file="sa.json",
+            ),
+        )
+
+
+def test_without_a_service_account_nothing_is_delegated(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        {
+            "stt": {"provider": "disabled"},
+            "presets": _disabled_builtins(),
+            "folders": [{"folder_id": "f1", "email": "one@example.com"}],
+        },
+    )
+
+    assert cfg.uses_delegation is False
+    assert cfg.google_service_account is None
+
+
+def test_a_folder_may_carry_only_an_email_when_delegating(tmp_path):
+    """The whole point: onboarding is one address, and the folder is found later."""
+    cfg = _load_config(
+        tmp_path,
+        _delegated_config(
+            [{"email": "one@example.com"}, {"email": "two@example.com", "name": "Two"}],
+            service_account=_SERVICE_ACCOUNT,
+        ),
+    )
+
+    assert [(f.folder_id, f.email, f.name) for f in cfg.folders] == [
+        ("", "one@example.com", ""),
+        ("", "two@example.com", "Two"),
+    ]
+
+
+def test_a_folder_without_an_id_needs_a_service_account(tmp_path):
+    """Without delegation there is no way to find the folder, so this must not load."""
+    with pytest.raises(ValueError, match="folder_id"):
+        _load_config(
+            tmp_path,
+            {
+                "stt": {"provider": "disabled"},
+                "presets": _disabled_builtins(),
+                "folders": [{"email": "one@example.com"}],
+            },
+        )
+
+
+def test_a_delegated_folder_without_an_id_needs_an_email(tmp_path):
+    with pytest.raises(ValueError, match="email"):
+        _load_config(
+            tmp_path,
+            _delegated_config([{"name": "No address"}], service_account=_SERVICE_ACCOUNT),
+        )
+
+
+def test_two_delegated_folders_may_not_repeat_an_email(tmp_path):
+    """Both would resolve to the same folder, and every file in it to one of them."""
+    with pytest.raises(ValueError, match="repeats"):
+        _load_config(
+            tmp_path,
+            _delegated_config(
+                [{"email": "one@example.com"}, {"email": "one@example.com"}],
+                service_account=_SERVICE_ACCOUNT,
+            ),
+        )
+
+
+def test_the_same_email_may_still_hold_two_pinned_folders(tmp_path):
+    """A pinned id says which folder is meant, so the address may repeat."""
+    cfg = _load_config(
+        tmp_path,
+        _delegated_config(
+            [
+                {"folder_id": "f1", "email": "one@example.com"},
+                {"folder_id": "f2", "email": "one@example.com"},
+            ],
+            service_account=_SERVICE_ACCOUNT,
+        ),
+    )
+
+    assert [f.folder_id for f in cfg.folders] == ["f1", "f2"]
+
+
+def test_meet_folder_names_default_to_the_one_meet_uses(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _delegated_config(
+            [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+        ),
+    )
+
+    assert cfg.meet_folder_names == ("Google Meet",)
+
+
+def test_meet_folder_names_can_be_overridden(tmp_path):
+    data = _delegated_config(
+        [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+    )
+    data["meet"] = {"folder_names": ["Записи Meet", "Google Meet"]}
+
+    cfg = _load_config(tmp_path, data)
+
+    assert cfg.meet_folder_names == ("Записи Meet", "Google Meet")
+
+
+def test_an_empty_meet_folder_names_list_is_rejected(tmp_path):
+    """An empty list would resolve every employee to nothing, silently."""
+    data = _delegated_config(
+        [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+    )
+    data["meet"] = {"folder_names": []}
+
+    with pytest.raises(ValueError, match="meet.folder_names"):
+        _load_config(tmp_path, data)
+
+
+def test_asking_for_the_changes_feed_while_delegating_is_refused(tmp_path):
+    """The feed is one account's journal; delegation reads each folder as its owner."""
+    data = _delegated_config(
+        [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+    )
+    data["run"] = {"enabled": True, "discovery": "auto"}
+
+    with pytest.raises(ValueError, match="run.discovery: auto"):
+        _load_config(tmp_path, data)
+
+
+def test_a_delegated_config_that_never_mentions_discovery_loads(tmp_path):
+    """"Just an address" must stay a working config, and it walks."""
+    cfg = _load_config(
+        tmp_path,
+        _delegated_config(
+            [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+        ),
+    )
+
+    assert cfg.run_discovery == "auto"
+    assert cfg.uses_delegation is True
+
+
+def test_walking_while_delegating_is_fine(tmp_path):
+    data = _delegated_config(
+        [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+    )
+    data["run"] = {"enabled": True, "discovery": "walk"}
+
+    assert _load_config(tmp_path, data).run_discovery == "walk"
+
+
+def test_a_service_account_key_is_masked_in_a_config_dump(tmp_path):
+    """`config get` prints the whole config; a private key must not be in it."""
+    config_file = write_config(
+        tmp_path,
+        _delegated_config(
+            [{"email": "one@example.com"}], service_account=_SERVICE_ACCOUNT
+        ),
+    )
+
+    dumped = config_get(None, config_path=config_file)
+
+    assert "BEGIN PRIVATE KEY" not in dumped
+    assert "reader@project.iam.gserviceaccount.com" in dumped
+
+
 def test_yaml_google_credentials_both_inline_and_file_fails(tmp_path):
     config_file = tmp_path / "config.yml"
     _write_yaml(
@@ -2578,6 +2798,7 @@ def test_generated_config_ships_the_new_sections(tmp_path):
             "duration", "video_url",
         ],
         "task_url": "",
+        "ignore_telegram_when_planfix": False,
     }
 
 
@@ -2826,3 +3047,460 @@ def test_preset_reasoning_effort_round_trips(tmp_path):
 
     by_name = {preset.name: preset for preset in reloaded.presets}
     assert by_name["keypoints"].reasoning_effort == "high"
+
+
+# --- folders[].telegram ---------------------------------------------------------
+
+
+TELEGRAM_BASE = {
+    **CALL_BOOKING_BASE,
+    "notifications": {"telegram": {"bot_token": "bot-token", "chat_id": "42"}},
+}
+
+
+def test_folder_telegram_defaults_to_empty(tmp_path):
+    config = load_config(config_path=write_config(tmp_path, CALL_BOOKING_BASE))
+
+    assert config.folders[0].telegram == ()
+
+
+def test_folder_telegram_is_parsed(tmp_path):
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [
+            {
+                "folder_id": "f1",
+                "name": "Ekaterina",
+                "email": "kate@example.com",
+                "telegram": "-1001234567890",
+            }
+        ],
+    }
+
+    config = load_config(config_path=write_config(tmp_path, raw))
+
+    assert config.folders[0].telegram == ("-1001234567890",)
+
+
+def test_folder_telegram_without_a_bot_token_is_rejected(tmp_path):
+    """`notify.send_message` returns quietly with no token, so the recordings would be
+    transcribed at full cost and the chat would stay empty."""
+    raw = {
+        **CALL_BOOKING_BASE,
+        "folders": [
+            {"folder_id": "f1", "name": "Ekaterina", "telegram": "-100123"},
+        ],
+    }
+
+    with pytest.raises(ValueError, match="bot_token"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_disable_recognition_allows_an_emailless_telegram_folder(tmp_path):
+    """A folder with a chat never needs to match a booking: it is recognized
+    unconditionally and delivered to the chat."""
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [
+            {"folder_id": "f1", "name": "Ekaterina", "email": "kate@example.com"},
+            {"folder_id": "f2", "name": "Sales", "telegram": "-100123"},
+        ],
+        "call_booking": {
+            "enabled": True,
+            "authorization_token": "t",
+            "disable_recognition": True,
+        },
+    }
+
+    config = load_config(config_path=write_config(tmp_path, raw))
+
+    assert config.folders[1].telegram == ("-100123",)
+
+
+def test_folder_telegram_survives_a_config_round_trip(tmp_path):
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [
+            {"folder_id": "f1", "name": "Ekaterina", "telegram": "-100123"},
+        ],
+    }
+    config_file = write_config(tmp_path, raw)
+    config = load_config(config_path=config_file)
+
+    dumped = _config_to_yaml_dict(config, config_file)
+
+    assert dumped["folders"][0]["telegram"] == "-100123"
+
+
+def test_folder_telegram_accepts_a_list_of_chats(tmp_path):
+    """YAML reads an unquoted `-100123` as a number; it must come back as the id."""
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [
+            {"folder_id": "f1", "telegram": [-100123, "@team", "", "@team"]},
+        ],
+    }
+
+    config = load_config(config_path=write_config(tmp_path, raw))
+
+    assert config.folders[0].telegram == ("-100123", "@team")
+
+
+def test_folder_chats_accept_a_comma_separated_string(tmp_path):
+    """Read as one chat, it would send nowhere and be marked delivered. No chat id
+    contains a comma, so the string is split instead."""
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [
+            {
+                "folder_id": "f1",
+                "email": "a@example.com",
+                "telegram": "241225329, 241225322",
+                "telegram_calendly": "-100123,@team, ,-100123",
+            }
+        ],
+    }
+
+    config = load_config(config_path=write_config(tmp_path, raw))
+
+    assert config.folders[0].telegram == ("241225329", "241225322")
+    assert config.folders[0].telegram_calendly == ("-100123", "@team")
+
+
+def test_folder_telegram_calendly_defaults_to_empty(tmp_path):
+    config = load_config(config_path=write_config(tmp_path, CALL_BOOKING_BASE))
+
+    assert config.folders[0].telegram_calendly == ()
+
+
+def test_folder_telegram_calendly_accepts_one_chat_or_a_list(tmp_path):
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [
+            {"folder_id": "f1", "email": "a@example.com", "telegram_calendly": "-100123"},
+            {"folder_id": "f2", "email": "b@example.com", "telegram_calendly": ["-1", "-2"]},
+        ],
+    }
+
+    config = load_config(config_path=write_config(tmp_path, raw))
+
+    assert config.folders[0].telegram_calendly == ("-100123",)
+    assert config.folders[1].telegram_calendly == ("-1", "-2")
+    assert config.folders[0].telegram == ()
+
+
+def test_folder_telegram_calendly_without_a_bot_token_is_rejected(tmp_path):
+    raw = {
+        **CALL_BOOKING_BASE,
+        "folders": [{"folder_id": "f1", "telegram_calendly": "-100123"}],
+    }
+
+    with pytest.raises(ValueError, match="bot_token"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_disable_recognition_does_not_exempt_a_calendly_only_folder(tmp_path):
+    """A calendly chat wants booked calls only, so it is no reason to transcribe a
+    folder that can never match a booking."""
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [{"folder_id": "f1", "telegram_calendly": "-100123"}],
+        "call_booking": {
+            "enabled": True,
+            "authorization_token": "t",
+            "disable_recognition": True,
+        },
+    }
+
+    with pytest.raises(ValueError, match="disable_recognition"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_folder_chats_that_overflow_the_delivery_marker_are_rejected(tmp_path):
+    """The chats a summary reached are recorded in one Drive appProperty; one that
+    does not fit is refused by Drive, and every cycle would re-send the summary."""
+    chats = [f"-100{index:010d}" for index in range(8)]
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [{"folder_id": "f1", "telegram": chats[:4], "telegram_calendly": chats[4:]}],
+    }
+
+    with pytest.raises(ValueError, match="delivery marker"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_folder_chat_lists_survive_a_config_round_trip(tmp_path):
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [
+            {"folder_id": "f1", "telegram": ["-1", "-2"], "telegram_calendly": "-3"},
+        ],
+    }
+    config_file = write_config(tmp_path, raw)
+    config = load_config(config_path=config_file)
+
+    dumped = _config_to_yaml_dict(config, config_file)
+
+    assert dumped["folders"][0]["telegram"] == ["-1", "-2"]
+    assert dumped["folders"][0]["telegram_calendly"] == "-3"
+
+
+def test_ignore_telegram_when_planfix_defaults_to_off(tmp_path):
+    config = load_config(config_path=write_config(tmp_path, CALL_BOOKING_BASE))
+
+    assert config.planfix_ignore_telegram_when_planfix is False
+
+
+def test_ignore_telegram_when_planfix_is_parsed(tmp_path):
+    raw = {**CALL_BOOKING_BASE, "planfix": {"ignore_telegram_when_planfix": True}}
+
+    config = load_config(config_path=write_config(tmp_path, raw))
+
+    assert config.planfix_ignore_telegram_when_planfix is True
+
+
+# --- run.discovery (the switch that turns the changes feed off) ---------------
+
+
+def test_run_discovery_defaults_to_auto(tmp_path):
+    config_file = tmp_path / "config.yml"
+    init_config(config_path=config_file)
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.run_discovery == "auto"
+    assert _config_to_yaml_dict(cfg, config_file)["run"]["discovery"] == "auto"
+
+
+def test_run_discovery_accepts_walk(tmp_path):
+    """The fallback that makes the feed optional: one assumption behind it -- that
+    it reports folders shared *to* the service, not only ones it owns -- has not
+    been proven on a real deployment yet."""
+    config_file = write_config(
+        tmp_path,
+        {"folders": [{"folder_id": "f1"}], "run": {"discovery": "WALK"}},
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.run_discovery == "walk"
+
+
+def test_an_unknown_run_discovery_is_rejected(tmp_path):
+    """`changes` is deliberately not offered here: a service that refuses to fall
+    back would stop finding recordings the moment a cursor went stale."""
+    config_file = write_config(
+        tmp_path,
+        {"folders": [{"folder_id": "f1"}], "run": {"discovery": "changes"}},
+    )
+
+    with pytest.raises(ValueError, match="run.discovery"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
+# --- since (leaving a shared folder's backlog out of scope) -------------------
+
+
+def test_a_bare_yaml_date_is_read_as_midnight_utc(tmp_path):
+    """YAML hands back a `date` object for an unquoted `2026-09-12`, not a string.
+    Everything it gets compared against -- the meeting time out of a recording's
+    name, Drive's createdTime -- is UTC, so that is what it has to become."""
+    config_file = write_config(
+        tmp_path,
+        {"folders": [{"folder_id": "f1"}], "run": {"since": datetime.date(2026, 9, 12)}},
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.run_since == "2026-09-12T00:00:00+00:00"
+
+
+def test_a_quoted_timestamp_keeps_its_offset(tmp_path):
+    config_file = write_config(
+        tmp_path,
+        {
+            "folders": [{"folder_id": "f1"}],
+            "run": {"since": "2026-09-12T10:00:00+02:00"},
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.run_since == "2026-09-12T08:00:00+00:00"
+
+
+def test_an_unreadable_since_is_rejected_at_load(tmp_path):
+    """Silently ignoring it would be discovered as a Deepgram bill for somebody's
+    entire backlog."""
+    config_file = write_config(
+        tmp_path,
+        {"folders": [{"folder_id": "f1"}], "run": {"since": "last tuesday"}},
+    )
+
+    with pytest.raises(ValueError, match="run.since"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
+def test_an_unreadable_folder_since_names_the_folder(tmp_path):
+    config_file = write_config(
+        tmp_path,
+        {"folders": [{"folder_id": "f1", "since": "soon"}]},
+    )
+
+    with pytest.raises(ValueError, match=r"folders\[0\].since"):
+        load_config(config_path=config_file, validate_providers=False)
+
+
+def test_a_folder_without_its_own_since_uses_the_global_one(tmp_path):
+    config_file = write_config(
+        tmp_path,
+        {
+            "folders": [
+                {"folder_id": "early"},
+                {"folder_id": "late", "since": "2026-12-01"},
+            ],
+            "run": {"since": "2026-09-01"},
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.since_for("early") == "2026-09-01T00:00:00+00:00"
+    assert cfg.since_for("late") == "2026-12-01T00:00:00+00:00"
+    # A folder nobody configured still answers, so callers need no special case.
+    assert cfg.since_for("unknown") == "2026-09-01T00:00:00+00:00"
+
+
+def test_since_round_trips_through_the_written_config(tmp_path):
+    config_file = write_config(
+        tmp_path,
+        {
+            "folders": [{"folder_id": "f1", "since": "2026-09-12"}],
+            "run": {"since": "2026-09-01"},
+        },
+    )
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    written = _config_to_yaml_dict(cfg, config_file)
+    assert written["run"]["since"] == "2026-09-01T00:00:00+00:00"
+    assert written["folders"][0]["since"] == "2026-09-12T00:00:00+00:00"
+
+
+def test_no_since_anywhere_means_every_recording_is_in_scope(tmp_path):
+    config_file = tmp_path / "config.yml"
+    init_config(config_path=config_file)
+
+    cfg = load_config(config_path=config_file, validate_providers=False)
+    assert cfg.run_since == ""
+    assert cfg.since_for("anything") == ""
+
+
+# --- meet discovery: the settings the mode needs -------------------------------
+
+
+def _meet_config(folders, meet=None, run=None):
+    body = _delegated_config(folders, service_account=_SERVICE_ACCOUNT)
+    if meet is not None:
+        body["meet"] = meet
+    if run is not None:
+        body["run"] = run
+    return body
+
+
+def test_meet_settings_have_defaults_that_never_read_the_archive(tmp_path):
+    cfg = _load_config(tmp_path, _meet_config([{"email": "one@example.com"}]))
+
+    assert cfg.meet_wait_hours == 24
+    assert cfg.meet_first_look_hours == 168
+    assert cfg.meet_fallback == "walk"
+
+
+def test_meet_settings_can_be_set(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _meet_config(
+            [{"email": "one@example.com"}],
+            meet={"wait_hours": 6, "first_look_hours": 48, "fallback": "none"},
+        ),
+    )
+
+    assert (cfg.meet_wait_hours, cfg.meet_first_look_hours) == (6, 48)
+    assert cfg.meet_fallback == "none"
+
+
+def test_a_meet_window_of_zero_is_refused(tmp_path):
+    """Zero would mean "give up immediately", which loses every slow recording."""
+    with pytest.raises(ValueError, match="meet.wait_hours"):
+        _load_config(
+            tmp_path, _meet_config([{"email": "one@example.com"}], meet={"wait_hours": 0})
+        )
+
+
+def test_an_unknown_meet_fallback_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="meet.fallback"):
+        _load_config(
+            tmp_path,
+            _meet_config([{"email": "one@example.com"}], meet={"fallback": "shrug"}),
+        )
+
+
+def test_meet_discovery_needs_a_service_account(tmp_path):
+    """Without one the mode would find nothing at all, and look like a quiet week."""
+    with pytest.raises(ValueError, match="run.discovery: meet"):
+        _load_config(
+            tmp_path,
+            {
+                "stt": {"provider": "disabled"},
+                "presets": _disabled_builtins(),
+                "folders": [{"folder_id": "f1"}],
+                "run": {"discovery": "meet"},
+            },
+        )
+
+
+def test_meet_discovery_loads_with_delegation(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _meet_config([{"email": "one@example.com"}], run={"discovery": "meet"}),
+    )
+
+    assert cfg.run_discovery == "meet"
+
+
+def test_the_meet_block_survives_a_rewrite(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _meet_config(
+            [{"email": "one@example.com"}],
+            meet={"wait_hours": 6, "first_look_hours": 48, "fallback": "none"},
+        ),
+    )
+
+    written = _config_to_yaml_dict(cfg, tmp_path / "config.yml")
+
+    assert written["meet"]["wait_hours"] == 6
+    assert written["meet"]["first_look_hours"] == 48
+    assert written["meet"]["fallback"] == "none"
+    assert written["meet"]["folder_names"] == ["Google Meet"]
+
+
+def test_skipping_empty_calls_is_on_by_default(tmp_path):
+    cfg = _load_config(tmp_path, _meet_config([{"email": "one@example.com"}]))
+
+    assert cfg.meet_skip_empty_calls is True
+
+
+def test_skipping_empty_calls_can_be_turned_off(tmp_path):
+    """A deployment that wants every recording transcribed must be able to say so."""
+    cfg = _load_config(
+        tmp_path,
+        _meet_config([{"email": "one@example.com"}], meet={"skip_empty_calls": False}),
+    )
+
+    assert cfg.meet_skip_empty_calls is False
+
+
+def test_the_skip_switch_survives_a_rewrite(tmp_path):
+    cfg = _load_config(
+        tmp_path,
+        _meet_config([{"email": "one@example.com"}], meet={"skip_empty_calls": False}),
+    )
+
+    written = _config_to_yaml_dict(cfg, tmp_path / "config.yml")
+
+    assert written["meet"]["skip_empty_calls"] is False

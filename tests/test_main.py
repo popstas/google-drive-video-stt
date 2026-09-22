@@ -5,13 +5,14 @@ import ssl
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
-from src import main, meta_entity
+from src import change_cursor, main, meta_entity
 from src.auth import AuthError
 from src.booking_gate import BookingDecision
 from src.call_booking import CallBooking
@@ -19,9 +20,38 @@ from src.call_booking import append as append_booking
 from src.config import Config, EmployeeFolder, resolve_config_file_path
 from src.presets import BUILTIN_PRESETS, Preset
 from src.preset_pipeline import PresetResult
-from src.stt.base import STTError
+from src.stt.base import EmptyTranscriptError, STTError
 
 _KEYPOINTS_BUILTIN = next(p for p in BUILTIN_PRESETS if p.name == "keypoints")
+
+
+@pytest.fixture(autouse=True)
+def _flat_folders_and_a_scratch_cursor(mocker, tmp_path):
+    """Every folder here is flat, and the changes cursor lives in a scratch file.
+
+    `run_once` and `process <folder>` now read a folder together with its meeting
+    subfolders, a cycle now saves where the changes feed got to, and a recording may
+    have a Meet transcript beside it. These fixtures describe none of that: the folder
+    is flat, the cursor is nobody's business here, and there is no transcript.
+
+    Both halves have teeth. Left alone, the real `list_subfolders` runs against a
+    MagicMock whose `nextPageToken` is truthy and the paging loop never ends; and the
+    cursor would be written under the default `data/` directory, inside the checkout.
+    Redirecting `path_for` keeps production code and these tests agreeing on one
+    throwaway path, so a test that does care about the cursor still reads what the
+    cycle wrote.
+    """
+    mocker.patch("src.drive.list_subfolders", return_value=[])
+    mocker.patch("src.drive.get_start_page_token", return_value="tok-sweep")
+    mocker.patch("src.drive.find_meet_transcript", return_value=None)
+    mocker.patch(
+        "src.change_cursor.path_for",
+        return_value=tmp_path / "cursor" / "changes_cursor.txt",
+    )
+    mocker.patch(
+        "src.change_cursor.folders_path_for",
+        return_value=tmp_path / "cursor" / "changes_folders.txt",
+    )
 
 
 def test_the_suite_never_resolves_the_repos_real_config():
@@ -1284,11 +1314,15 @@ def test_run_once_logs_folder_and_cycle_summary(mocker, caplog):
     with caplog.at_level("INFO"):
         main.run_once(service, cfg)
 
-    assert "Folder f1 summary [total=2, pending=1, skipped_size=0, dry_run=False]" in caplog.text
+    assert (
+        "Folder f1 summary [total=2, pending=1, skipped_size=0, skipped_old=0, "
+        "dry_run=False]" in caplog.text
+    )
     assert (
         "Cycle summary [provider=deepgram, outcome=success, folders=1, pending=1, "
         "processed=1, failed=0, retry_total=0, skipped_size=0, skipped_unmatched=0, "
-        "folder_errors=0, dry_run=False, duration_s=1.250]"
+        "skipped_old=0, skipped_empty=0, skipped_nobody=0, folder_errors=0, "
+        "deferred=0, cursor_moved=True, dry_run=False, duration_s=1.250]"
     ) in caplog.text
 
 
@@ -1325,7 +1359,7 @@ def test_main_runs_loop_and_sleeps(mocker):
 
     run_calls = {"n": 0}
 
-    def fake_run_once(svc, c):
+    def fake_run_once(svc, c, **kwargs):
         run_calls["n"] += 1
         if run_calls["n"] >= 2:
             raise KeyboardInterrupt
@@ -1444,7 +1478,7 @@ def test_main_notifies_on_cycle_exception(mocker):
 
     call_count = {"n": 0}
 
-    def fake_run_once(svc, c):
+    def fake_run_once(svc, c, **kwargs):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise RuntimeError("boom")
@@ -2438,6 +2472,7 @@ def test_run_preset_stage_forces_only_selected(mocker):
         "Alice and Bob.mp4",
         "Speaker 1: hi",
         "folderA",
+        "folderA",
         Path("/tmp"),
         cfg,
         speaker_names=None,
@@ -2908,7 +2943,14 @@ def gate_config(tmp_path):
     )
 
 
-def gate_item(file_id="v1", *, booking_match="", planfix_comment_task_id=""):
+def gate_item(
+    file_id="v1",
+    *,
+    booking_match="",
+    transcript_empty="",
+    planfix_comment_task_id="",
+    telegram_sent_chat_id="",
+):
     """One `list_folder_state` item for an mp4 that still needs a transcript."""
     return {
         "file": {"id": file_id, "name": f"{file_id}.mp4", "mimeType": "video/mp4"},
@@ -2919,7 +2961,9 @@ def gate_item(file_id="v1", *, booking_match="", planfix_comment_task_id=""):
         "txt_id": None,
         "artifact_ids": {},
         "booking_match": booking_match,
+        "transcript_empty": transcript_empty,
         "planfix_comment_task_id": planfix_comment_task_id,
+        "telegram_sent_chat_id": telegram_sent_chat_id,
     }
 
 
@@ -2929,7 +2973,9 @@ def patch_folder_items(monkeypatch, items):
 
 def patch_decision(monkeypatch, decision):
     monkeypatch.setattr(
-        main.booking_gate, "resolve", lambda file_info, folder_id, config: decision
+        main.booking_gate,
+        "resolve",
+        lambda file_info, folder_id, config, **kwargs: decision,
     )
 
 
@@ -3058,6 +3104,71 @@ def test_run_once_processes_when_disable_recognition_is_off(monkeypatch, gate_co
     assert marked == []
 
 
+def test_run_once_marks_a_recording_with_no_speech_instead_of_failing(
+    monkeypatch, gate_config, caplog
+):
+    """A silent call would otherwise be downloaded, sent to Deepgram and reported as
+    an error every cycle, and hold the changes cursor for good."""
+    patch_decision(monkeypatch, MATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    process_item = MagicMock(
+        side_effect=EmptyTranscriptError("deepgram returned an empty transcript")
+    )
+    monkeypatch.setattr(main, "process_item", process_item)
+    marked = []
+    monkeypatch.setattr(
+        main.drive,
+        "set_file_app_properties",
+        lambda svc, fid, props: marked.append((fid, props)),
+    )
+    notify_error = MagicMock()
+    monkeypatch.setattr(main.notify, "notify_error", notify_error)
+
+    with caplog.at_level(logging.INFO):
+        main.run_once(MagicMock(), gate_config)
+
+    assert marked == [("v1", {"transcript_empty": "true"})]
+    notify_error.assert_not_called()
+    assert "failed=0" in caplog.text
+    assert "skipped_empty=1" in caplog.text
+
+
+def test_run_once_survives_a_drive_failure_while_marking_empty(
+    monkeypatch, gate_config, caplog
+):
+    patch_decision(monkeypatch, MATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    monkeypatch.setattr(
+        main,
+        "process_item",
+        MagicMock(side_effect=EmptyTranscriptError("empty transcript")),
+    )
+
+    def raise_http_error(svc, fid, props):
+        raise HttpError(MagicMock(status=503), b"unavailable")
+
+    monkeypatch.setattr(main.drive, "set_file_app_properties", raise_http_error)
+
+    with caplog.at_level(logging.INFO):
+        main.run_once(MagicMock(), gate_config)
+
+    assert "Failed to mark" in caplog.text
+    assert "skipped_empty=1" in caplog.text
+
+
+def test_run_once_never_revisits_a_recording_with_no_speech(monkeypatch, gate_config):
+    resolve = MagicMock()
+    monkeypatch.setattr(main.booking_gate, "resolve", resolve)
+    patch_folder_items(monkeypatch, [gate_item("v1", transcript_empty="true")])
+    process_item = MagicMock()
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), gate_config)
+
+    process_item.assert_not_called()
+    resolve.assert_not_called()
+
+
 def test_process_target_ignores_the_mark_and_the_gate(monkeypatch, gate_config):
     """Manual processing is the supported way to undo a mark."""
     monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
@@ -3116,10 +3227,18 @@ def test_run_once_matches_a_real_booking_through_the_real_gate(monkeypatch, gate
     a real ``booking_gate.resolve`` run against a journal seeded with
     ``call_booking.append``.
     """
-    # "2026/08/08 09:00 GMT+04:00" is one of the formats parse_meeting_start
-    # accepts (see src/meeting_time.py); it resolves to 2026-08-08T05:00:00Z.
-    file_name = "Call with Kate - 2026/08/08 09:00 GMT+04:00 – Recording.mp4"
-    video_start_utc = datetime(2026, 8, 8, 5, 0, tzinfo=timezone.utc)
+    # "YYYY/MM/DD HH:MM GMT+04:00" is one of the formats parse_meeting_start accepts
+    # (see src/meeting_time.py). The date is yesterday's rather than a fixed one: the
+    # journal drops bookings older than call_booking.RETENTION_DAYS, so a pinned date
+    # makes this test start failing on its own once that many days have passed.
+    video_start_utc = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+        hour=5, minute=0, second=0, microsecond=0
+    )
+    file_name = (
+        "Call with Kate - "
+        + (video_start_utc + timedelta(hours=4)).strftime("%Y/%m/%d %H:%M")
+        + " GMT+04:00 – Recording.mp4"
+    )
 
     append_booking(
         gate_config.call_bookings_file,
@@ -3860,12 +3979,15 @@ def _stt_config(tmp_path, **overrides):
     )
 
 
-def _write_documents(cfg, tmp_path, artifacts, transcript=_STT_TRANSCRIPT):
+def _write_documents(
+    cfg, tmp_path, artifacts, transcript=_STT_TRANSCRIPT, container_id="folderA"
+):
     return main._write_call_documents(
         MagicMock(),
         "fid1",
         _STT_NAME,
         "folderA",
+        container_id,
         transcript,
         artifacts,
         cfg,
@@ -3991,3 +4113,2286 @@ def test_apply_local_output_state_stt_and_meta_yml_do_not_block_a_processed_reco
 
     assert items[0]["has_txt"] is True
     assert main._pending_items(items, cfg) == []
+
+
+# --- Telegram summary -----------------------------------------------------------
+
+
+TELEGRAM_CHAT_ID = "-1001234567890"
+
+
+@pytest.fixture
+def telegram_config(gate_config):
+    """A gate config whose folder delivers summaries to a Telegram chat."""
+    return replace(
+        gate_config,
+        folders=(
+            EmployeeFolder(
+                folder_id=GATE_FOLDER_ID,
+                name="Kate",
+                email="kate@example.com",
+                telegram=(TELEGRAM_CHAT_ID,),
+            ),
+        ),
+        telegram_bot_token="bot-token",
+        planfix_presets=("keypoints",),
+    )
+
+
+def test_telegram_summary_strips_markdown_to_plain_text():
+    """Telegram is sent without a parse mode, so `##`/`**`/`[](...)` would show up
+    literally. The content must be the same as the Planfix comment's -- only the
+    markup comes off."""
+    text = main._telegram_summary(
+        {"keypoints": "## Задачи\n\n- Собрать документы"},
+        ("keypoints",),
+        {
+            "subject": "Виза O-1",
+            "duration": "00:31:42",
+            "video_url": "https://drive.google.com/file/d/X/view",
+            "source_name": "rec.mp4",
+        },
+        ("subject", "duration", "video_url"),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "**" not in text
+    assert "##" not in text
+    assert "](" not in text
+    assert "Задачи" in text
+    assert "- Собрать документы" in text
+    assert "rec.mp4: https://drive.google.com/file/d/X/view" in text
+    # Header before the preset sections, same order as the CRM comment.
+    assert text.index("Виза O-1") < text.index("Задачи")
+
+
+def test_telegram_summary_drops_checkbox_markers_from_list_items():
+    """Telegram shows `- [ ] call back` literally, so a task keeps only its dash."""
+    text = main._telegram_summary(
+        {"keypoints": "## Задачи\n\n- [ ] Собрать документы\n  - [x] Отправить счёт"},
+        ("keypoints",),
+    )
+
+    assert "[ ]" not in text
+    assert "[x]" not in text
+    assert "- Собрать документы" in text
+    assert "  - Отправить счёт" in text
+
+
+def test_telegram_summary_is_blank_when_only_the_header_would_render():
+    """Same guard as `_planfix_description`: a duration and a link are not a summary,
+    and sending one would write the `telegram_sent_chat_id` marker and permanently
+    block the real one."""
+    assert main._telegram_summary(
+        {},
+        ("keypoints",),
+        {"duration": "00:31:42"},
+        ("duration",),
+        meta_entities=meta_entity.default_entities(),
+    ) == ""
+
+
+def test_telegram_summary_is_sent_and_marked(monkeypatch, telegram_config):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    marked = MagicMock()
+    monkeypatch.setattr(main.drive, "set_file_app_properties", marked)
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, telegram_config,
+        {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+    )
+
+    send.assert_called_once()
+    assert send.call_args.kwargs["chat_id"] == TELEGRAM_CHAT_ID
+    assert send.call_args.kwargs["bot_token"] == "bot-token"
+    assert send.call_args[0][0] == "Задачи: раз"
+    marked.assert_called_once()
+    assert marked.call_args[0][2] == {"telegram_sent_chat_id": TELEGRAM_CHAT_ID}
+
+
+def test_telegram_summary_is_not_sent_for_a_folder_without_a_chat(
+    monkeypatch, gate_config
+):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, gate_config,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_not_called()
+
+
+def test_telegram_summary_is_not_sent_twice(monkeypatch, telegram_config):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+
+    main._send_telegram_summary(
+        MagicMock(),
+        gate_item("v1", telegram_sent_chat_id=TELEGRAM_CHAT_ID),
+        "v1", GATE_FOLDER_ID, telegram_config,
+        {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+    )
+
+    send.assert_not_called()
+
+
+def test_telegram_summary_logs_the_send_and_the_delivery(
+    monkeypatch, telegram_config, caplog
+):
+    """A delivered summary is the one thing the log never mentioned, which made a
+    silent log indistinguishable from a silent failure."""
+    monkeypatch.setattr(main.notify, "send_message", MagicMock(return_value=True))
+    monkeypatch.setattr(main.drive, "set_file_app_properties", MagicMock())
+
+    with caplog.at_level("INFO"):
+        main._send_telegram_summary(
+            MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, telegram_config,
+            {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+        )
+
+    assert "Sending the Telegram summary" in caplog.text
+    assert "delivered to chat" in caplog.text
+    assert TELEGRAM_CHAT_ID in caplog.text
+    assert "v1.mp4" in caplog.text
+
+
+def test_a_failed_telegram_summary_still_logs_that_it_was_tried(
+    monkeypatch, telegram_config, caplog
+):
+    """The trigger line is what separates "never tried" from "tried and failed"."""
+    monkeypatch.setattr(main.notify, "send_message", MagicMock(return_value=False))
+
+    with caplog.at_level("INFO"):
+        main._send_telegram_summary(
+            MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, telegram_config,
+            {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+        )
+
+    assert "Sending the Telegram summary" in caplog.text
+    assert "delivered to chat" not in caplog.text
+    assert "Failed to send the Telegram summary" in caplog.text
+
+
+def test_a_folder_without_a_chat_says_so_rather_than_saying_nothing(
+    monkeypatch, gate_config, caplog
+):
+    monkeypatch.setattr(main.notify, "send_message", MagicMock(return_value=True))
+
+    with caplog.at_level("DEBUG"):
+        main._send_telegram_summary(
+            MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, gate_config,
+            {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+        )
+
+    assert "no Telegram chat" in caplog.text
+
+
+def test_telegram_summary_also_goes_out_for_a_matched_recording(
+    monkeypatch, telegram_config
+):
+    """Default: the chat is an independent channel, so a call that reached Planfix
+    reaches the chat too."""
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    monkeypatch.setattr(main.drive, "set_file_app_properties", MagicMock())
+    configured = replace(
+        telegram_config,
+        planfix_create_comment_url="https://crm.example.com/planfix_create_comment",
+    )
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, configured,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_called_once()
+
+
+def test_ignore_telegram_when_planfix_keeps_a_matched_recording_out_of_the_chat(
+    monkeypatch, telegram_config
+):
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    configured = replace(
+        telegram_config,
+        planfix_create_comment_url="https://crm.example.com/planfix_create_comment",
+        planfix_ignore_telegram_when_planfix=True,
+    )
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, configured,
+        {"keypoints": "Задачи: раз"}, MATCHED_DECISION,
+    )
+
+    send.assert_not_called()
+
+
+def test_ignore_telegram_when_planfix_still_sends_an_unmatched_recording(
+    monkeypatch, telegram_config
+):
+    """The option is a de-duplication rule, not an off switch: a call Planfix never
+    saw is exactly the one the chat exists for."""
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    monkeypatch.setattr(main.drive, "set_file_app_properties", MagicMock())
+    configured = replace(
+        telegram_config,
+        planfix_create_comment_url="https://crm.example.com/planfix_create_comment",
+        planfix_ignore_telegram_when_planfix=True,
+    )
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, configured,
+        {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+    )
+
+    send.assert_called_once()
+
+
+def test_a_failed_telegram_send_leaves_no_marker(monkeypatch, telegram_config):
+    """No marker means `gdstt reprocess` can resend it."""
+    monkeypatch.setattr(main.notify, "send_message", MagicMock(return_value=False))
+    marked = MagicMock()
+    monkeypatch.setattr(main.drive, "set_file_app_properties", marked)
+
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1"), "v1", GATE_FOLDER_ID, telegram_config,
+        {"keypoints": "Задачи: раз"}, UNMATCHED_DECISION,
+    )
+
+    marked.assert_not_called()
+
+
+# --- telegram as a list, and telegram_calendly ---------------------------------------
+
+CALENDLY_CHAT_ID = "-1009999999999"
+NAME_RULE_DECISION = BookingDecision(
+    state="matched", task_id="42", reason=main.booking_gate.NAME_RULE
+)
+
+
+def _chats_config(gate_config, *, telegram=(), telegram_calendly=(), **overrides):
+    return replace(
+        gate_config,
+        folders=(
+            EmployeeFolder(
+                folder_id=GATE_FOLDER_ID,
+                email="kate@example.com",
+                telegram=tuple(telegram),
+                telegram_calendly=tuple(telegram_calendly),
+            ),
+        ),
+        telegram_bot_token="bot-token",
+        planfix_presets=("keypoints",),
+        **overrides,
+    )
+
+
+def _send_to_chats(monkeypatch, config, decision, *, results=None, **item_fields):
+    """Run one delivery; return the chats it sent to and the markers it wrote."""
+    send = MagicMock(side_effect=results) if results else MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    marked = MagicMock()
+    monkeypatch.setattr(main.drive, "set_file_app_properties", marked)
+    main._send_telegram_summary(
+        MagicMock(), gate_item("v1", **item_fields), "v1", GATE_FOLDER_ID, config,
+        {"keypoints": "Задачи: раз"}, decision,
+    )
+    chats = [call.kwargs["chat_id"] for call in send.call_args_list]
+    markers = [call[0][2]["telegram_sent_chat_id"] for call in marked.call_args_list]
+    return chats, markers
+
+
+def test_every_telegram_chat_of_a_folder_gets_the_summary(monkeypatch, gate_config):
+    config = _chats_config(gate_config, telegram=("-1", "-2"))
+
+    chats, markers = _send_to_chats(monkeypatch, config, UNMATCHED_DECISION)
+
+    assert chats == ["-1", "-2"]
+    assert markers[-1] == "-1,-2"
+
+
+def test_a_booked_call_also_reaches_the_calendly_chat(monkeypatch, gate_config):
+    config = _chats_config(
+        gate_config, telegram=(TELEGRAM_CHAT_ID,), telegram_calendly=(CALENDLY_CHAT_ID,)
+    )
+
+    chats, _ = _send_to_chats(monkeypatch, config, MATCHED_DECISION)
+
+    assert chats == [TELEGRAM_CHAT_ID, CALENDLY_CHAT_ID]
+
+
+def test_an_unbooked_call_stays_out_of_the_calendly_chat(monkeypatch, gate_config):
+    config = _chats_config(gate_config, telegram_calendly=(CALENDLY_CHAT_ID,))
+
+    chats, _ = _send_to_chats(monkeypatch, config, UNMATCHED_DECISION)
+
+    assert chats == []
+
+
+def test_a_name_rule_match_is_not_a_booked_call(monkeypatch, gate_config):
+    """A name rule routes a recording to a task by its name; nobody booked it."""
+    config = _chats_config(gate_config, telegram_calendly=(CALENDLY_CHAT_ID,))
+
+    chats, _ = _send_to_chats(monkeypatch, config, NAME_RULE_DECISION)
+
+    assert chats == []
+
+
+def test_the_calendly_chat_ignores_ignore_telegram_when_planfix(monkeypatch, gate_config):
+    """That option makes the folder's chat a fallback for the CRM; the calendly chat is
+    a channel of its own and gets every booked call."""
+    config = _chats_config(
+        gate_config,
+        telegram=(TELEGRAM_CHAT_ID,),
+        telegram_calendly=(CALENDLY_CHAT_ID,),
+        planfix_create_comment_url="https://crm.example.com/planfix_create_comment",
+        planfix_ignore_telegram_when_planfix=True,
+    )
+
+    chats, _ = _send_to_chats(monkeypatch, config, MATCHED_DECISION)
+
+    assert chats == [CALENDLY_CHAT_ID]
+
+
+def test_a_chat_listed_in_both_fields_gets_one_message(monkeypatch, gate_config):
+    config = _chats_config(
+        gate_config, telegram=(TELEGRAM_CHAT_ID,), telegram_calendly=(TELEGRAM_CHAT_ID,)
+    )
+
+    chats, _ = _send_to_chats(monkeypatch, config, MATCHED_DECISION)
+
+    assert chats == [TELEGRAM_CHAT_ID]
+
+
+def test_a_single_chat_marker_still_counts_as_delivered(monkeypatch, gate_config):
+    """Recordings marked before chats became lists carry one bare id. That chat must
+    not get the summary again; a chat added since still gets it."""
+    config = _chats_config(
+        gate_config, telegram=(TELEGRAM_CHAT_ID,), telegram_calendly=(CALENDLY_CHAT_ID,)
+    )
+
+    chats, markers = _send_to_chats(
+        monkeypatch, config, MATCHED_DECISION, telegram_sent_chat_id=TELEGRAM_CHAT_ID
+    )
+
+    assert chats == [CALENDLY_CHAT_ID]
+    assert markers == [f"{TELEGRAM_CHAT_ID},{CALENDLY_CHAT_ID}"]
+
+
+def test_a_failed_chat_is_left_off_the_marker_and_the_others_are_kept(
+    monkeypatch, gate_config
+):
+    """The next reprocess retries the failed chat alone."""
+    config = _chats_config(gate_config, telegram=("-1", "-2"))
+
+    chats, markers = _send_to_chats(
+        monkeypatch, config, UNMATCHED_DECISION, results=[False, True]
+    )
+
+    assert chats == ["-1", "-2"]
+    assert markers == ["-2"]
+
+
+def test_run_once_parks_an_unbooked_recording_of_a_calendly_only_folder(
+    monkeypatch, gate_config
+):
+    """Only `telegram` means "recognize always". A calendly chat wants booked calls,
+    so it must not make the loop transcribe everything the folder records."""
+    config = replace(
+        _chats_config(gate_config, telegram_calendly=(CALENDLY_CHAT_ID,)),
+        call_booking_disable_recognition=True,
+    )
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_decision(monkeypatch, UNMATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    monkeypatch.setattr(main.booking_gate, "mark_unmatched", MagicMock())
+    process_item = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), config)
+
+    process_item.assert_not_called()
+
+
+def _deliver_after_run_once(monkeypatch, config, file_name):
+    """Run the real cycle, then deliver with the decision it reached.
+
+    The booking journal, ``booking_gate.resolve`` and ``run_once`` are real; only the
+    Drive listing, the transcription (``process_item``) and the Telegram API are not.
+    Returns the chats the summary went to.
+    """
+    item = gate_item("v1")
+    item["file"]["name"] = file_name
+    patch_folder_items(monkeypatch, [item])
+    reached = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", reached)
+    main.run_once(MagicMock(), config)
+    reached.assert_called_once()
+    decision = reached.call_args.kwargs["booking_decision"]
+
+    chats, _ = _send_to_chats(monkeypatch, config, decision)
+    return chats
+
+
+def _recording_name(start_utc):
+    return (
+        "Call with Kate - "
+        + (start_utc + timedelta(hours=4)).strftime("%Y/%m/%d %H:%M")
+        + " GMT+04:00 – Recording.mp4"
+    )
+
+
+def test_a_booking_in_the_journal_puts_the_call_in_the_calendly_chat(
+    monkeypatch, gate_config
+):
+    """From the booking a receiver got to the chat: the journal entry, matched by
+    manager and start time, is what makes a call booked."""
+    # Yesterday, not a pinned date: the journal drops old bookings on its own.
+    start = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+        hour=5, minute=0, second=0, microsecond=0
+    )
+    config = _chats_config(
+        gate_config, telegram=(TELEGRAM_CHAT_ID,), telegram_calendly=(CALENDLY_CHAT_ID,)
+    )
+    append_booking(
+        config.call_bookings_file,
+        CallBooking(
+            task_id="851030",
+            manager_email="kate@example.com",
+            start_time=start + timedelta(minutes=5),
+        ),
+    )
+
+    chats = _deliver_after_run_once(monkeypatch, config, _recording_name(start))
+
+    assert chats == [TELEGRAM_CHAT_ID, CALENDLY_CHAT_ID]
+
+
+def test_a_booking_for_another_time_leaves_the_calendly_chat_out(
+    monkeypatch, gate_config
+):
+    """A booking outside call_booking.threshold_minutes is not this call's booking."""
+    start = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+        hour=5, minute=0, second=0, microsecond=0
+    )
+    config = _chats_config(
+        gate_config, telegram=(TELEGRAM_CHAT_ID,), telegram_calendly=(CALENDLY_CHAT_ID,)
+    )
+    append_booking(
+        config.call_bookings_file,
+        CallBooking(
+            task_id="851030",
+            manager_email="kate@example.com",
+            start_time=start + timedelta(hours=3),
+        ),
+    )
+
+    chats = _deliver_after_run_once(monkeypatch, config, _recording_name(start))
+
+    assert chats == [TELEGRAM_CHAT_ID]
+
+
+def test_the_summary_links_the_meeting_folder_instead_of_the_video():
+    text = main._telegram_summary(
+        {"keypoints": "## Задачи"},
+        ("keypoints",),
+        {
+            "video_url": "https://drive.google.com/file/d/X/view",
+            "folder_url": "https://drive.google.com/drive/folders/M",
+            "source_name": "rec.mp4",
+        },
+        ("video_url",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "rec.mp4: https://drive.google.com/drive/folders/M" in text
+    assert "/file/d/X/view" not in text
+
+
+def test_the_summary_keeps_the_video_link_without_a_meeting_folder():
+    """A recording lying in the configured folder has no folder of its own."""
+    text = main._telegram_summary(
+        {"keypoints": "## Задачи"},
+        ("keypoints",),
+        {
+            "video_url": "https://drive.google.com/file/d/X/view",
+            "folder_url": "",
+            "source_name": "rec.mp4",
+        },
+        ("video_url",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "rec.mp4: https://drive.google.com/file/d/X/view" in text
+
+
+def test_the_planfix_comment_links_the_meeting_folder_too():
+    """One rendering serves both channels; calendly changes where, not what."""
+    description = main._planfix_description(
+        {"keypoints": "## Задачи"},
+        ("keypoints",),
+        {
+            "video_url": "https://drive.google.com/file/d/X/view",
+            "folder_url": "https://drive.google.com/drive/folders/M",
+            "source_name": "rec.mp4",
+        },
+        ("video_url",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "https://drive.google.com/drive/folders/M" in description
+    assert "/file/d/X/view" not in description
+
+
+def test_run_once_processes_an_unmatched_recording_in_a_telegram_folder(
+    monkeypatch, telegram_config
+):
+    """`telegram` on a folder means "recognize always". Skipping here -- and worse,
+    writing the permanent `booking_match=none` mark -- would park every recording in a
+    folder that has no bookings by design."""
+    monkeypatch.setattr(main.booking_server, "is_running", lambda: True)
+    patch_decision(monkeypatch, UNMATCHED_DECISION)
+    patch_folder_items(monkeypatch, [gate_item("v1")])
+    marked = MagicMock()
+    monkeypatch.setattr(main.booking_gate, "mark_unmatched", marked)
+    process_item = MagicMock(return_value=None)
+    monkeypatch.setattr(main, "process_item", process_item)
+
+    main.run_once(MagicMock(), telegram_config)
+
+    process_item.assert_called_once()
+    marked.assert_not_called()
+
+
+# --- Meeting subfolders -----------------------------------------------------------
+#
+# Google Meet files every call into its own subfolder, so the folder a video lives in
+# is no longer the folder the configuration names. Both ids matter, and they must not
+# be swapped: the configured one says whose recording this is, the container says
+# where the artifacts go.
+
+
+def _subfolder_item(file_id, name, container_id, **kwargs):
+    item = _item(file_id, name, **kwargs)
+    item["container_id"] = container_id
+    return item
+
+
+def test_run_once_reads_a_folder_together_with_its_meeting_subfolders(mocker):
+    """Pointed at a Google Meet root, the old single-level listing found subfolders and
+    zero videos -- the silent shape of this whole outage."""
+    cfg = make_config(folders=["root"], stt_provider="")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_called_once_with(mocker.ANY, "root")
+
+
+def test_run_once_still_names_the_employee_from_the_configured_folder(mocker):
+    """The video sits in a subfolder nobody configured; the employee is the folder
+    above it. Passing the subfolder here is what would silently blank the employee,
+    the Planfix routing and the folder's Telegram chat."""
+    cfg = make_config(folders=["root"])
+    item = _subfolder_item("v1", "a.mp4", "meeting-1")
+    mocker.patch("src.main.drive.list_folder_tree_state", return_value=[item])
+    mocker.patch("src.main.booking_gate.resolve", return_value=MATCHED_DECISION)
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert process_mock.call_args.args[2] == "root"
+
+
+def test_process_item_writes_the_transcript_into_the_meeting_subfolder(mocker, tmp_path):
+    """The .txt belongs beside its video, not in the employee's root."""
+    cfg = make_config(folders=["root"], stt_provider="deepgram", output_dir=tmp_path)
+    upload_mock = mocker.patch("src.main._save_and_upload_txt")
+    mocker.patch("src.main._run_preset_stage", return_value={})
+    mocker.patch("src.main._try_write_call_documents", return_value=None)
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mp4_path = tmp_path / "a.mp4"
+    mp4_path.write_bytes(b"video")
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "a.mp3")
+    mocker.patch("src.main.extract_m4a_copy", return_value=tmp_path / "a.m4a")
+    mocker.patch("src.main.drive.upload")
+
+    main.process_item(
+        MagicMock(),
+        _subfolder_item("v1", "a.mp4", "meeting-1"),
+        "root",
+        cfg,
+        booking_decision=MATCHED_DECISION,
+    )
+
+    assert upload_mock.call_args.args[4] == "meeting-1"
+
+
+def test_process_item_falls_back_to_the_configured_folder_for_a_flat_item(mocker, tmp_path):
+    """An item with no container -- a flat folder, or one a caller built by hand --
+    keeps writing where it always did."""
+    cfg = make_config(folders=["root"], stt_provider="deepgram", output_dir=tmp_path)
+    upload_mock = mocker.patch("src.main._save_and_upload_txt")
+    mocker.patch("src.main._run_preset_stage", return_value={})
+    mocker.patch("src.main._try_write_call_documents", return_value=None)
+    mocker.patch("src.main.transcribe_file", return_value="Speaker 1: hi")
+    mp4_path = tmp_path / "a.mp4"
+    mp4_path.write_bytes(b"video")
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "a.mp3")
+    mocker.patch("src.main.extract_m4a_copy", return_value=tmp_path / "a.m4a")
+    mocker.patch("src.main.drive.upload")
+
+    main.process_item(
+        MagicMock(), _item("v1", "a.mp4"), "root", cfg,
+        booking_decision=MATCHED_DECISION,
+    )
+
+    assert upload_mock.call_args.args[4] == "root"
+
+
+def test_webhook_payload_reports_the_configured_folder_not_the_subfolder():
+    """The payload's folder_id is documented to consumers, who key it to the employee.
+    Sending the meeting subfolder would change that contract to a value that means
+    nothing outside this service."""
+    cfg = make_config(folders=[EmployeeFolder("root", name="Анжелика", email="a@b.c")])
+
+    payload = main._webhook_payload(
+        "v1", "a.mp4", "root", cfg, "transcript", {},
+    )
+
+    assert payload["file"]["folder_id"] == "root"
+    assert payload["employee"]["name"] == "Анжелика"
+
+
+def test_process_one_file_in_a_subfolder_resolves_the_employee_above_it(mocker):
+    service = MagicMock()
+    cfg = make_config(folders=["root"])
+    mocker.patch(
+        "src.main.drive.get_file_metadata",
+        return_value={
+            "id": "v1", "name": "a.mp4", "mimeType": "video/mp4",
+            "parents": ["meeting-1"],
+        },
+    )
+    ancestor_mock = mocker.patch(
+        "src.main.drive.find_configured_ancestor", return_value="root"
+    )
+    list_mock = mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.process_target(service, "v1", cfg)
+
+    # Listed where the file is, attributed to the folder above it.
+    list_mock.assert_called_once_with(service, "meeting-1")
+    ancestor_mock.assert_called_once_with(service, "meeting-1", {"root"})
+    assert process_mock.call_args.args[2] == "root"
+
+
+def test_process_one_file_keeps_its_own_folder_when_nothing_is_configured_above(mocker):
+    """A hand-made folder outside the configuration is still processed, just without
+    an employee -- the behaviour that existed before subfolders."""
+    service = MagicMock()
+    cfg = make_config(folders=["root"])
+    mocker.patch(
+        "src.main.drive.get_file_metadata",
+        return_value={
+            "id": "v1", "name": "a.mp4", "mimeType": "video/mp4",
+            "parents": ["stt-test"],
+        },
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value=None)
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "stt-test")],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.process_target(service, "v1", cfg)
+
+    assert process_mock.call_args.args[2] == "stt-test"
+
+
+def test_process_a_folder_walks_its_subfolders(mocker):
+    service = MagicMock()
+    cfg = make_config(folders=["root"], stt_provider="")
+    mocker.patch(
+        "src.main.drive.get_file_metadata",
+        return_value={"id": "root", "name": "Google Meet",
+                      "mimeType": "application/vnd.google-apps.folder"},
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+
+    main.process_target(service, "root", cfg, is_folder=True)
+
+    tree_mock.assert_called_once_with(service, "root")
+
+
+def _settling_item(file_id, name, created_at, *, has_media_metadata):
+    item = _item(file_id, name)
+    item["file"]["createdTime"] = created_at
+    item["has_media_metadata"] = has_media_metadata
+    return item
+
+
+def _now():
+    return datetime(2026, 9, 9, 20, 0, tzinfo=timezone.utc)
+
+
+def test_a_video_drive_has_not_finished_with_is_left_for_the_next_cycle(mocker):
+    """Meet's upload lands minutes to an hour after the meeting folder appears. Taking
+    a video Drive is still processing buys a wasted download and a wasted STT run."""
+    cfg = make_config(folders=["root"], stt_provider="deepgram")
+    item = _settling_item("v1", "a.mp4", "2026-09-09T19:58:00Z", has_media_metadata=False)
+    mocker.patch("src.main._utcnow", return_value=_now())
+
+    assert main._pending_items([item], cfg) == []
+
+
+def test_a_finished_video_is_picked_up_at_once(mocker):
+    cfg = make_config(folders=["root"], stt_provider="deepgram")
+    item = _settling_item("v1", "a.mp4", "2026-09-09T19:58:00Z", has_media_metadata=True)
+    mocker.patch("src.main._utcnow", return_value=_now())
+
+    assert len(main._pending_items([item], cfg)) == 1
+
+
+def test_waiting_for_metadata_gives_up_rather_than_stalling_forever(mocker):
+    """A video that never gets metadata -- an odd encode, a Drive that simply never
+    fills it in -- must still be transcribed. Waiting without a limit would lose it
+    silently, which is the failure mode this whole change exists to remove."""
+    cfg = make_config(folders=["root"], stt_provider="deepgram")
+    item = _settling_item("v1", "a.mp4", "2026-09-08T06:00:00Z", has_media_metadata=False)
+    mocker.patch("src.main._utcnow", return_value=_now())
+
+    assert len(main._pending_items([item], cfg)) == 1
+
+
+def test_a_video_of_unknown_age_is_not_held_back(mocker):
+    """No createdTime means no way to tell young from stuck; processing is the safe
+    side of that guess."""
+    cfg = make_config(folders=["root"], stt_provider="deepgram")
+    item = _item("v1", "a.mp4")
+    item["has_media_metadata"] = False
+    mocker.patch("src.main._utcnow", return_value=_now())
+
+    assert len(main._pending_items([item], cfg)) == 1
+
+
+def test_items_from_before_this_change_are_not_held_back(mocker):
+    """An item built by a caller that knows nothing of media metadata -- every existing
+    test, and `reprocess` -- must behave as it always did."""
+    cfg = make_config(folders=["root"], stt_provider="deepgram")
+    mocker.patch("src.main._utcnow", return_value=_now())
+
+    assert len(main._pending_items([_item("v1", "a.mp4")], cfg)) == 1
+
+
+# --- The changes feed -------------------------------------------------------------
+#
+# Drive keeps a journal of what changed; one request reads it, whatever the number of
+# folders. Walking every folder stays as the fallback, which is what makes the cursor
+# safe to lose.
+
+
+def _http_error(status):
+    return HttpError(MagicMock(status=status), b"")
+
+
+def _change(file_id, container, *, mime="video/mp4", removed=False, trashed=False):
+    return {
+        "fileId": file_id,
+        "removed": removed,
+        "file": {
+            "id": file_id,
+            "name": f"{file_id}.mp4",
+            "mimeType": mime,
+            "parents": [container],
+            "trashed": trashed,
+        },
+    }
+
+
+def _cursor_file(cfg):
+    return change_cursor.path_for(cfg.data_dir)
+
+
+def _save_cursor(cfg, token):
+    """Save a cursor the way a real cycle does: together with the folders it covers.
+
+    A cursor on its own cannot be vouched for, and an unvouched cursor makes the next
+    cycle sweep -- that is the whole point of `changes_folders.txt`. So a test that
+    wants the feed to be read has to set up both, exactly like `run_once` does.
+    """
+    change_cursor.write(change_cursor.path_for(cfg.data_dir), token)
+    change_cursor.write_folders(
+        change_cursor.folders_path_for(cfg.data_dir),
+        change_cursor.fingerprint(folder.folder_id for folder in cfg.folders),
+    )
+
+
+def test_the_first_cycle_sweeps_and_remembers_where_it_got_to(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-1")
+    changes_mock = mocker.patch("src.main.drive.list_changes")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_called_once()
+    changes_mock.assert_not_called()
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-1"
+
+
+def test_the_cursor_is_taken_before_the_sweep_not_after(mocker, tmp_path):
+    """A recording that lands while the sweep is running has to turn up in the next
+    feed read. A cursor taken afterwards would step straight over it."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    order = []
+    mocker.patch(
+        "src.main.drive.get_start_page_token",
+        side_effect=lambda *a, **k: (order.append("cursor"), "tok-1")[1],
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        side_effect=lambda *a, **k: (order.append("sweep"), [])[1],
+    )
+
+    main.run_once(MagicMock(), cfg)
+
+    assert order == ["cursor", "sweep"]
+
+
+def test_a_later_cycle_reads_the_feed_instead_of_sweeping(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    changes_mock = mocker.patch("src.main.drive.list_changes", return_value=([], "tok-2"))
+
+    main.run_once(MagicMock(), cfg)
+
+    changes_mock.assert_called_once_with(mocker.ANY, "tok-1")
+    tree_mock.assert_not_called()
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-2"
+
+
+def test_a_changed_video_has_only_its_own_folder_listed(mocker, tmp_path):
+    """The point of the feed: look where something happened, not everywhere."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "meeting-1")], "tok-2"),
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    list_mock = mocker.patch("src.main.drive.list_folder_state", return_value=[])
+
+    main.run_once(MagicMock(), cfg)
+
+    list_mock.assert_called_once_with(mocker.ANY, "meeting-1")
+
+
+def test_two_videos_in_one_meeting_folder_cost_one_listing(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "meeting-1"), _change("v2", "meeting-1")], "tok-2"),
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    list_mock = mocker.patch("src.main.drive.list_folder_state", return_value=[])
+
+    main.run_once(MagicMock(), cfg)
+
+    assert list_mock.call_count == 1
+
+
+def test_a_video_found_through_the_feed_is_attributed_to_its_configured_folder(
+    mocker, tmp_path
+):
+    cfg = make_config(folders=["root"], data_dir=tmp_path)
+    _save_cursor(cfg, "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "meeting-1")], "tok-2"),
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    mocker.patch("src.main.booking_gate.resolve", return_value=MATCHED_DECISION)
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert process_mock.call_args.args[2] == "root"
+
+
+def test_our_own_uploads_in_the_feed_are_ignored(mocker, tmp_path):
+    """Every artifact this service writes comes back through the feed. Deciding from
+    the entry alone is what keeps that free."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("t1", "meeting-1", mime="text/plain")], "tok-2"),
+    )
+    list_mock = mocker.patch("src.main.drive.list_folder_state", return_value=[])
+
+    main.run_once(MagicMock(), cfg)
+
+    list_mock.assert_not_called()
+
+
+def test_deleted_and_trashed_entries_are_ignored(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=(
+            [
+                _change("v1", "meeting-1", removed=True),
+                _change("v2", "meeting-2", trashed=True),
+            ],
+            "tok-2",
+        ),
+    )
+    list_mock = mocker.patch("src.main.drive.list_folder_state", return_value=[])
+
+    main.run_once(MagicMock(), cfg)
+
+    list_mock.assert_not_called()
+
+
+def test_a_video_in_a_folder_nobody_configured_is_ignored(mocker, tmp_path):
+    """The feed reports everything the account can see, not only what we watch."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "someone-elses")], "tok-2"),
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value=None)
+    list_mock = mocker.patch("src.main.drive.list_folder_state", return_value=[])
+
+    main.run_once(MagicMock(), cfg)
+
+    list_mock.assert_not_called()
+
+
+def test_a_cursor_drive_no_longer_knows_falls_back_to_a_sweep(mocker, tmp_path):
+    """Aging out of the journal is documented, not exceptional: sweep, take a fresh
+    cursor, carry on."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-stale")
+    mocker.patch("src.main.drive.list_changes", side_effect=_http_error(410))
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-fresh")
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_called_once()
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-fresh"
+    notify_mock.assert_not_called()
+
+
+def test_a_deleted_cursor_file_makes_the_next_cycle_sweep(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    change_cursor.clear(_cursor_file(cfg))
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-2")
+    mocker.patch("src.main.drive.list_changes")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_called_once()
+
+
+def test_a_feed_that_fails_for_another_reason_keeps_the_cursor(mocker, tmp_path):
+    """A network blip must not throw away the cursor: that would turn a retry into a
+    full sweep of every folder."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    mocker.patch("src.main.drive.list_changes", side_effect=_http_error(500))
+    mocker.patch("src.main.time.sleep")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_not_called()
+    # One failed cycle is a blip: logged, not alerted (see the streak tests below).
+    notify_mock.assert_not_called()
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-1"
+
+
+def _fail_listing_for_cycles(cfg, cycles, exc, what="the Meet folder of a@example.com"):
+    for _ in range(cycles):
+        main._begin_listing_failure_cycle()
+        main._notify_listing_failure(what, exc, cfg)
+
+
+def test_a_transient_listing_failure_alerts_only_once_it_persists(mocker, tmp_path):
+    """A dropped connection heals by the next cycle; one that does not is worth an alert."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    _fail_listing_for_cycles(cfg, main._LISTING_FAILURE_ALERT_STREAK - 1, BrokenPipeError(32, "Broken pipe"))
+    notify_mock.assert_not_called()
+
+    _fail_listing_for_cycles(cfg, 1, BrokenPipeError(32, "Broken pipe"))
+    notify_mock.assert_called_once()
+    assert f"{main._LISTING_FAILURE_ALERT_STREAK} cycles in a row" in notify_mock.call_args.args[0]
+
+
+def test_a_healthy_cycle_ends_the_run_of_transient_failures(mocker, tmp_path):
+    """One blip every few cycles is not a streak, however long the service runs."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    for _ in range(5):
+        _fail_listing_for_cycles(cfg, main._LISTING_FAILURE_ALERT_STREAK - 1, _http_error(503))
+        main._begin_listing_failure_cycle()  # a cycle where the source was read fine
+
+    notify_mock.assert_not_called()
+
+
+def test_a_persistent_listing_failure_alerts_at_once(mocker, tmp_path):
+    """Refused access will not fix itself: waiting for a streak would only hide it."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    _fail_listing_for_cycles(cfg, 1, _http_error(403))
+
+    notify_mock.assert_called_once()
+
+
+def test_several_failures_of_one_source_in_a_cycle_count_as_one(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    main._begin_listing_failure_cycle()
+    for _ in range(main._LISTING_FAILURE_ALERT_STREAK):
+        main._notify_listing_failure("folder f1", ConnectionResetError(), cfg)
+
+    notify_mock.assert_not_called()
+
+
+def test_a_dry_run_never_moves_the_cursor(mocker, tmp_path):
+    """Otherwise a real run after a dry one starts past everything the dry run saw,
+    and those recordings are never processed."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    mocker.patch("src.main.drive.list_changes", return_value=([], "tok-2"))
+
+    main.run_once(MagicMock(), cfg, dry_run=True)
+
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-1"
+
+
+def test_the_cursor_moves_only_after_the_work_is_done(mocker, tmp_path):
+    """A cycle that dies half way through must see the same changes again. Re-reading
+    them is free, because the folder listing decides what still needs doing."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path)
+    _save_cursor(cfg, "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "meeting-1")], "tok-2"),
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    mocker.patch("src.main.booking_gate.resolve", return_value=MATCHED_DECISION)
+
+    seen = {}
+
+    def explode(*args, **kwargs):
+        seen["cursor_during_work"] = change_cursor.read(_cursor_file(cfg))
+        raise RuntimeError("processing blew up")
+
+    mocker.patch("src.main.process_item", side_effect=explode)
+    mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert seen["cursor_during_work"] == "tok-1"
+
+
+
+# --- Names from Meet's own transcript ---------------------------------------------
+
+
+_MEET_DOC = """may-doqs-end (2026-09-09 18:53 GMT+2) - Transcript
+Attendees
+Oksana Ciciarelli, Oksana Ciciarelli's Presentation, Roman Starodubtsev
+Transcript
+Oksana Ciciarelli: one
+Roman Starodubtsev: two
+"""
+
+
+def test_meet_transcript_names_a_room_code_call_the_file_name_cannot(mocker):
+    """The gap this closes: a call started outside the calendar is named after the
+    meeting room, so there is nothing in the name to read."""
+    mocker.patch("src.main.drive.find_meet_transcript", return_value={"id": "d1"})
+    mocker.patch("src.main.drive.export_document_text", return_value=_MEET_DOC)
+
+    names, text = main._read_meet_transcript(
+        MagicMock(), "meeting-1", "may-doqs-end (2026-09-09 18_53 GMT+2).mp4"
+    )
+
+    assert names == ["Oksana Ciciarelli", "Roman Starodubtsev"]
+    # The turns travel with the names: they are the model's evidence of who is who.
+    assert text == _MEET_DOC
+
+
+def test_no_transcript_leaves_the_file_name_in_charge(mocker):
+    mocker.patch("src.main.drive.find_meet_transcript", return_value=None)
+
+    assert main._read_meet_transcript(MagicMock(), "meeting-1", "a.mp4") is None
+
+
+def test_an_unreadable_transcript_does_not_fail_the_recording(mocker):
+    """Losing the names is a worse transcript; losing the recording is an outage."""
+    mocker.patch(
+        "src.main.drive.find_meet_transcript", side_effect=RuntimeError("no access")
+    )
+
+    assert main._read_meet_transcript(MagicMock(), "meeting-1", "a.mp4") is None
+
+
+def test_a_transcript_naming_fewer_than_two_people_is_not_used(mocker):
+    """One name cannot tell two diarized speakers apart, and the caller already has a
+    better-tested path for that."""
+    mocker.patch("src.main.drive.find_meet_transcript", return_value={"id": "d1"})
+    mocker.patch(
+        "src.main.drive.export_document_text",
+        return_value="Call - Transcript\nAttendees\nAlice\nTranscript\nAlice: one\n",
+    )
+
+    assert main._read_meet_transcript(MagicMock(), "meeting-1", "a.mp4") is None
+
+
+def test_meet_names_and_turns_are_handed_to_the_model(mocker):
+    """The model still decides who is who; Meet gives it the people and, in its turns,
+    the evidence of which voice is whose."""
+    cfg = make_config(folders=["root"], openai_api_key="sk-test")
+    resolve_mock = mocker.patch(
+        "src.main.speaker_roles.resolve", return_value=["Roman", "Oksana"]
+    )
+    mocker.patch("src.main.OpenAIPipeline")
+
+    main._resolve_speaker_names(
+        "Speaker 1: hi", "may-doqs-end (2026-09-09 18_53 GMT+2).mp4", "root", cfg,
+        candidates=["Oksana Ciciarelli", "Roman Starodubtsev"],
+        meet_text=_MEET_DOC,
+    )
+
+    assert resolve_mock.call_args.kwargs["candidates"] == [
+        "Oksana Ciciarelli",
+        "Roman Starodubtsev",
+    ]
+    assert resolve_mock.call_args.kwargs["meet_text"] == _MEET_DOC
+    assert resolve_mock.call_args.kwargs["calendar_manager"] == ""
+
+
+def test_the_calendar_titles_marked_manager_is_handed_to_the_model(mocker):
+    cfg = make_config(folders=["root"], openai_api_key="sk-test")
+    resolve_mock = mocker.patch("src.main.speaker_roles.resolve", return_value=None)
+    mocker.patch("src.main.OpenAIPipeline")
+
+    main._resolve_speaker_names(
+        "Speaker 1: hi",
+        "Angelica Munkueva(ExpertizeMe) и Mels - 2026/08/13 14:29 CEST - Recording.mp4",
+        "root",
+        cfg,
+    )
+
+    assert resolve_mock.call_args.kwargs["calendar_manager"] == "Angelica Munkueva"
+
+
+def test_without_candidates_the_file_name_is_still_the_source(mocker):
+    cfg = make_config(folders=["root"], openai_api_key="sk-test")
+    resolve_mock = mocker.patch(
+        "src.main.speaker_roles.resolve", return_value=["Alice", "Bob"]
+    )
+    mocker.patch("src.main.OpenAIPipeline")
+
+    main._resolve_speaker_names(
+        "Speaker 1: hi", "Alice and Bob - 2026/09/09 10:00 CEST.mp4", "root", cfg,
+    )
+
+    assert resolve_mock.call_args.kwargs["candidates"] == ["Alice", "Bob"]
+
+
+def _transcript_written_with_meet_beside(
+    mocker, tmp_path, file_name, *, resolved, key, meet_doc=_MEET_DOC
+):
+    """Run a recording through STT with Meet's transcript beside it."""
+    mocker.patch("src.main.drive.download", return_value=tmp_path / "video.mp4")
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "video.mp3")
+    captured = {}
+
+    def fake_upload(svc, local_path, folder, mime_type, name=None, app_properties=None):
+        if name and name.endswith(".txt"):
+            captured["txt"] = local_path.read_text(encoding="utf-8")
+
+    mocker.patch("src.main.drive.upload", side_effect=fake_upload)
+    mocker.patch(
+        "src.main.transcribe_file",
+        return_value="Speaker 1: hi there\nSpeaker 2: hello back",
+    )
+    find_mock = mocker.patch(
+        "src.main.drive.find_meet_transcript",
+        return_value={"id": "d1"} if meet_doc else None,
+    )
+    mocker.patch("src.main.drive.export_document_text", return_value=meet_doc)
+    mocker.patch("src.main.OpenAIPipeline")
+    resolve_mock = mocker.patch("src.main.speaker_roles.resolve", return_value=resolved)
+    preset_spy = mocker.spy(main, "_run_preset_stage")
+    cfg = make_config(
+        stt_provider="deepgram",
+        deepgram_api_key="dg-x",
+        deepgram_audio_source="mp3_96k",
+        stt_postprocess=True,
+        openai_api_key=key,
+    )
+
+    main.process_item(MagicMock(), _item("fid", file_name), "f", cfg)
+
+    return SimpleNamespace(
+        txt=captured["txt"],
+        resolve=resolve_mock,
+        find=find_mock,
+        preset_names=preset_spy.call_args.kwargs["speaker_names"],
+    )
+
+
+_ROOM_CODE_CALL = "may-doqs-end (2026-09-09 18_53 GMT+2).mp4"
+
+
+def test_meets_names_unconfirmed_by_the_model_are_not_bound_by_order(mocker, tmp_path):
+    """The regression this pins: Meet listed the people in the order it heard them,
+    diarization heard someone else first, and binding the two by position put the
+    manager's words under the client's name. Numbered speakers are less, not wrong."""
+    run = _transcript_written_with_meet_beside(
+        mocker, tmp_path, _ROOM_CODE_CALL, resolved=None, key="sk-test"
+    )
+
+    run.resolve.assert_called_once()
+    assert run.txt == "Speaker 1: hi there\nSpeaker 2: hello back"
+
+
+def test_presets_still_hear_who_was_on_a_call_nobody_could_place(mocker, tmp_path):
+    """The presets' hint says "in no particular order", so Meet's names carry no swap
+    there -- and on a room-code call they are the only names there are."""
+    run = _transcript_written_with_meet_beside(
+        mocker, tmp_path, _ROOM_CODE_CALL, resolved=None, key="sk-test"
+    )
+
+    assert run.preset_names == ["Oksana Ciciarelli", "Roman Starodubtsev"]
+
+
+def test_without_a_model_meets_transcript_is_not_read(mocker, tmp_path):
+    """Nothing could place its names on speakers, so reading it would only cost two
+    Drive requests and log names nobody uses."""
+    run = _transcript_written_with_meet_beside(
+        mocker, tmp_path, _ROOM_CODE_CALL, resolved=["x", "y"], key=""
+    )
+
+    run.find.assert_not_called()
+    run.resolve.assert_not_called()
+    assert run.txt == "Speaker 1: hi there\nSpeaker 2: hello back"
+
+
+def test_meets_names_label_the_speakers_the_model_placed_them_on(mocker, tmp_path):
+    run = _transcript_written_with_meet_beside(
+        mocker,
+        tmp_path,
+        _ROOM_CODE_CALL,
+        resolved=["Roman Starodubtsev", "Oksana Ciciarelli"],
+        key="sk-test",
+    )
+
+    assert run.resolve.call_args.kwargs["meet_text"] == _MEET_DOC
+    assert run.txt == "Roman Starodubtsev: hi there\nOksana Ciciarelli: hello back"
+    assert run.preset_names == ["Roman Starodubtsev", "Oksana Ciciarelli"]
+
+
+def test_a_calendar_call_the_model_could_not_place_stays_numbered(mocker, tmp_path):
+    """The file name lists the organizer first; binding that by position is right only
+    when the manager happens to speak first, and wrong without a trace otherwise. Once
+    a model was asked, an unanswered call keeps numbered speakers."""
+    run = _transcript_written_with_meet_beside(
+        mocker, tmp_path, "Alice and Bob - 2026/09/09 10:00 CEST.mp4",
+        resolved=None, key="sk-test", meet_doc=None,
+    )
+
+    run.resolve.assert_called_once()
+    assert run.txt == "Speaker 1: hi there\nSpeaker 2: hello back"
+    # ``None`` lets the presets read the names from the file name, unordered.
+    assert run.preset_names is None
+
+
+def test_without_a_model_a_calendar_call_keeps_the_file_names_order(mocker, tmp_path):
+    """No model, no presets: the file name's order is the only naming there is, as it
+    always was."""
+    run = _transcript_written_with_meet_beside(
+        mocker, tmp_path, "Alice and Bob - 2026/09/09 10:00 CEST.mp4",
+        resolved=None, key="",
+    )
+
+    run.resolve.assert_not_called()
+    assert run.txt == "Alice: hi there\nBob: hello back"
+
+
+def test_resolve_speaker_names_is_empty_when_the_model_was_asked_and_did_not_answer(
+    mocker,
+):
+    """``[]`` and ``None`` mean different things to the caller: numbered speakers, or
+    the file name's order because no model was ever asked."""
+    cfg = make_config(folders=["root"], openai_api_key="sk-test")
+    mocker.patch("src.main.speaker_roles.resolve", return_value=None)
+    mocker.patch("src.main.OpenAIPipeline")
+
+    assert (
+        main._resolve_speaker_names(
+            "Speaker 1: hi", "Alice and Bob - 2026/09/09 10:00 CEST.mp4", "root", cfg
+        )
+        == []
+    )
+
+
+# --- The cursor may only move past work that is actually finished -----------------
+
+
+def _one_change_cycle(mocker, tmp_path, **overrides):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, **overrides)
+    _save_cursor(cfg, "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "meeting-1")], "tok-2"),
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    return cfg
+
+
+def test_a_failed_recording_holds_the_cursor_so_it_is_seen_again(mocker, tmp_path):
+    """The feed names a folder once, when something happens in it. A recording that
+    failed writes no artifact, so nothing there will ever change again -- stepping
+    over it loses it for good."""
+    cfg = _one_change_cycle(mocker, tmp_path)
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    mocker.patch("src.main.booking_gate.resolve", return_value=MATCHED_DECISION)
+    mocker.patch("src.main.process_item", side_effect=RuntimeError("stt timed out"))
+    mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) == "tok-1"
+
+
+def test_a_folder_that_could_not_be_listed_holds_the_cursor(mocker, tmp_path):
+    cfg = _one_change_cycle(mocker, tmp_path, stt_provider="")
+    mocker.patch(
+        "src.main.drive.list_folder_state", side_effect=RuntimeError("drive 500")
+    )
+    mocker.patch("src.main.time.sleep")
+    mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) == "tok-1"
+
+
+def test_a_video_left_to_settle_holds_the_cursor(mocker, tmp_path):
+    """Otherwise the change that revealed the video is consumed while the video is
+    deliberately skipped, and it depends on Drive emitting a second one later."""
+    cfg = _one_change_cycle(mocker, tmp_path, stt_provider="deepgram")
+    item = _subfolder_item("v1", "a.mp4", "meeting-1")
+    item["file"]["createdTime"] = "2026-09-09T19:58:00Z"
+    item["has_media_metadata"] = False
+    mocker.patch("src.main.drive.list_folder_state", return_value=[item])
+    mocker.patch("src.main._utcnow", return_value=_now())
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) == "tok-1"
+
+
+def test_a_clean_cycle_still_moves_the_cursor(mocker, tmp_path):
+    cfg = _one_change_cycle(mocker, tmp_path)
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    mocker.patch("src.main.booking_gate.resolve", return_value=MATCHED_DECISION)
+    mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) == "tok-2"
+
+
+def test_an_unresolvable_folder_is_not_treated_as_someone_elses(mocker, tmp_path):
+    """An expired token during the ancestor lookup used to read as "belongs to
+    nobody", and the change was consumed on the strength of that."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "meeting-1")], "tok-2"),
+    )
+    mocker.patch(
+        "src.main.drive.find_configured_ancestor",
+        side_effect=RuntimeError("drive 502"),
+    )
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) == "tok-1"
+    notify_mock.assert_called_once()
+
+
+def test_an_auth_failure_during_the_ancestor_lookup_still_stops_the_cycle(
+    mocker, tmp_path
+):
+    """Auth errors are re-raised everywhere else so the container restarts after
+    re-auth; being swallowed here would let a whole cycle report success."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=([_change("v1", "meeting-1")], "tok-2"),
+    )
+    mocker.patch(
+        "src.main.drive.find_configured_ancestor",
+        side_effect=RefreshError("token expired"),
+    )
+
+    with pytest.raises(RefreshError):
+        main.run_once(MagicMock(), cfg)
+
+
+def test_the_mp3_is_written_into_the_meeting_subfolder(mocker, tmp_path):
+    """The requirement the whole migration started from: an artifact belongs beside
+    its video. The mp3 upload is its own call site and was the one left pointing at
+    the configured folder -- so every artifact landed a level above the recording."""
+    cfg = make_config(folders=["root"], output_dir=tmp_path)
+    upload_mock = mocker.patch("src.main.drive.upload")
+    mp4_path = tmp_path / "a.mp4"
+    mp4_path.write_bytes(b"video")
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "a.mp3")
+    mocker.patch("src.main._run_preset_stage", return_value={})
+    mocker.patch("src.main._try_write_call_documents", return_value=None)
+
+    main.process_item(
+        MagicMock(),
+        _subfolder_item("v1", "a.mp4", "meeting-1"),
+        "root",
+        cfg,
+        booking_decision=MATCHED_DECISION,
+    )
+
+    assert upload_mock.call_args.args[2] == "meeting-1"
+
+
+def test_the_mp3_of_a_flat_folder_still_goes_where_it_always_did(mocker, tmp_path):
+    cfg = make_config(folders=["root"], output_dir=tmp_path)
+    upload_mock = mocker.patch("src.main.drive.upload")
+    mp4_path = tmp_path / "a.mp4"
+    mp4_path.write_bytes(b"video")
+    mocker.patch("src.main.drive.download", return_value=mp4_path)
+    mocker.patch("src.main.extract_mp3", return_value=tmp_path / "a.mp3")
+    mocker.patch("src.main._run_preset_stage", return_value={})
+    mocker.patch("src.main._try_write_call_documents", return_value=None)
+
+    main.process_item(
+        MagicMock(), _item("v1", "a.mp4"), "root", cfg,
+        booking_decision=MATCHED_DECISION,
+    )
+
+    assert upload_mock.call_args.args[2] == "root"
+
+
+
+# --- Everything that keys off the configured folder must survive a subfolder -------
+#
+# Telegram, Planfix routing, the employee name and the meta document all resolve
+# through `config.folder_by_id`. Hand any of them a meeting subfolder and they get
+# None back -- no chat, no forced recognition, no manager -- without raising.
+
+
+def _telegram_config(tmp_path, chat="-1001234567890"):
+    return make_config(
+        folders=[EmployeeFolder("root", name="Анжелика", email="a@b.c", telegram=(chat,))],
+        data_dir=tmp_path,
+        stt_provider="",
+    )
+
+
+def test_a_folders_telegram_chat_is_found_for_a_video_in_a_subfolder(tmp_path):
+    """The chat lives on the configured folder. Looking it up by the meeting
+    subfolder returns () -- which also silently turns off the unconditional
+    recognition that having a chat is supposed to mean."""
+    cfg = _telegram_config(tmp_path)
+
+    assert main.folder_telegram_chats(cfg, "root") == ("-1001234567890",)
+    assert main.folder_telegram_chats(cfg, "meeting-1") == ()
+
+
+def test_a_telegram_folder_still_recognises_a_subfolder_recording_without_a_booking(
+    mocker, tmp_path
+):
+    """A folder with a chat is watched for its own sake, so "no booking" must not
+    skip it -- and must not mark it unmatched, which would park it for good."""
+    cfg = replace(_telegram_config(tmp_path), call_booking_disable_recognition=True)
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    mocker.patch(
+        "src.main.booking_gate.resolve",
+        return_value=BookingDecision(state="unmatched", reason="no-booking"),
+    )
+    mark_mock = mocker.patch("src.main.booking_gate.mark_unmatched")
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    process_mock.assert_called_once()
+    mark_mock.assert_not_called()
+
+
+def test_the_telegram_summary_is_sent_for_a_video_in_a_subfolder(mocker, tmp_path):
+    cfg = _telegram_config(tmp_path)
+    send_mock = mocker.patch("src.main.notify.send_message", return_value=True)
+    mocker.patch("src.main.drive.set_file_app_properties")
+
+    main._send_telegram_summary(
+        MagicMock(),
+        _subfolder_item("v1", "a.mp4", "meeting-1"),
+        "v1",
+        "root",
+        replace(cfg, telegram_bot_token="bot-token"),
+        {"keypoints": "## Задачи"},
+        MATCHED_DECISION,
+    )
+
+    assert send_mock.call_args.kwargs["chat_id"] == "-1001234567890"
+
+
+def test_the_planfix_comment_is_sent_for_a_video_in_a_subfolder(mocker, tmp_path):
+    """Planfix is addressed by the booking's task id, not by a folder -- this pins
+    that the subfolder did not disturb the path to it."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path)
+    cfg = replace(cfg, planfix_create_comment_url="https://planfix.example/api",
+                  planfix_token="t", planfix_presets=("keypoints",))
+    send_mock = mocker.patch("src.main.planfix.send_comment", return_value=True)
+    mocker.patch("src.main.drive.set_file_app_properties")
+
+    main._send_planfix_comment(
+        MagicMock(),
+        _subfolder_item("v1", "a.mp4", "meeting-1"),
+        "v1",
+        cfg,
+        {"keypoints": "## Задачи"},
+        MATCHED_DECISION,
+    )
+
+    assert send_mock.call_args.kwargs["task_id"] == "851030"
+
+
+def test_name_rules_still_route_a_subfolder_recording(mocker, tmp_path):
+    """`name_rules` resolve through `folder_by_id` in the gate. A subfolder id there
+    would drop the rule and send the comment to the wrong task -- or to none."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    resolve_mock = mocker.patch(
+        "src.main.booking_gate.resolve", return_value=MATCHED_DECISION
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert resolve_mock.call_args.args[1] == "root"
+
+
+def test_the_meta_document_names_the_employee_for_a_subfolder_recording(
+    mocker, tmp_path
+):
+    cfg = make_config(
+        folders=[EmployeeFolder("root", name="Анжелика", email="a@b.c")],
+        data_dir=tmp_path,
+    )
+    build_mock = mocker.patch("src.main.meta_doc.build", return_value={})
+    mocker.patch("src.main.meta_doc.to_yaml", return_value="")
+    mocker.patch("src.main.stt_document.assemble", return_value="")
+    mocker.patch("src.main.output.write_artifact")
+
+    main._write_call_documents(
+        MagicMock(), "v1", "a.mp4", "root", "meeting-1", "transcript", {},
+        cfg, tmp_path, item={}, booking_decision=MATCHED_DECISION,
+    )
+
+    assert build_mock.call_args.kwargs["folder_id"] == "root"
+
+
+# --- A cursor vouches only for the folders it was taken against -------------------
+#
+# Adding a folder is how an employee gets onboarded, not a one-off migration. The
+# recordings already sitting in that folder were never a change after the saved
+# cursor, so the feed will never name it: without noticing the config changed, the
+# backlog stays invisible until someone resets the cursor by hand.
+
+
+def test_a_cursor_saved_with_its_folders_reads_the_feed(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    changes_mock = mocker.patch(
+        "src.main.drive.list_changes", return_value=([], "tok-2")
+    )
+
+    main.run_once(MagicMock(), cfg)
+
+    changes_mock.assert_called_once_with(mocker.ANY, "tok-1")
+    tree_mock.assert_not_called()
+
+
+def test_adding_a_folder_sweeps_once_instead_of_trusting_the_feed(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    grown = make_config(folders=["root", "new"], data_dir=tmp_path, stt_provider="")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    changes_mock = mocker.patch("src.main.drive.list_changes")
+    token_mock = mocker.patch(
+        "src.main.drive.get_start_page_token", return_value="tok-fresh"
+    )
+
+    main.run_once(MagicMock(), grown)
+
+    changes_mock.assert_not_called()
+    assert tree_mock.call_count == 2
+    token_mock.assert_called_once()
+    assert change_cursor.read(_cursor_file(grown)) == "tok-fresh"
+
+
+def test_dropping_a_folder_also_sweeps_once(mocker, tmp_path):
+    """Not because shrinking misses anything, but because the pair is one identity:
+    treating a subset as covered would be a second rule, with its own way to be
+    wrong."""
+    cfg = make_config(folders=["root", "second"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    shrunk = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    changes_mock = mocker.patch("src.main.drive.list_changes")
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-fresh")
+
+    main.run_once(MagicMock(), shrunk)
+
+    changes_mock.assert_not_called()
+    tree_mock.assert_called_once()
+
+
+def test_a_cursor_with_no_recorded_folders_sweeps_once(mocker, tmp_path):
+    """An instance that predates the folder file, or one whose file is unreadable.
+    The cursor cannot be vouched for, and one sweep is the whole cost of finding
+    out -- after which the pair is written and the feed takes over again."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    change_cursor.write(change_cursor.path_for(cfg.data_dir), "tok-1")
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    changes_mock = mocker.patch("src.main.drive.list_changes")
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-fresh")
+
+    main.run_once(MagicMock(), cfg)
+
+    changes_mock.assert_not_called()
+    tree_mock.assert_called_once()
+    assert change_cursor.read_folders(
+        change_cursor.folders_path_for(cfg.data_dir)
+    ) == change_cursor.fingerprint(["root"])
+
+
+def test_the_sweep_records_the_folders_it_covered(mocker, tmp_path):
+    cfg = make_config(folders=["root", "second"], data_dir=tmp_path, stt_provider="")
+    mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-1")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read_folders(
+        change_cursor.folders_path_for(cfg.data_dir)
+    ) == change_cursor.fingerprint(["root", "second"])
+
+
+def test_a_cycle_that_could_not_list_records_no_folder_set(mocker, tmp_path):
+    """The same cycle_drained guard the cursor has, and it is what makes editing the
+    config before the folder is actually shared safe: that listing fails, which
+    counts as a folder error, which leaves both files alone until the share lands."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-1")
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        side_effect=RuntimeError("not shared yet"),
+    )
+    mocker.patch("src.main.time.sleep")
+    mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read(_cursor_file(cfg)) is None
+    assert (
+        change_cursor.read_folders(change_cursor.folders_path_for(cfg.data_dir))
+        is None
+    )
+
+
+def test_changes_mode_refuses_when_the_folder_set_changed(mocker, tmp_path):
+    """Reading the feed anyway would be worse than useless. The cycle would find
+    nothing pending, drain, and record the new folder set as vouched for without it
+    ever having been swept -- so the backlog it cannot see would stay invisible for
+    good, and the operator would have been told to run a cycle that no longer helps."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    grown = make_config(folders=["root", "new"], data_dir=tmp_path, stt_provider="")
+    changes_mock = mocker.patch(
+        "src.main.drive.list_changes", return_value=([], "tok-2")
+    )
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+
+    with pytest.raises(SystemExit, match="watched folders changed"):
+        main.run_once(MagicMock(), grown, mode="changes")
+
+    changes_mock.assert_not_called()
+    tree_mock.assert_not_called()
+    assert change_cursor.read(_cursor_file(grown)) == "tok-1"
+    assert change_cursor.read_folders(
+        change_cursor.folders_path_for(grown.data_dir)
+    ) == change_cursor.fingerprint(["root"])
+
+
+def test_a_walk_cycle_leaves_the_folder_set_alone(mocker, tmp_path):
+    """Walk is a look, not a new starting point: it must not become one by quietly
+    vouching for a config the feed was never asked about."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    grown = make_config(folders=["root", "new"], data_dir=tmp_path, stt_provider="")
+    mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+
+    main.run_once(MagicMock(), grown, mode="walk")
+
+    assert change_cursor.read(_cursor_file(grown)) == "tok-1"
+    assert change_cursor.read_folders(
+        change_cursor.folders_path_for(grown.data_dir)
+    ) == change_cursor.fingerprint(["root"])
+
+
+# --- The polling loop must be able to run without the feed ------------------------
+
+
+def test_the_service_loop_takes_the_configured_discovery_path(mocker):
+    """Mode is a CLI flag. Without passing the config through, the daemon could only
+    ever run auto -- and the one assumption still unproven about the feed (folders
+    shared *to* the service rather than owned by it) would have no switch."""
+    cfg = replace(make_config(folders=["f1"], poll_interval=1), run_discovery="walk")
+    mocker.patch("src.main.load_config", return_value=cfg)
+    mocker.patch("src.main.build_drive_service", return_value=MagicMock())
+    modes = []
+
+    def fake_run_once(svc, c, **kwargs):
+        modes.append(kwargs.get("mode"))
+        raise KeyboardInterrupt
+
+    mocker.patch("src.main.run_once", side_effect=fake_run_once)
+    mocker.patch("src.main.time.sleep")
+
+    with pytest.raises(KeyboardInterrupt):
+        main.main()
+
+    assert modes == ["walk"]
+
+
+# --- `since`: leaving a backlog alone without leaving it half-remembered ----------
+#
+# A folder shared to the service arrives with everything the person ever recorded.
+# The cutoff is a scope rule, not a record of work: nothing is written to Drive, so
+# moving the date back brings the backlog straight back into scope.
+
+
+def _dated_item(file_id, name, *, created=None, media_metadata=True):
+    item = _item(file_id, name)
+    if created is not None:
+        item["file"]["createdTime"] = created
+    item["has_media_metadata"] = media_metadata
+    return item
+
+
+# A room-code recording: Meet puts the meeting time in the name.
+OLD_CALL = "exf-wxzm-uzk (2026-09-09 17_42 GMT+2).mp4"
+NEW_CALL = "exf-wxzm-uzk (2026-11-20 17_42 GMT+2).mp4"
+
+
+def test_a_recording_older_than_since_is_left_alone(mocker, tmp_path):
+    cfg = replace(
+        make_config(folders=["root"], data_dir=tmp_path, stt_provider=""),
+        run_since="2026-10-01",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_dated_item("v1", OLD_CALL), _dated_item("v2", NEW_CALL)],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert process_mock.call_count == 1
+    assert process_mock.call_args.args[1]["file"]["name"] == NEW_CALL
+
+
+def test_the_meeting_time_in_the_name_beats_when_drive_received_it(mocker, tmp_path):
+    """The two answer different questions. These examples were recorded on the 9th
+    and re-uploaded on the 12th, which reset `createdTime` by three days; real Meet
+    lag is a couple of hours, which still carries a late-evening call into the next
+    day. Either way "calls from the 10th" has to mean the call."""
+    cfg = replace(
+        make_config(folders=["root"], data_dir=tmp_path, stt_provider=""),
+        run_since="2026-09-10",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[
+            _dated_item("v1", OLD_CALL, created="2026-09-12T05:54:48.536Z")
+        ],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    process_mock.assert_not_called()
+
+
+def test_a_name_without_a_time_falls_back_to_when_drive_received_it(mocker, tmp_path):
+    cfg = replace(
+        make_config(folders=["root"], data_dir=tmp_path, stt_provider=""),
+        run_since="2026-10-01",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[
+            _dated_item("v1", "hand-renamed.mp4", created="2026-08-01T10:00:00Z")
+        ],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    process_mock.assert_not_called()
+
+
+def test_a_recording_nobody_can_date_stays_in_scope(mocker, tmp_path):
+    """Fail open. Dropping a recording because its date is unreadable would be a
+    silent loss, which is the failure this whole area exists to remove."""
+    cfg = replace(
+        make_config(folders=["root"], data_dir=tmp_path, stt_provider=""),
+        run_since="2026-10-01",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_dated_item("v1", "hand-renamed.mp4")],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    process_mock.assert_called_once()
+
+
+def test_an_out_of_scope_recording_does_not_hold_the_changes_cursor(mocker, tmp_path):
+    """The one that makes this safe. An old recording Drive never finished
+    processing would otherwise count as deferred, and deferred holds the cursor -- so
+    the backlog an operator asked to ignore would freeze the feed instead of being
+    ignored. It is a permanent skip by design, like one over `--max-size`."""
+    cfg = replace(
+        make_config(folders=["root"], data_dir=tmp_path, stt_provider=""),
+        run_since="2026-10-01",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_dated_item("v1", OLD_CALL, media_metadata=False)],
+    )
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-1")
+    mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-1"
+
+
+def test_a_folders_own_since_overrides_the_global_one(mocker, tmp_path):
+    """Onboarding is an event about a person: whoever joins in three months brings a
+    backlog of their own, and one global date cannot be right for both."""
+    cfg = replace(
+        make_config(
+            folders=[
+                EmployeeFolder("early", since=""),
+                EmployeeFolder("late", since="2026-12-01"),
+            ],
+            data_dir=tmp_path,
+            stt_provider="",
+        ),
+        run_since="2026-09-01",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_dated_item("v1", NEW_CALL)],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg)
+
+    # The November call is in scope for the folder on the September default and out
+    # of scope for the one that only starts in December.
+    assert [c.args[2] for c in process_mock.call_args_list] == ["early"]
+
+
+def test_the_since_flag_overrides_every_configured_cutoff(mocker, tmp_path):
+    cfg = replace(
+        make_config(
+            folders=[EmployeeFolder("root", since="2026-12-01")],
+            data_dir=tmp_path,
+            stt_provider="",
+        ),
+        run_since="2026-12-01",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_dated_item("v1", OLD_CALL)],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), cfg, since="2026-01-01")
+
+    process_mock.assert_called_once()
+
+
+def test_a_dry_run_names_what_the_cutoff_leaves_out(mocker, tmp_path, caplog):
+    """Counted per folder in a real cycle -- a year of history would print itself
+    every ten minutes -- but named here, because this is where an operator looks to
+    find out what a date is about to do."""
+    cfg = replace(
+        make_config(folders=["root"], data_dir=tmp_path, stt_provider=""),
+        run_since="2026-10-01",
+    )
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_dated_item("v1", OLD_CALL)],
+    )
+
+    with caplog.at_level(logging.INFO):
+        main.run_once(MagicMock(), cfg, dry_run=True)
+
+    assert "not in scope" in caplog.text
+    assert OLD_CALL in caplog.text
+    assert "skipped_old=1" in caplog.text
+
+
+# --- Found by the live emulation, not by reading the code ------------------------
+
+
+def _drive_400(location):
+    """Drive's own error body, as captured live for a malformed page token."""
+    body = (
+        '{"error": {"code": 400, "message": "Invalid Value", "errors": '
+        '[{"reason": "invalid", "location": "%s", "locationType": "parameter"}]}}'
+    ) % location
+    return HttpError(MagicMock(status=400), body.encode("utf-8"))
+
+
+def test_a_malformed_cursor_is_swept_over_instead_of_failing_forever(mocker, tmp_path):
+    """Drive answers a corrupt page token with 400, not 404/410. Read as an ordinary
+    feed failure it held the cursor -- and a held cursor is the same bad token next
+    cycle, so the service failed every cycle for good while the cursor module said a
+    corrupt cursor costs one sweep. Reproduced live with `not-a-token` and `0`."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "not-a-token")
+    mocker.patch(
+        "src.main.drive.list_changes", side_effect=_drive_400("pageToken")
+    )
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.main.drive.get_start_page_token", return_value="tok-fresh")
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_called_once()
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-fresh"
+    notify_mock.assert_not_called()
+
+
+def test_a_400_about_anything_but_the_cursor_is_still_a_failure(mocker, tmp_path):
+    """The match is on the parameter, not on 400: a request broken some other way
+    must surface, not be quietly swept over every ten minutes."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    mocker.patch("src.main.drive.list_changes", side_effect=_drive_400("fields"))
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_not_called()
+    notify_mock.assert_called_once()
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-1"
+
+
+def test_a_400_without_a_readable_body_is_not_mistaken_for_a_bad_cursor(
+    mocker, tmp_path
+):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    mocker.patch("src.main.drive.list_changes", side_effect=_http_error(400))
+    tree_mock = mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+
+    tree_mock.assert_not_called()
+    assert change_cursor.read(_cursor_file(cfg)) == "tok-1"
+
+
+def test_one_configured_folder_is_one_listing_however_many_meetings_changed(
+    mocker, tmp_path
+):
+    """Found live: an old cursor made the feed name three meetings under one
+    employee, and the log reported that employee's folder three times over."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    _save_cursor(cfg, "tok-1")
+    mocker.patch(
+        "src.main.drive.list_changes",
+        return_value=(
+            [
+                _change("v1", "meeting-1"),
+                _change("v2", "meeting-2"),
+                _change("v3", "meeting-3"),
+            ],
+            "tok-2",
+        ),
+    )
+    mocker.patch("src.main.drive.find_configured_ancestor", return_value="root")
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        side_effect=lambda _service, container: [
+            _subfolder_item(f"v-{container}", f"{container}.mp4", container)
+        ],
+    )
+
+    found = main._discover(MagicMock(), cfg)
+
+    assert [folder_id for folder_id, _ in found.listings] == ["root"]
+    items = found.listings[0][1]
+    assert sorted(item["container_id"] for item in items) == [
+        "meeting-1", "meeting-2", "meeting-3",
+    ]
+
+
+def test_a_recording_that_always_fails_holds_the_cursor_every_cycle(mocker, tmp_path):
+    """A trade-off, pinned so that it is visible rather than rediscovered.
+
+    Holding the cursor is what keeps a failed recording from being lost; the price is
+    that a recording which can never succeed -- a corrupt upload, say -- holds it on
+    every cycle and is retried on every cycle, while the feed re-reads a tail that
+    grows until Drive expires the token and a sweep takes a fresh one. New recordings
+    still flow, because each cycle reads the changes after the held point too. Nothing
+    caps the retries today; if that ever changes, this test is where it shows."""
+    cfg = _one_change_cycle(mocker, tmp_path)
+    mocker.patch(
+        "src.main.drive.list_folder_state",
+        return_value=[_subfolder_item("v1", "a.mp4", "meeting-1")],
+    )
+    mocker.patch("src.main.booking_gate.resolve", return_value=MATCHED_DECISION)
+    process_mock = mocker.patch(
+        "src.main.process_item", side_effect=RuntimeError("not a video")
+    )
+    mocker.patch("src.main.notify.notify_error")
+
+    main.run_once(MagicMock(), cfg)
+    main.run_once(MagicMock(), cfg)
+
+    assert process_mock.call_count == 2
+    assert change_cursor.read(change_cursor.path_for(cfg.data_dir)) == "tok-1"
+
+
+def test_a_recording_drive_never_processes_is_held_only_within_the_grace(
+    mocker, tmp_path
+):
+    """Reproduced live with an upload that is not a video, so Drive never fills
+    `videoMediaMetadata`: inside the grace it is deferred and holds the cursor; past
+    it, it is treated as ready rather than waited on for ever."""
+    fresh = _item("v1", "a.mp4")
+    fresh["has_media_metadata"] = False
+    stale = _item("v2", "b.mp4")
+    stale["has_media_metadata"] = False
+    now = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
+    fresh["file"]["createdTime"] = (now - timedelta(minutes=5)).isoformat()
+    stale["file"]["createdTime"] = (now - timedelta(hours=3)).isoformat()
+
+    assert main._is_still_settling(fresh, now) is True
+    assert main._is_still_settling(stale, now) is False
+
+
+# --- a cycle that acts as each employee ---------------------------------------
+#
+# Delegation is resolved into an effective config before the cycle starts, so the
+# cycle itself is unchanged -- except for which client reads and writes each folder.
+
+
+def _delegated_config(emails, tmp_path, **extra):
+    cfg = make_config(folders=["placeholder"], data_dir=tmp_path, **extra)
+    return replace(
+        cfg,
+        folders=tuple(EmployeeFolder(folder_id="", email=email) for email in emails),
+        google_service_account={"client_email": "reader@project.iam.gserviceaccount.com"},
+    )
+
+
+def test_a_delegated_cycle_reads_each_folder_as_its_owner(mocker, tmp_path):
+    services = {"one@example.com": MagicMock(), "two@example.com": MagicMock()}
+    mocker.patch(
+        "src.delegation.auth.build_drive_service",
+        side_effect=lambda config, subject: services[subject],
+    )
+    roots = {services["one@example.com"]: "f1", services["two@example.com"]: "f2"}
+    mocker.patch(
+        "src.delegation.meet_root.resolve",
+        side_effect=lambda service, names: SimpleNamespace(
+            folder_id=roots[service], name="Google Meet", created_time="", candidates=1
+        ),
+    )
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Owner")
+    listings = {"f1": [_item("v1", "a.mp4")], "f2": [_item("v2", "b.mp4")]}
+    tree_mock = mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        side_effect=lambda svc, fid: listings[fid],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), _delegated_config(["one@example.com", "two@example.com"], tmp_path))
+
+    listed = {call.args[1]: call.args[0] for call in tree_mock.call_args_list}
+    assert listed == {"f1": services["one@example.com"], "f2": services["two@example.com"]}
+    processed = {call.args[2]: call.args[0] for call in process_mock.call_args_list}
+    assert processed == {"f1": services["one@example.com"], "f2": services["two@example.com"]}
+
+
+def test_the_resolved_name_reaches_the_pipeline(mocker, tmp_path):
+    """A config that carries only an address still tells speaker_roles who is who."""
+    mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch(
+        "src.delegation.meet_root.resolve",
+        return_value=SimpleNamespace(
+            folder_id="f1", name="Google Meet", created_time="", candidates=1
+        ),
+    )
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Real Name")
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state", return_value=[_item("v1", "a.mp4")]
+    )
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(MagicMock(), _delegated_config(["one@example.com"], tmp_path))
+
+    config_used = process_mock.call_args.args[3]
+    assert config_used.folder_by_id("f1").name == "Real Name"
+
+
+def test_one_employee_the_domain_refuses_does_not_end_the_cycle(mocker, tmp_path):
+    working = MagicMock()
+
+    def build(config, subject):
+        if subject == "gone@example.com":
+            raise AuthError("gone@example.com is not a user in this domain")
+        return working
+
+    mocker.patch("src.delegation.auth.build_drive_service", side_effect=build)
+    mocker.patch(
+        "src.delegation.meet_root.resolve",
+        return_value=SimpleNamespace(
+            folder_id="f2", name="Google Meet", created_time="", candidates=1
+        ),
+    )
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Owner")
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state", return_value=[_item("v2", "b.mp4")]
+    )
+    mocker.patch("src.main.notify.notify_error")
+    process_mock = mocker.patch("src.main.process_item")
+
+    main.run_once(
+        MagicMock(), _delegated_config(["gone@example.com", "two@example.com"], tmp_path)
+    )
+
+    assert [call.args[2] for call in process_mock.call_args_list] == ["f2"]
+
+
+def test_an_employee_who_cannot_be_read_is_an_error_not_a_drained_cycle(
+    mocker, tmp_path, caplog
+):
+    """A skipped employee must show up in the summary, or the cycle lies about itself."""
+    mocker.patch(
+        "src.delegation.auth.build_drive_service",
+        side_effect=AuthError("delegation is not authorized"),
+    )
+    mocker.patch("src.main.notify.notify_error")
+
+    with caplog.at_level(logging.INFO):
+        main.run_once(MagicMock(), _delegated_config(["one@example.com"], tmp_path))
+
+    summary = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Cycle summary")
+    )
+    assert "folder_errors=1" in summary
+
+
+def test_a_delegated_cycle_takes_no_changes_cursor(mocker, tmp_path):
+    """The journal belongs to one account; here every folder is a different one."""
+    mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch(
+        "src.delegation.meet_root.resolve",
+        return_value=SimpleNamespace(
+            folder_id="f1", name="Google Meet", created_time="", candidates=1
+        ),
+    )
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Owner")
+    mocker.patch("src.main.drive.list_folder_tree_state", return_value=[])
+    token_mock = mocker.patch("src.main.drive.get_start_page_token")
+
+    main.run_once(MagicMock(), _delegated_config(["one@example.com"], tmp_path))
+
+    token_mock.assert_not_called()
+    assert not (tmp_path / "changes_cursor.txt").exists()

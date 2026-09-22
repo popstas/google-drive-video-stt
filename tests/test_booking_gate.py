@@ -1,6 +1,6 @@
 import re
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,7 +16,18 @@ from src.booking_gate import (
 from src.call_booking import CallBooking, append
 from src.config import Config, EmployeeFolder, NameRule
 
-MATCHED_NAME = "Call with Dmitrii - 2026/08/08 09:00 GMT+04:00 – Recording.mp4"
+# The journal keeps bookings for ``call_booking.RETENTION_DAYS``, so a booking pinned
+# to an absolute date stops matching once that many days have passed -- these tests
+# began failing on their own, without a code change. Anchoring to yesterday keeps them
+# deterministic in every way that matters while staying inside the window.
+MATCHED_START = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+    hour=5, minute=0, second=0, microsecond=0
+)
+MATCHED_NAME = (
+    "Call with Dmitrii - "
+    + (MATCHED_START + timedelta(hours=4)).strftime("%Y/%m/%d %H:%M")
+    + " GMT+04:00 – Recording.mp4"
+)
 
 
 @pytest.fixture
@@ -40,7 +51,7 @@ def config(tmp_path):
 
 
 def _seed(config, *, minutes_offset=0, email="kate@example.com", task_id="851030"):
-    start = datetime(2026, 8, 8, 5, minutes_offset, tzinfo=timezone.utc)
+    start = MATCHED_START + timedelta(minutes=minutes_offset)
     append(
         config.call_bookings_file,
         CallBooking(task_id=task_id, manager_email=email, start_time=start),
@@ -300,3 +311,22 @@ def test_select_stale_marks_skips_files_with_unparseable_times():
     ]
 
     assert select_stale_marks(files) == []
+
+
+def test_a_known_meeting_time_is_used_instead_of_the_name(config, mocker):
+    """Meet said when the call began; the name is a worse rendering of the same moment.
+
+    Without it this very recording answers `no-meeting-time` and reaches no task.
+    """
+    _seed(config)
+    parse = mocker.patch("src.booking_gate.parse_meeting_start")
+
+    decision = resolve(
+        {"id": "v1", "name": "hand-uploaded.mp4"},
+        "f1",
+        config,
+        meeting_start=MATCHED_START,
+    )
+
+    assert decision.state == "matched"
+    parse.assert_not_called()
