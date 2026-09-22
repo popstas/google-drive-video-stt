@@ -796,3 +796,40 @@ def test_an_unauthorized_meet_scope_names_the_meet_scope(tmp_path, mocker):
     assert "meetings.space.readonly" in message
     assert "auth/drive" not in message
     assert "123456789" in message
+
+
+def test_calendar_is_asked_as_the_employee_with_the_read_only_scope(tmp_path, mocker):
+    cfg = _delegating_config(tmp_path)
+    base = MagicMock()
+    delegated = MagicMock()
+    base.with_subject.return_value = delegated
+    from_info = mocker.patch(
+        "src.auth.service_account.Credentials.from_service_account_info",
+        return_value=base,
+    )
+    build_mock = mocker.patch("src.auth.build", return_value="calendar service")
+
+    result = auth.build_calendar_service(config=cfg, subject="one@example.com")
+
+    assert result == "calendar service"
+    from_info.assert_called_once_with(
+        SERVICE_ACCOUNT_INFO,
+        scopes=["https://www.googleapis.com/auth/calendar.events.readonly"],
+    )
+    base.with_subject.assert_called_once_with("one@example.com")
+    build_mock.assert_called_once_with(
+        "calendar", "v3", credentials=delegated, cache_discovery=False
+    )
+
+
+def test_calendar_without_delegation_is_refused_with_the_reason(tmp_path, mocker):
+    cfg = MagicMock()
+    cfg.data_dir = tmp_path
+    cfg.uses_delegation = False
+    build_mock = mocker.patch("src.auth.build")
+
+    with pytest.raises(auth.AuthError) as excinfo:
+        auth.build_calendar_service(config=cfg, subject="one@example.com")
+
+    assert "calendar.events.readonly" in str(excinfo.value)
+    build_mock.assert_not_called()
