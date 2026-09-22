@@ -300,6 +300,9 @@ class Config:
     # On by default because it is pure saving; switchable because a deployment
     # that wants every recording transcribed must be able to say so.
     meet_skip_empty_calls: bool = True
+    # Read the invited outsiders' addresses from each call's calendar event. Off by
+    # default: it needs the calendar.events.readonly scope authorized first.
+    calendar_client_emails: bool = False
     config_file: Path | None = None
 
     @property
@@ -1174,6 +1177,9 @@ def _config_from_yaml(
     meet_skip_empty_calls = _yaml_bool(
         _as_mapping(raw.get("meet"), "meet").get("skip_empty_calls"), default=True
     )
+    calendar_client_emails = _yaml_bool(
+        _as_mapping(raw.get("calendar"), "calendar").get("client_emails"), default=False
+    )
 
     # Clean break: a config still on the old flat list must be rewritten by hand so
     # each folder gains its employee, rather than silently polling nameless folders.
@@ -1413,6 +1419,7 @@ def _config_from_yaml(
         meet_first_look_hours=meet_first_look_hours,
         meet_fallback=meet_fallback,
         meet_skip_empty_calls=meet_skip_empty_calls,
+        calendar_client_emails=calendar_client_emails,
         config_file=config_file,
     )
 
@@ -1737,6 +1744,10 @@ def _default_config_dict(
             # telegram chat.
             "ignore_telegram_when_planfix": False,
         },
+        # true = add the invited outsiders' emails (the client) to .meta.yml and the
+        # Telegram summary. Needs calendar.events.readonly authorized for the service
+        # account's client id and the Calendar API enabled in its project.
+        "calendar": {"client_emails": False},
         # Google auth is inline-first and config-owned. The generated config ships an
         # empty block (no *_file pointers) so the data_dir fallback applies until the
         # operator runs `gdstt auth import-credentials` / `auth use-files`.
@@ -1953,6 +1964,7 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "fallback": config.meet_fallback,
             "skip_empty_calls": config.meet_skip_empty_calls,
         },
+        "calendar": {"client_emails": config.calendar_client_emails},
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
         # the prompt text stays owned by the .md assets; disabled built-ins (e.g.

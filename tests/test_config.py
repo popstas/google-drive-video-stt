@@ -3520,3 +3520,22 @@ def test_the_skip_switch_survives_a_rewrite(tmp_path):
     written = _config_to_yaml_dict(cfg, tmp_path / "config.yml")
 
     assert written["meet"]["skip_empty_calls"] is False
+
+
+def test_calendar_client_emails_defaults_to_off(tmp_path):
+    assert _load_config(tmp_path, {}).calendar_client_emails is False
+
+
+def test_calendar_client_emails_is_read(tmp_path):
+    config = _load_config(tmp_path, {"calendar": {"client_emails": True}})
+    assert config.calendar_client_emails is True
+
+
+def test_default_config_writes_the_calendar_client_emails_key():
+    """Off in a fresh config: the admin has to authorize the scope first."""
+    assert _default_config_dict()["calendar"] == {"client_emails": False}
+
+
+def test_calendar_client_emails_round_trips(tmp_path):
+    config = _load_config(tmp_path, {"calendar": {"client_emails": True}})
+    assert _config_to_yaml_dict(config)["calendar"] == {"client_emails": True}
