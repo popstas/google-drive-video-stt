@@ -11,14 +11,13 @@ from __future__ import annotations
 import hmac
 import json
 import logging
-import re
 import threading
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from src.call_booking import CallBooking, append
+from src.call_booking import CALENDLY_UUID_RE, CallBooking, append
 from src.config import Config
 
 logger = logging.getLogger(__name__)
@@ -57,9 +56,6 @@ def _parse_start_time(raw: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-_CALENDLY_UUID_RE = re.compile(r"[A-Za-z0-9-]+")
-
-
 def _calendly_event_uuid(raw: object) -> str:
     """The Calendly event's uuid, or "" when there is none worth linking.
 
@@ -74,7 +70,7 @@ def _calendly_event_uuid(raw: object) -> str:
         logger.warning("Ignoring a non-string calendly_event_uuid: %s", type(raw).__name__)
         return ""
     value = raw.strip().rstrip("/").rsplit("/", 1)[-1]
-    if value and not _CALENDLY_UUID_RE.fullmatch(value):
+    if value and not CALENDLY_UUID_RE.fullmatch(value):
         logger.warning("Ignoring a calendly_event_uuid that is not a uuid: %r", value[:80])
         return ""
     return value

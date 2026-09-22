@@ -12,6 +12,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +23,10 @@ logger = logging.getLogger(__name__)
 # the journal only exists to match a recording that lands hours after its call, and no
 # deployment needs to tune that.
 RETENTION_DAYS = 30
+
+# What a Calendly event uuid may hold. It is pasted into a link template, so anything
+# beyond letters, digits and dashes could rewrite the link instead of naming an event.
+CALENDLY_UUID_RE = re.compile(r"[A-Za-z0-9-]+")
 
 
 @dataclass(frozen=True)
@@ -64,13 +69,15 @@ def _from_dict(raw: object) -> CallBooking | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     calendly_event_uuid = raw.get("calendly_event_uuid")
+    if not isinstance(calendly_event_uuid, str) or not CALENDLY_UUID_RE.fullmatch(
+        calendly_event_uuid
+    ):
+        calendly_event_uuid = ""
     return CallBooking(
         task_id=task_id,
         manager_email=manager_email,
         start_time=parsed.astimezone(timezone.utc),
-        calendly_event_uuid=(
-            calendly_event_uuid if isinstance(calendly_event_uuid, str) else ""
-        ),
+        calendly_event_uuid=calendly_event_uuid,
     )
 
 

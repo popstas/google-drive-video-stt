@@ -197,3 +197,15 @@ def test_a_booking_without_a_uuid_writes_no_uuid_key(tmp_path):
     append(path, _booking())
 
     assert "calendly_event_uuid" not in path.read_text(encoding="utf-8")
+
+
+def test_a_journal_uuid_that_cannot_go_into_a_url_is_read_as_none(tmp_path):
+    """The receiver validates, but the journal is a plain file anyone can edit."""
+    path = tmp_path / "call_bookings.jsonl"
+    path.write_text(
+        '{"task_id": "851030", "manager_email": "manager@example.com", '
+        '"start_time": "2026-08-11T07:00:00+00:00", "calendly_event_uuid": "../x"}\n',
+        encoding="utf-8",
+    )
+
+    assert load(path, now=_utc(11, 12))[0].calendly_event_uuid == ""
