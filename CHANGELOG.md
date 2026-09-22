@@ -42,6 +42,7 @@
 
 ### Bug Fixes
 
+- Read a journal's calendly uuid through the same check the receiver uses
 - Give the calendar match its own half-hour window
 - A bad calendly uuid drops the link, not the booking
 - Match only a calendar event that starts near the call

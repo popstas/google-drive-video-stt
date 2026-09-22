@@ -6557,7 +6557,7 @@ def test_a_calendar_failure_costs_only_the_emails(mocker, caplog):
     )
 
     assert emails == []
-    assert "AuthError" in caplog.text
+    assert "unauthorized_client" in caplog.text
 
 
 def test_the_meta_document_carries_the_client_emails(tmp_path, mocker):
@@ -6589,3 +6589,86 @@ def test_planfix_comment_does_not_carry_the_clients_email():
     )
 
     assert "a@x.com" not in html
+
+
+def _partial_rerun_config(tmp_path):
+    return replace(
+        _stt_config(tmp_path),
+        folders=(
+            EmployeeFolder(
+                "folderA", name="Kate", email="kate@example.com", telegram=("-1001",)
+            ),
+        ),
+        telegram_bot_token="bot-token",
+        planfix_presets=("keypoints",),
+    )
+
+
+def _leave_keypoints_on_disk(cfg):
+    path = main._local_artifact_path(cfg, _STT_NAME, _KEYPOINTS_BUILTIN.artifact_suffix)
+    path.write_text("## Задачи\n\n- Собрать документы", encoding="utf-8")
+
+
+def test_a_partial_rerun_still_sends_the_keypoints_to_telegram(tmp_path, monkeypatch):
+    """`gdstt reprocess <id> 3` reruns meta alone; without a webhook the stage returns
+    only meta, and the summary used to go out empty -- that is, not at all."""
+    cfg = _partial_rerun_config(tmp_path)
+    _leave_keypoints_on_disk(cfg)
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    monkeypatch.setattr(main.drive, "set_file_app_properties", MagicMock())
+
+    main._send_telegram_summary(
+        MagicMock(), {"file": {"name": _STT_NAME}}, "fid1", "folderA", cfg,
+        {"meta": "---\nsubject: x\n---"}, UNMATCHED_DECISION,
+    )
+
+    send.assert_called_once()
+    assert "Собрать документы" in send.call_args[0][0]
+
+
+def test_a_partial_rerun_still_comments_the_keypoints_into_planfix(tmp_path, monkeypatch):
+    cfg = replace(
+        _partial_rerun_config(tmp_path),
+        planfix_create_comment_url="https://planfix.example/comment",
+    )
+    _leave_keypoints_on_disk(cfg)
+    comment = MagicMock(return_value=True)
+    monkeypatch.setattr(main.planfix, "send_comment", comment)
+    monkeypatch.setattr(main.drive, "set_file_app_properties", MagicMock())
+
+    main._send_planfix_comment(
+        MagicMock(), {"file": {"name": _STT_NAME}}, "fid1", cfg,
+        {"meta": "---\nsubject: x\n---"}, MATCHED_DECISION,
+    )
+
+    comment.assert_called_once()
+    assert "Собрать документы" in comment.call_args.kwargs["description"]
+
+
+def test_a_calendar_failure_says_why_in_the_log(mocker, caplog):
+    """The admin fixing the delegation reads this line; the type alone says nothing."""
+    mocker.patch(
+        "src.main.auth.build_calendar_service",
+        side_effect=main.AuthError("authorize calendar.events.readonly for client 123"),
+    )
+
+    main._client_emails(
+        {"meeting_start": _CALENDAR_START}, "rec.mp4", "folderA", _calendar_config()
+    )
+
+    assert "authorize calendar.events.readonly for client 123" in caplog.text
+
+
+def test_planfix_labels_the_new_code_fields():
+    html = main._planfix_description(
+        {"keypoints": "Задачи: раз"},
+        ("keypoints",),
+        {"client_emails": ["a@x.com"], "calendly_url": "https://calendly.com/e/1"},
+        ("client_emails", "calendly_url"),
+        meta_entity.default_entities(),
+    )
+
+    assert "Email клиента" in html
+    assert "a@x.com" in html
+    assert "Calendly" in html

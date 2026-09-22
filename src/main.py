@@ -466,6 +466,19 @@ def _artifact_text(
         return ""
 
 
+def _summary_artifacts(artifacts: dict[str, str], config: Config, mp4_name: str) -> dict[str, str]:
+    """The summary presets' texts, this cycle's or the ones an earlier cycle left.
+
+    A rerun of some presets returns only those (the webhook backfill is off without a
+    receiver), so ``gdstt reprocess <id> <meta>`` used to send a summary with no
+    keypoints -- which is no summary at all.
+    """
+    return {
+        name: _artifact_text(name, artifacts, config, mp4_name)
+        for name in config.planfix_presets
+    }
+
+
 # How far a call's start may sit from its calendar slot. Wider than the booking
 # threshold on evidence: a real call on us1 started 16 minutes early. A workshop that
 # began hours before an unscheduled call still stays out.
@@ -500,6 +513,11 @@ def _client_emails(item: dict, file_name: str, folder_id: str, config: Config) -
             own_domains=own_domains,
             window_minutes=_CALENDAR_WINDOW_MINUTES,
         )
+    except (AuthError, HttpError) as exc:
+        # These carry what to fix: the scope and client id to authorize, or the API to
+        # enable. The admin setting this up reads exactly this line.
+        logger.warning("Could not read the calendar invitees of %s: %s", file_name, exc)
+        return []
     except Exception as exc:
         logger.warning(
             "Could not read the calendar invitees of %s: %s", file_name, type(exc).__name__
@@ -917,6 +935,8 @@ def _webhook_payload(
 _PLANFIX_CODE_LABELS = {
     "manager": "Менеджер",
     "client": "Клиент",
+    "client_emails": "Email клиента",
+    "calendly_url": "Calendly",
     "date": "Дата",
     "duration": "Длительность",
     "video_url": "Запись",
@@ -1191,7 +1211,7 @@ def _send_planfix_comment(
         return
 
     description = _planfix_description(
-        artifacts,
+        _summary_artifacts(artifacts, config, item.get("file", {}).get("name", "")),
         config.planfix_presets,
         meta_document,
         config.planfix_meta_fields,
@@ -1314,7 +1334,7 @@ def _send_telegram_summary(
         return
 
     text = _telegram_summary(
-        artifacts,
+        _summary_artifacts(artifacts, config, name or ""),
         config.planfix_presets,
         meta_document,
         config.planfix_meta_fields,
