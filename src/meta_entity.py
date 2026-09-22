@@ -28,6 +28,7 @@ CODE_FIELDS = (
     "manager",
     "manager_email",
     "client",
+    "client_emails",
     "date",
     "duration",
     "language",

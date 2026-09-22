@@ -229,3 +229,17 @@ def test_build_leaves_the_calendly_url_empty_without_a_booking(config_with_folde
         config_with_folder, call_booking_calendly_url="https://calendly.com/app/events/<uuid>"
     )
     assert _document(config)["calendly_url"] == ""
+
+
+def test_build_carries_the_client_emails(config_with_folder):
+    document = _document(config_with_folder, client_emails=["client@gmail.com"])
+    assert document["client_emails"] == ["client@gmail.com"]
+
+
+def test_build_leaves_the_client_emails_empty_by_default(config_with_folder):
+    assert _document(config_with_folder)["client_emails"] == []
+
+
+def test_client_emails_follow_the_client_in_the_field_order():
+    fields = meta_entity.CODE_FIELDS
+    assert fields.index("client_emails") == fields.index("client") + 1

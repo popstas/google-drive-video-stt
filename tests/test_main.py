@@ -6475,3 +6475,115 @@ def test_a_delegated_cycle_takes_no_changes_cursor(mocker, tmp_path):
 
     token_mock.assert_not_called()
     assert not (tmp_path / "changes_cursor.txt").exists()
+
+
+_CALENDAR_START = datetime(2026, 9, 22, 10, 0, tzinfo=timezone.utc)
+
+
+def _calendar_config(**overrides):
+    config = make_config(
+        folders=[
+            EmployeeFolder("folderA", name="Kate", email="kate@expertizeme.org"),
+            EmployeeFolder("folderB", name="Bob", email="bob@Other-Own.com"),
+        ],
+    )
+    fields = {
+        "calendar_client_emails": True,
+        "google_service_account": {"client_email": "sa@p.iam.gserviceaccount.com"},
+        **overrides,
+    }
+    return replace(config, **fields)
+
+
+def test_client_emails_ask_the_folders_calendar(mocker):
+    build = mocker.patch("src.main.auth.build_calendar_service", return_value="svc")
+    lookup = mocker.patch(
+        "src.main.calendar_api.client_emails", return_value=["client@gmail.com"]
+    )
+
+    emails = main._client_emails(
+        {"meeting_start": _CALENDAR_START}, "rec.mp4", "folderA", _calendar_config()
+    )
+
+    assert emails == ["client@gmail.com"]
+    assert build.call_args.kwargs["subject"] == "kate@expertizeme.org"
+    kwargs = lookup.call_args.kwargs
+    assert kwargs["start"] == _CALENDAR_START
+    assert set(kwargs["own_domains"]) == {"expertizeme.org", "other-own.com"}
+    assert kwargs["window_minutes"] == 15
+
+
+def test_client_emails_fall_back_to_the_time_in_the_name(mocker):
+    mocker.patch("src.main.auth.build_calendar_service", return_value="svc")
+    lookup = mocker.patch("src.main.calendar_api.client_emails", return_value=[])
+    name = "Call - 2026/09/22 14:00 GMT+04:00 – Recording.mp4"
+
+    main._client_emails({}, name, "folderA", _calendar_config())
+
+    assert lookup.call_args.kwargs["start"] == _CALENDAR_START
+
+
+@pytest.mark.parametrize(
+    "item, name, folder, overrides",
+    [
+        ({"meeting_start": _CALENDAR_START}, "rec.mp4", "folderA",
+         {"calendar_client_emails": False}),
+        ({"meeting_start": _CALENDAR_START}, "rec.mp4", "folderA",
+         {"google_service_account": None}),
+        ({"meeting_start": _CALENDAR_START}, "rec.mp4", "unknown", {}),
+        ({}, "no time here.mp4", "folderA", {}),
+    ],
+    ids=["flag-off", "no-delegation", "no-folder-email", "no-start"],
+)
+def test_client_emails_make_no_request_without_what_they_need(
+    mocker, item, name, folder, overrides
+):
+    build = mocker.patch("src.main.auth.build_calendar_service")
+
+    assert main._client_emails(item, name, folder, _calendar_config(**overrides)) == []
+    build.assert_not_called()
+
+
+def test_a_calendar_failure_costs_only_the_emails(mocker, caplog):
+    mocker.patch(
+        "src.main.auth.build_calendar_service",
+        side_effect=main.AuthError("unauthorized_client"),
+    )
+
+    emails = main._client_emails(
+        {"meeting_start": _CALENDAR_START}, "rec.mp4", "folderA", _calendar_config()
+    )
+
+    assert emails == []
+    assert "AuthError" in caplog.text
+
+
+def test_the_meta_document_carries_the_client_emails(tmp_path, mocker):
+    mocker.patch("src.main._client_emails", return_value=["client@gmail.com"])
+    document = _write_documents(_stt_config(tmp_path), tmp_path, {})
+    assert document["client_emails"] == ["client@gmail.com"]
+
+
+def test_telegram_summary_names_the_clients_email():
+    text = main._telegram_summary(
+        {"keypoints": "Задачи: раз"},
+        ("keypoints",),
+        {**_LINKED_DOCUMENT, "client_emails": ["a@x.com", "b@y.com"]},
+        ("subject",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "Email клиента: a@x.com, b@y.com" in text
+    assert text.index("Email клиента") < text.index("Planfix:")
+
+
+def test_planfix_comment_does_not_carry_the_clients_email():
+    html = main._planfix_description(
+        {"keypoints": "Задачи: раз"},
+        ("keypoints",),
+        {**_LINKED_DOCUMENT, "client_emails": ["a@x.com"]},
+        ("subject",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "a@x.com" not in html

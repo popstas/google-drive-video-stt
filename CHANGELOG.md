@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add the calendar.client_emails switch
 - Read a call's outside invitees from its calendar event
 - Link the planfix task and calendly booking in telegram summaries
 - Accept several summary chats as one comma-separated string

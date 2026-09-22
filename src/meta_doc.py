@@ -13,6 +13,7 @@ tell "nobody asked about the referral" from "this build does not produce that fi
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from datetime import datetime
 
 import yaml
@@ -127,6 +128,7 @@ def build(
     processed_at: datetime,
     container_id: str = "",
     calendly_event_uuid: str = "",
+    client_emails: Iterable[str] = (),
 ) -> dict[str, object]:
     """Assemble the full meta document for one recording.
 
@@ -139,6 +141,7 @@ def build(
         "manager": employee.name if employee else "",
         "manager_email": employee.email if employee else "",
         "client": _client(file_name),
+        "client_emails": list(client_emails),
         "date": _date(file_name),
         "duration": _duration(transcript),
         "language": config.stt_language,

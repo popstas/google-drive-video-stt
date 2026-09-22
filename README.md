@@ -705,6 +705,7 @@ variable is read at runtime:
 | `webhook.url` | (empty) | Completion webhook endpoint; must be an absolute `http://` or `https://` URL. Empty disables it; a failure never fails the file |
 | `webhook.token` | (empty) | Optional bearer token sent as `Authorization: Bearer <token>` |
 | `planfix.meta_fields` | `[subject, tags, referral, referral_note, case_deadline, deadlines, target_filing, duration, video_url]` | Which meta fields open the Planfix comment, and in what order |
+| `calendar.client_emails` | `false` | Read the invited outsiders' addresses (the client) from each call's calendar event into `client_emails` and the Telegram summary's `Email клиента:` line. Needs delegation and the `calendar.events.readonly` scope — see [Client emails from the calendar](#client-emails-from-the-calendar) |
 | `call_booking.calendly_url` | (empty) | A Calendly event's web address with `<uuid>` where a booking's `calendly_event_uuid` goes. Fills `calendly_url` in the meta document and the `Calendly:` link of the Telegram summary. Empty leaves both blank |
 | `planfix.task_url` | (empty) | Where a task lives in the web UI, e.g. `https://<account>.planfix.com/task/<task-id>`. Fills `planfix_task_url` in the meta document and the link column of `gdstt planfix sent`. Empty leaves both blank |
 
@@ -1479,12 +1480,33 @@ routed by a `call_booking.name_rules` entry, does not. It ignores
 `ignore_telegram_when_planfix`, and unlike `telegram` it does not make the folder
 recognized unconditionally. A chat listed in both fields gets one message.
 
-Under the header come two links the CRM comment does not carry: `Planfix: <url>` to
-the call's task (from `planfix.task_url`, whenever the call was routed to a task) and
-`Calendly: <url>` to its booking (from `call_booking.calendly_url`, only for a booking
-that came with a `calendly_event_uuid`). Either is left out when there is nothing to
-link. They are not `planfix.meta_fields`: a Planfix comment linking to its own task is
-noise.
+Under the header come lines the CRM comment does not carry: `Email клиента: <addresses>`
+(see [Client emails from the calendar](#client-emails-from-the-calendar)), then
+`Planfix: <url>` to the call's task (from `planfix.task_url`, whenever the call was
+routed to a task) and `Calendly: <url>` to its booking (from `call_booking.calendly_url`,
+only for a booking that came with a `calendly_event_uuid`). Each is left out when there
+is nothing to show. They are not `planfix.meta_fields`: a Planfix comment linking to
+its own task is noise.
+
+### Client emails from the calendar
+
+Meet names a call's participants but never gives their addresses. With
+`calendar.client_emails: true`, gdstt reads them from the calendar event behind the
+call instead: as the folder's employee, it takes the event with a Meet link whose start
+is nearest to the call's (within `call_booking.threshold_minutes`), and keeps the
+attendees that are not the employee, not a room, and not at a domain of any
+`folders[].email`. A Calendly booking counts: Calendly writes the invitee into the
+host's calendar. The result is `client_emails` in the meta document (so `.meta.yml`,
+the `.stt` meta block and the completion webhook) and the `Email клиента:` line of the
+Telegram summary; the Planfix comment is unchanged.
+
+It needs domain-wide delegation and, for the same client id, one more scope in Admin
+Console (Security -> Access and data control -> API controls -> Manage Domain-Wide
+Delegation -> edit the entry; the list is replaced on save, so keep the existing
+scopes): `https://www.googleapis.com/auth/calendar.events.readonly`. The Google
+Calendar API must also be enabled in the service account's Cloud project. Until both
+are in place every lookup logs `Could not read the calendar invitees of ...` and the
+field stays empty -- processing itself never fails over it.
 
 The link in the header opens the recording's meeting subfolder, which holds the video
 and the transcript together, so a reader without access can request it for that one

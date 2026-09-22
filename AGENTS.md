@@ -526,8 +526,13 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   `telegram` alone (`folder_telegram_chats`), or a calendly chat would transcribe
   every unbooked call at full cost. Chats in both fields get one message.
 - The Telegram summary (only it, not the Planfix comment) ends its header with
-  `_telegram_link_lines`: `Planfix: <planfix_task_url>` and `Calendly: <calendly_url>`
-  from the meta document, each only when non-empty. `calendly_url` is
+  `_telegram_extra_lines`: `Email клиента: <client_emails>`, `Planfix: <planfix_task_url>`
+  and `Calendly: <calendly_url>` from the meta document, each only when non-empty.
+  `client_emails` comes from `calendar_api.client_emails` via `main._client_emails`
+  (opt-in `calendar.client_emails`, delegated `calendar.events.readonly` as the folder's
+  email): the Meet-linked event nearest the call start, attendees minus
+  self/resources/the folders' own domains; any failure is a warning and `[]`, never a
+  failed recording. `calendly_url` is
   `call_booking.calendly_url` filled with the booking's optional `calendly_event_uuid`
   (webhook field, `[A-Za-z0-9-]+`, stored in the journal only when present and carried
   on `BookingDecision`); a name rule has no booking and so no Calendly link.

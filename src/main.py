@@ -17,8 +17,10 @@ from googleapiclient.errors import HttpError
 import requests
 
 from src import (
+    auth,
     booking_gate,
     booking_server,
+    calendar_api,
     change_cursor,
     delegation,
     drive,
@@ -464,6 +466,41 @@ def _artifact_text(
         return ""
 
 
+def _client_emails(item: dict, file_name: str, folder_id: str, config: Config) -> list[str]:
+    """The call's invited outsiders, from the employee's calendar; ``[]`` on any doubt.
+
+    A nicety, not a requirement: a missing scope or a calendar outage is a warning and
+    an empty list, never a failed recording and never an escalation.
+    """
+    if not config.calendar_client_emails or not config.uses_delegation:
+        return []
+    folder = config.folder_by_id(folder_id)
+    subject = folder.email.strip() if folder else ""
+    if not subject:
+        return []
+    start = item.get("meeting_start") or parse_meeting_start(file_name)
+    if start is None:
+        return []
+    own_domains = {
+        entry.email.rsplit("@", 1)[1].strip().lower()
+        for entry in config.folders
+        if "@" in entry.email
+    }
+    try:
+        service = auth.build_calendar_service(config=config, subject=subject)
+        return calendar_api.client_emails(
+            service,
+            start=start,
+            own_domains=own_domains,
+            window_minutes=config.call_booking_threshold_minutes,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not read the calendar invitees of %s: %s", file_name, type(exc).__name__
+        )
+        return []
+
+
 def _write_call_documents(
     service: Any,
     file_id: str,
@@ -503,6 +540,7 @@ def _write_call_documents(
         processed_at=datetime.now(timezone.utc),
         container_id=container_id,
         calendly_event_uuid=booking_decision.calendly_event_uuid,
+        client_emails=_client_emails(item, file_name, folder_id, config),
     )
     meta_yaml = meta_doc.to_yaml(document, config.meta_entities)
 
@@ -1025,11 +1063,18 @@ def _to_plain_text(markdown: str) -> str:
 _TELEGRAM_LINKS = (("Planfix", "planfix_task_url"), ("Calendly", "calendly_url"))
 
 
-def _telegram_link_lines(document: dict[str, object] | None) -> list[str]:
-    """Markdown links to the call's Planfix task and Calendly booking, those it has."""
+def _telegram_extra_lines(document: dict[str, object] | None) -> list[str]:
+    """The client's email and links to the Planfix task and Calendly booking.
+
+    Telegram only: the CRM already holds the client, and a comment linking to its
+    own task is noise.
+    """
     if not document:
         return []
     lines = []
+    emails = document.get("client_emails") or []
+    if isinstance(emails, list) and emails:
+        lines.append("Email клиента: " + ", ".join(str(email) for email in emails))
     for label, field_name in _TELEGRAM_LINKS:
         url = " ".join(str(document.get(field_name) or "").split())
         if url:
@@ -1054,7 +1099,7 @@ def _telegram_summary(
     if not sections:
         return ""
     lines = _planfix_meta_lines(meta_document, meta_fields, meta_entities)
-    lines.extend(_telegram_link_lines(meta_document))
+    lines.extend(_telegram_extra_lines(meta_document))
     header = "\n".join(lines)
     blocks = [header] if header else []
     blocks.extend(sections)
