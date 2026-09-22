@@ -42,6 +42,7 @@
 
 ### Bug Fixes
 
+- Summaries of a partial rerun keep their keypoints
 - Read a journal's calendly uuid through the same check the receiver uses
 - Give the calendar match its own half-hour window
 - A bad calendly uuid drops the link, not the booking

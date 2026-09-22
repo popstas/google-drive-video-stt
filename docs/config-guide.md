@@ -20,11 +20,17 @@ API controls -> Manage Domain-Wide Delegation:
 - `https://www.googleapis.com/auth/drive` -- reading each Drive and writing artifacts
   beside the recordings;
 - `https://www.googleapis.com/auth/meetings.space.readonly` -- only for
-  `discovery: meet`.
+  `discovery: meet`;
+- `https://www.googleapis.com/auth/calendar.events.readonly` -- only for
+  `calendar.client_emails: true`, the client's address from the call's calendar event.
 
-**Enable the Meet API in the Google Cloud project.** A project that never used it
-answers every call with `403 SERVICE_DISABLED`, which reads like a permissions
-problem and is not one. Correct delegation does not enable the API.
+Editing an existing delegation entry replaces its whole scope list: paste every scope
+again, not just the new one.
+
+**Enable the Meet API in the Google Cloud project** (and the Google Calendar API, for
+`calendar.client_emails`). A project that never used it answers every call with
+`403 SERVICE_DISABLED` / `accessNotConfigured`, which reads like a permissions problem
+and is not one. Correct delegation does not enable the API.
 
 Nothing is granted by adding a scope to the config: the admin's authorization list is
 the only thing that decides, and an unauthorized scope fails as `unauthorized_client`
@@ -131,6 +137,11 @@ The bot must be a member of the chat, an admin for a channel. A folder with a
 Planfix is an independent channel, not an alternative: with both configured, a call
 reaches the task **and** the chat. `planfix.ignore_telegram_when_planfix: true` makes
 the chat a fallback instead.
+
+Under its header the chat message carries what the CRM comment does not: `Email
+клиента:` (with `calendar.client_emails: true`), `Planfix:` linking the task (with
+`planfix.task_url`) and `Calendly:` linking the booking (with `call_booking.calendly_url`
+and a booking sent with `calendly_event_uuid`). A line with nothing to show is left out.
 
 ### Filling in the chats
 
