@@ -139,9 +139,9 @@ reaches the task **and** the chat. `planfix.ignore_telegram_when_planfix: true` 
 the chat a fallback instead.
 
 Under its header the chat message carries what the CRM comment does not: `Email
-клиента:` (with `calendar.client_emails: true`), `Planfix:` linking the task (with
-`planfix.task_url`) and `Calendly:` linking the booking (with `call_booking.calendly_url`
-and a booking sent with `calendly_event_uuid`). A line with nothing to show is left out.
+клиента:` (with `calendar.client_emails: true`), `Calendly:` linking the booking (with
+`call_booking.calendly_url` and a booking sent with `calendly_event_uuid`) and, last, the
+bare Planfix task link (with `planfix.task_url`). A line with nothing to show is left out.
 
 ### Filling in the chats
 

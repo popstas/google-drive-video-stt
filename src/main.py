@@ -1083,17 +1083,13 @@ def _to_plain_text(markdown: str) -> str:
     return _MARKDOWN_BOLD_RE.sub(lambda m: m.group("text"), text)
 
 
-# Where a Telegram reader goes next: the CRM task and the booking. Not part of
-# ``planfix.meta_fields`` -- a Planfix comment linking to its own task is noise, and the
-# chat wants them whatever the CRM header is configured to show.
-_TELEGRAM_LINKS = (("Planfix", "planfix_task_url"), ("Calendly", "calendly_url"))
-
-
 def _telegram_extra_lines(document: dict[str, object] | None) -> list[str]:
-    """The client's email and links to the Planfix task and Calendly booking.
+    """The client's email and links to the Calendly booking and the Planfix task.
 
     Telegram only: the CRM already holds the client, and a comment linking to its
-    own task is noise.
+    own task is noise. Not part of ``planfix.meta_fields`` for the same reason -- the
+    chat wants them whatever the CRM header is configured to show. The task link goes
+    last and bare: the domain already says it is Planfix.
     """
     if not document:
         return []
@@ -1101,10 +1097,12 @@ def _telegram_extra_lines(document: dict[str, object] | None) -> list[str]:
     emails = document.get("client_emails") or []
     if isinstance(emails, list) and emails:
         lines.append("Email клиента: " + ", ".join(str(email) for email in emails))
-    for label, field_name in _TELEGRAM_LINKS:
-        url = " ".join(str(document.get(field_name) or "").split())
-        if url:
-            lines.append(f"[{label}]({url})")
+    calendly_url = " ".join(str(document.get("calendly_url") or "").split())
+    if calendly_url:
+        lines.append(f"[Calendly]({calendly_url})")
+    planfix_url = " ".join(str(document.get("planfix_task_url") or "").split())
+    if planfix_url:
+        lines.append(planfix_url)
     return lines
 
 

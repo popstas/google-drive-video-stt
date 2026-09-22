@@ -1483,10 +1483,10 @@ recognized unconditionally. A chat listed in both fields gets one message.
 
 Under the header come lines the CRM comment does not carry: `Email клиента: <addresses>`
 (see [Client emails from the calendar](#client-emails-from-the-calendar)), then
-`Planfix: <url>` to the call's task (from `planfix.task_url`, whenever the call was
-routed to a task) and `Calendly: <url>` to its booking (from `call_booking.calendly_url`,
-only for a booking that came with a `calendly_event_uuid`). Each is left out when there
-is nothing to show. They are not `planfix.meta_fields`: a Planfix comment linking to
+`Calendly: <url>` to its booking (from `call_booking.calendly_url`, only for a booking
+that came with a `calendly_event_uuid`) and, last, the bare URL of the call's Planfix
+task (from `planfix.task_url`, whenever the call was routed to a task). Each is left out
+when there is nothing to show. Every header line is its own paragraph. They are not `planfix.meta_fields`: a Planfix comment linking to
 its own task is noise.
 
 ### Client emails from the calendar

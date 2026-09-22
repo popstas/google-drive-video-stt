@@ -4178,7 +4178,7 @@ def test_telegram_summary_separates_header_fields_with_a_blank_line():
     )
 
     assert "Виза O-1\n\n" in text
-    assert "Длительность: 00:21:06\n\nEmail клиента: a@x.com\n\nPlanfix:" in text
+    assert "Длительность: 00:21:06\n\nEmail клиента: a@x.com\n\nCalendly:" in text
 
 
 def test_telegram_summary_drops_checkbox_markers_from_list_items():
@@ -4225,9 +4225,13 @@ def test_telegram_summary_links_the_planfix_task_and_the_calendly_booking():
         meta_entities=meta_entity.default_entities(),
     )
 
-    assert "Planfix: https://tagilcity.planfix.com/task/851030" in text
     assert "Calendly: https://calendly.com/app/events/a1b2c3d4" in text
-    assert text.index("Виза O-1") < text.index("Planfix:") < text.index("Задачи")
+    # The task link closes the header, bare -- the domain already names Planfix.
+    assert "Planfix:" not in text
+    assert (
+        "Calendly: https://calendly.com/app/events/a1b2c3d4\n\n"
+        "https://tagilcity.planfix.com/task/851030\n\nЗадачи"
+    ) in text
 
 
 def test_telegram_summary_leaves_out_a_link_it_does_not_have():
@@ -4239,7 +4243,7 @@ def test_telegram_summary_leaves_out_a_link_it_does_not_have():
         meta_entities=meta_entity.default_entities(),
     )
 
-    assert "Planfix: https://tagilcity.planfix.com/task/851030" in text
+    assert "https://tagilcity.planfix.com/task/851030" in text
     assert "Calendly" not in text
 
 
@@ -6591,7 +6595,7 @@ def test_telegram_summary_names_the_clients_email():
     )
 
     assert "Email клиента: a@x.com, b@y.com" in text
-    assert text.index("Email клиента") < text.index("Planfix:")
+    assert text.index("Email клиента") < text.index("planfix.com/task")
 
 
 def test_planfix_comment_does_not_carry_the_clients_email():
