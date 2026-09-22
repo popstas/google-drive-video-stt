@@ -66,6 +66,15 @@ _STALE_CURSOR_HTTP_STATUS_CODES = {404, 410}
 _MEDIA_SETTLING_GRACE = timedelta(hours=2)
 _TRANSIENT_RETRY_ATTEMPTS = 3
 _TRANSIENT_RETRY_DELAYS = (1.0, 2.0)
+# How many cycles in a row a source may fail transiently before anyone is told. With
+# ten folders polled every ten minutes Drive drops one request now and then, and that
+# heals by itself on the next cycle; an alert for each one taught people to ignore
+# the channel. A source still failing after this many cycles is not a blip.
+_LISTING_FAILURE_ALERT_STREAK = 3
+# Consecutive failed cycles per source, keyed by the `what` of the failure. A source
+# that got through a cycle drops out, so the count is a run, not a total.
+_LISTING_FAILURE_STREAKS: dict[str, int] = {}
+_LISTING_FAILED_THIS_CYCLE: set[str] = set()
 
 
 @dataclass
@@ -1998,13 +2007,46 @@ class _Discovery:
 
 
 def _notify_listing_failure(what: str, exc: Exception, config: Config) -> None:
+    """Report a source that could not be read, alerting only when it is not a blip.
+
+    A persistent failure -- refused credentials, a missing folder, a 403 -- alerts at
+    once: it will not fix itself. A transient one (a dropped connection, a 5xx that
+    outlived the retries) is logged and only alerts once the same source has failed
+    `_LISTING_FAILURE_ALERT_STREAK` cycles in a row.
+    """
+    if what not in _LISTING_FAILED_THIS_CYCLE:
+        _LISTING_FAILED_THIS_CYCLE.add(what)
+        _LISTING_FAILURE_STREAKS[what] = _LISTING_FAILURE_STREAKS.get(what, 0) + 1
+    streak = _LISTING_FAILURE_STREAKS[what]
+    if _is_transient_runtime_error(exc) and streak < _LISTING_FAILURE_ALERT_STREAK:
+        logger.warning(
+            "Failed to list %s (%d cycle(s) in a row, alerting at %d): %s",
+            what,
+            streak,
+            _LISTING_FAILURE_ALERT_STREAK,
+            exc,
+        )
+        return
     logger.exception("Failed to list %s", what)
+    in_a_row = f" ({streak} cycles in a row)" if streak > 1 else ""
     notify.notify_error(
-        f"Failed to list {what}: {exc}\n{traceback.format_exc()}",
+        f"Failed to list {what}{in_a_row}: {exc}\n{traceback.format_exc()}",
         telegram_bot_token=config.telegram_bot_token,
         telegram_chat_id=config.telegram_chat_id,
         proxy_url=config.proxy_url,
     )
+
+
+def _begin_listing_failure_cycle() -> None:
+    """Close the previous cycle's failure runs: a source it did not fail on is healed.
+
+    Done at the start of a cycle rather than the end so that a cycle dying halfway
+    still counts the failures it did record.
+    """
+    for what in list(_LISTING_FAILURE_STREAKS):
+        if what not in _LISTING_FAILED_THIS_CYCLE:
+            del _LISTING_FAILURE_STREAKS[what]
+    _LISTING_FAILED_THIS_CYCLE.clear()
 
 
 def _discover_by_walk(fleet: delegation.Fleet, config: Config) -> _Discovery:
@@ -2729,12 +2771,14 @@ def run_once(
     # Delegation is resolved here, once: from here on every entry carries a folder id
     # and the rest of the cycle is the cycle it always was. An employee who cannot be
     # resolved is dropped with an error counted, so the cycle cannot look drained.
+    _begin_listing_failure_cycle()
     fleet = delegation.resolve(
         config,
         service,
         on_error=lambda folder, exc: _notify_listing_failure(
             f"the Meet folder of {folder.email}", exc, config
         ),
+        retry=_call_with_transient_retries,
     )
     config = fleet.config
     cycle_folder_errors += fleet.errors

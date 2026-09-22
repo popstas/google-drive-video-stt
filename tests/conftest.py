@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from src import delegation
+from src import delegation, main
 
 
 @pytest.fixture(autouse=True)
@@ -43,3 +43,13 @@ def forget_delegated_clients():
     delegation.forget_clients()
     yield
     delegation.forget_clients()
+
+
+@pytest.fixture(autouse=True)
+def forget_listing_failure_streaks():
+    """Start every test with no source failing: the runs live for the process."""
+    main._LISTING_FAILURE_STREAKS.clear()
+    main._LISTING_FAILED_THIS_CYCLE.clear()
+    yield
+    main._LISTING_FAILURE_STREAKS.clear()
+    main._LISTING_FAILED_THIS_CYCLE.clear()

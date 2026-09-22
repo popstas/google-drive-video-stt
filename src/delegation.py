@@ -74,6 +74,7 @@ def resolve(
     *,
     build: Callable[..., Any] | None = None,
     on_error: Callable[[EmployeeFolder, Exception], None] | None = None,
+    retry: Callable[..., Any] | None = None,
 ) -> Fleet:
     """Resolve every delegated entry into a folder id and a client that may read it.
 
@@ -85,12 +86,17 @@ def resolve(
     others are resolved as usual. Dropping rather than keeping an unresolved entry is
     deliberate: an entry with no folder id would reach code that assumes one and fail
     far from the cause.
+
+    ``retry`` wraps each Drive request as ``retry(operation, description=...)``. The
+    cycle passes its transient-retry helper, so a dropped keep-alive connection costs
+    a reconnect rather than an employee's cycle and an alert.
     """
     if not config.uses_delegation:
         return Fleet(config=config, fallback=fallback)
     # Looked up here rather than bound as a default, so that a caller -- or a test --
     # replacing ``auth.build_drive_service`` is actually the thing that runs.
     build = build or auth.build_drive_service
+    retry = retry or _no_retry
 
     resolved: list[EmployeeFolder] = []
     services: dict[str, Any] = {}
@@ -113,7 +119,10 @@ def resolve(
                 on_error(folder, exc)
             continue
         try:
-            folder_id, candidates = _folder_for(folder, service, config)
+            folder_id, candidates = retry(
+                lambda: _folder_for(folder, service, config),
+                description=f"find the Meet folder of {folder.email}",
+            )
         except Exception as exc:  # noqa: BLE001 - reported, never swallowed
             errors += 1
             logger.exception("Could not find the Meet folder of %s", folder.email)
@@ -149,6 +158,11 @@ def resolve(
         services=services,
         errors=errors,
     )
+
+
+def _no_retry(operation: Callable[[], Any], *, description: str) -> Any:
+    """Run ``operation`` once: the default when the caller brings no retry policy."""
+    return operation()
 
 
 def _folder_for(

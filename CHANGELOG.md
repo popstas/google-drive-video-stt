@@ -5,6 +5,24 @@
 
 ### Features
 
+- Accept several summary chats as one comma-separated string
+- Show summary chats in doctor and add telegram sent
+- Send booked calls to their own chats and link the meeting folder
+- Build speaker candidates from the document and Meet together
+- Give speaker naming the people who actually spoke
+- Report who came, and document what Meet knows about a call
+- Take the meeting time from Meet, not from the file name
+- Let a prompt say where the people in the call belong
+- Mark a call nobody came to instead of transcribing silence
+- Ask Meet who was in a call, and when they were there
+- Let doctor say whether Meet answers, and what it answered
+- Make one conference one piece of work, whoever listed it
+- Find work by asking Meet, with a mark that never steps over unfinished work
+- Ask Meet for the conferences an employee has been in
+- Teach every command to act as the employee who owns the file
+- Resolve the fleet once, then run the cycle that already worked
+- Act as the employee, and find the folder Meet writes into now
+- Let a watched folder be an employee's address
 - Say how many attended calls a folder will never process
 - Let a shared folder's backlog stay out of scope
 - Let the service run without the changes feed
@@ -20,6 +38,10 @@
 
 ### Bug Fixes
 
+- Say in the log when a summary reaches Telegram
+- An attended call's recording is not ours to open, or to lose
+- Leave outsiders' recordings alone, and bound every hold on the mark
+- Stop retrying a recording nobody spoke in every cycle
 - Stop three booking tests from expiring on the calendar
 - Drop task checkboxes from the Telegram summary
 - Leave a call the model could not place numbered, not named by the file's order
@@ -35,6 +57,26 @@
 
 ### Documentation
 
+- How to fill in the summary chats of a folder
+- A setup walkthrough for a fleet, with the traps the reference omits
+- How to rejoin a history Meet split, and what it costs
+- Turn starts match by chance, which closes the question
+- Say what the second measurement actually cost
+- Aligning turns by time fails too, and the timings are why
+- Presence cannot name speakers on real calls, and the numbers why
+- Correct what an attendee can open, measured on the real fleet
+- Record what landed, and what the last task still needs
+- Presence names every speaker or it names none
+- Plan using who was in the call, and who was not
+- Answer the last open question with a call between two accounts
+- Document the Meet discovery mode, and what running it proved
+- Fold what the spike measured back into the Meet plan
+- What the Meet API answered, and the one question it did not
+- Hold the Meet mark at the work, not at the clock
+- Plan asking Meet what was recorded, as a second way to find work
+- Say what delegation changes, and stop doctor from misreading it
+- Plan reading each employee's own Drive through delegation
+- Write down why a shared Meet folder stops receiving recordings
 - Say what a shortcut's target depends on, not that following it is futile
 - Document the behaviour an operator will actually meet
 - Write down the two rules that failed silently
@@ -45,6 +87,7 @@
 
 ### Testing
 
+- A booking in the journal is what reaches the calendly chat
 - Make the Drive fake answer by parent, not by guessing at the query
 
 ## v0.9.0 - 2026-08-14

@@ -130,6 +130,32 @@ def test_one_employee_failing_costs_only_that_employee(tmp_path, mocker):
     assert seen == ["gone@example.com"]
 
 
+def test_a_dropped_connection_is_retried_before_the_employee_is_given_up(tmp_path, mocker):
+    """The Meet-folder lookup goes through the caller's retry, like any other read."""
+    mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Name")
+    mocker.patch(
+        "src.delegation.meet_root.resolve",
+        side_effect=[BrokenPipeError(32, "Broken pipe"), _root("f1")],
+    )
+    mocker.patch("src.main.time.sleep")
+    config = _delegating([EmployeeFolder(folder_id="", email="one@example.com")], tmp_path)
+    seen = []
+
+    from src import main
+
+    fleet = delegation.resolve(
+        config,
+        MagicMock(),
+        on_error=lambda folder, exc: seen.append(folder.email),
+        retry=main._call_with_transient_retries,
+    )
+
+    assert [f.folder_id for f in fleet.config.folders] == ["f1"]
+    assert fleet.errors == 0
+    assert seen == []
+
+
 def test_an_employee_without_a_meet_folder_is_skipped_and_counted(tmp_path, mocker):
     mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
     mocker.patch("src.delegation.meet_root.resolve", return_value=None)

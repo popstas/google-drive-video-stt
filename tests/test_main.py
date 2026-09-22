@@ -5134,8 +5134,61 @@ def test_a_feed_that_fails_for_another_reason_keeps_the_cursor(mocker, tmp_path)
     main.run_once(MagicMock(), cfg)
 
     tree_mock.assert_not_called()
-    notify_mock.assert_called_once()
+    # One failed cycle is a blip: logged, not alerted (see the streak tests below).
+    notify_mock.assert_not_called()
     assert change_cursor.read(_cursor_file(cfg)) == "tok-1"
+
+
+def _fail_listing_for_cycles(cfg, cycles, exc, what="the Meet folder of a@example.com"):
+    for _ in range(cycles):
+        main._begin_listing_failure_cycle()
+        main._notify_listing_failure(what, exc, cfg)
+
+
+def test_a_transient_listing_failure_alerts_only_once_it_persists(mocker, tmp_path):
+    """A dropped connection heals by the next cycle; one that does not is worth an alert."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    _fail_listing_for_cycles(cfg, main._LISTING_FAILURE_ALERT_STREAK - 1, BrokenPipeError(32, "Broken pipe"))
+    notify_mock.assert_not_called()
+
+    _fail_listing_for_cycles(cfg, 1, BrokenPipeError(32, "Broken pipe"))
+    notify_mock.assert_called_once()
+    assert f"{main._LISTING_FAILURE_ALERT_STREAK} cycles in a row" in notify_mock.call_args.args[0]
+
+
+def test_a_healthy_cycle_ends_the_run_of_transient_failures(mocker, tmp_path):
+    """One blip every few cycles is not a streak, however long the service runs."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    for _ in range(5):
+        _fail_listing_for_cycles(cfg, main._LISTING_FAILURE_ALERT_STREAK - 1, _http_error(503))
+        main._begin_listing_failure_cycle()  # a cycle where the source was read fine
+
+    notify_mock.assert_not_called()
+
+
+def test_a_persistent_listing_failure_alerts_at_once(mocker, tmp_path):
+    """Refused access will not fix itself: waiting for a streak would only hide it."""
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    _fail_listing_for_cycles(cfg, 1, _http_error(403))
+
+    notify_mock.assert_called_once()
+
+
+def test_several_failures_of_one_source_in_a_cycle_count_as_one(mocker, tmp_path):
+    cfg = make_config(folders=["root"], data_dir=tmp_path, stt_provider="")
+    notify_mock = mocker.patch("src.main.notify.notify_error")
+
+    main._begin_listing_failure_cycle()
+    for _ in range(main._LISTING_FAILURE_ALERT_STREAK):
+        main._notify_listing_failure("folder f1", ConnectionResetError(), cfg)
+
+    notify_mock.assert_not_called()
 
 
 def test_a_dry_run_never_moves_the_cursor(mocker, tmp_path):
