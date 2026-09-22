@@ -39,6 +39,8 @@ class BookingDecision:
     state: str
     task_id: str = ""
     reason: str = ""
+    # From the matched booking, for the Calendly link; a name rule has none.
+    calendly_event_uuid: str = ""
 
     @property
     def is_matched(self) -> bool:
@@ -119,7 +121,11 @@ def resolve(
     if booking is None:
         return BookingDecision(state=UNMATCHED, reason="no-booking")
 
-    return BookingDecision(state=MATCHED, task_id=booking.task_id)
+    return BookingDecision(
+        state=MATCHED,
+        task_id=booking.task_id,
+        calendly_event_uuid=booking.calendly_event_uuid,
+    )
 
 
 def mark_unmatched(service: Any, file_id: str) -> None:

@@ -534,7 +534,7 @@ call_booking:
   plain text; бот - `notifications.telegram.bot_token`). Папка распознаётся всегда:
   booking не нужен, `booking_match=none` не пишется; повтор отсекает appProperty
   `telegram_sent_chat_id` (чаты через запятую). `planfix.ignore_telegram_when_planfix:
-  true` делает чат запасным. `telegram_calendly` - чаты только для звонков с бронью, без флага и форс-распознавания; ссылка в саммари - подпапка звонка.
+  true` делает чат запасным. `telegram_calendly` - чаты только для звонков с бронью, без флага и форс-распознавания; ссылка в саммари - подпапка звонка. Под шапкой Telegram-саммари (не в Planfix) - `Calendly: <url>` (`call_booking.calendly_url` с `<uuid>` <- необязательный `calendly_event_uuid` вебхука брони, `[A-Za-z0-9-]`) и последней строкой голая ссылка на задачу Planfix (`planfix.task_url`); нет значения - нет ссылки. `Email клиента:` - из календаря (`calendar.client_emails: true`, scope `calendar.events.readonly`).
 - `webhook.url` (+ опциональный `webhook.token` -> `Authorization: Bearer`) шлёт POST
   раз на файл и только при успехе: `{file, employee, transcript, artifacts}`, где
   `artifacts` - тексты пресетов по именам, а `meta` разобран в словарь «одна сущность - один ключ» (`config.meta_entities`).

@@ -705,6 +705,8 @@ variable is read at runtime:
 | `webhook.url` | (empty) | Completion webhook endpoint; must be an absolute `http://` or `https://` URL. Empty disables it; a failure never fails the file |
 | `webhook.token` | (empty) | Optional bearer token sent as `Authorization: Bearer <token>` |
 | `planfix.meta_fields` | `[subject, tags, referral, referral_note, case_deadline, deadlines, target_filing, duration, video_url]` | Which meta fields open the Planfix comment, and in what order |
+| `calendar.client_emails` | `false` | Read the invited outsiders' addresses (the client) from each call's calendar event into `client_emails` and the Telegram summary's `Email клиента:` line. Needs delegation and the `calendar.events.readonly` scope — see [Client emails from the calendar](#client-emails-from-the-calendar) |
+| `call_booking.calendly_url` | (empty) | A Calendly event's web address with `<uuid>` where a booking's `calendly_event_uuid` goes. Fills `calendly_url` in the meta document and the `Calendly:` link of the Telegram summary. Empty leaves both blank |
 | `planfix.task_url` | (empty) | Where a task lives in the web UI, e.g. `https://<account>.planfix.com/task/<task-id>`. Fills `planfix_task_url` in the meta document and the link column of `gdstt planfix sent`. Empty leaves both blank |
 
 `tags.allowed` and `referrals.allowed` are read for one more version when
@@ -1367,14 +1369,29 @@ its Planfix task.
    `Authorization: Bearer <authorization_token>` and this body:
 
    ```json
-   {"start_time": "2026-08-11T07:00:00.000000Z", "task_id": "851030", "manager_email": "manager@example.com"}
+   {"start_time": "2026-08-11T07:00:00.000000Z", "task_id": "851030", "manager_email": "manager@example.com", "calendly_event_uuid": "a1b2c3d4-e5f6-7890-abcd-ef0123456789"}
    ```
 
-   `task_id` must be numeric. `GET /health` returns 200 for probes.
+   `task_id` must be numeric. `calendly_event_uuid` is optional: a uuid, or Calendly's
+   event URI (its last segment is taken). A value that is not letters, digits and
+   dashes is logged and dropped, never costing the booking itself; with `call_booking.calendly_url` set it becomes a
+   Calendly link in the call's Telegram summary (see below). `GET /health` returns
+   200 for probes.
 
 4. `manager_email` is matched against the `email` of the `folders` entry the
    recording lives in, and `start_time` against the meeting time in the recording's
    name, within `threshold_minutes`.
+
+5. Optionally, tell gdstt how to link a booking's Calendly event. `<uuid>` is
+   replaced by the booking's `calendly_event_uuid` (a template without it gets the
+   uuid appended); blank, or a booking without a uuid, means no link:
+
+   ```yaml
+   call_booking:
+     calendly_url: https://calendly.com/<your event page>/<uuid>
+   ```
+
+   The result lands in the meta document as `calendly_url`.
 
 Set `disable_recognition: true` once bookings are flowing to stop transcribing
 recordings that match no booked call. Those get marked on Drive and skipped for good;
@@ -1463,6 +1480,36 @@ the journal (what `gdstt bookings list` shows) goes there; an unmatched one, or 
 routed by a `call_booking.name_rules` entry, does not. It ignores
 `ignore_telegram_when_planfix`, and unlike `telegram` it does not make the folder
 recognized unconditionally. A chat listed in both fields gets one message.
+
+Under the header come lines the CRM comment does not carry: `Email клиента: <addresses>`
+(see [Client emails from the calendar](#client-emails-from-the-calendar)), then
+`Calendly: <url>` to its booking (from `call_booking.calendly_url`, only for a booking
+that came with a `calendly_event_uuid`) and, last, the bare URL of the call's Planfix
+task (from `planfix.task_url`, whenever the call was routed to a task). Each is left out
+when there is nothing to show. Every header line is its own paragraph. They are not `planfix.meta_fields`: a Planfix comment linking to
+its own task is noise.
+
+### Client emails from the calendar
+
+Meet names a call's participants but never gives their addresses. With
+`calendar.client_emails: true`, gdstt reads them from the calendar event behind the
+call instead: as the folder's employee, it takes the event with a Meet link whose start
+starts within 30 minutes of the call's -- one with outside
+invitees first, then the nearest, so a standing internal sync at the same slot does
+not hide the client call -- and keeps the
+attendees that are not the employee, not a room, and not at a domain of any
+`folders[].email`. A Calendly booking counts: Calendly writes the invitee into the
+host's calendar. The result is `client_emails` in the meta document (`.meta.yml` and
+the `.stt` meta block; the completion webhook does not carry it) and the `Email клиента:` line of the
+Telegram summary; the Planfix comment is unchanged.
+
+It needs domain-wide delegation and, for the same client id, one more scope in Admin
+Console (Security -> Access and data control -> API controls -> Manage Domain-Wide
+Delegation -> edit the entry; the list is replaced on save, so keep the existing
+scopes): `https://www.googleapis.com/auth/calendar.events.readonly`. The Google
+Calendar API must also be enabled in the service account's Cloud project. Until both
+are in place every lookup logs `Could not read the calendar invitees of ...` and the
+field stays empty -- processing itself never fails over it.
 
 The link in the header opens the recording's meeting subfolder, which holds the video
 and the transcript together, so a reader without access can request it for that one

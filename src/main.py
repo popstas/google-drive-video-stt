@@ -17,8 +17,10 @@ from googleapiclient.errors import HttpError
 import requests
 
 from src import (
+    auth,
     booking_gate,
     booking_server,
+    calendar_api,
     change_cursor,
     delegation,
     drive,
@@ -464,6 +466,65 @@ def _artifact_text(
         return ""
 
 
+def _summary_artifacts(artifacts: dict[str, str], config: Config, mp4_name: str) -> dict[str, str]:
+    """The summary presets' texts, this cycle's or the ones an earlier cycle left.
+
+    A rerun of some presets returns only those (the webhook backfill is off without a
+    receiver), so ``gdstt reprocess <id> <meta>`` used to send a summary with no
+    keypoints -- which is no summary at all.
+    """
+    return {
+        name: _artifact_text(name, artifacts, config, mp4_name)
+        for name in config.planfix_presets
+    }
+
+
+# How far a call's start may sit from its calendar slot. Wider than the booking
+# threshold on evidence: a real call on us1 started 16 minutes early. A workshop that
+# began hours before an unscheduled call still stays out.
+_CALENDAR_WINDOW_MINUTES = 30
+
+
+def _client_emails(item: dict, file_name: str, folder_id: str, config: Config) -> list[str]:
+    """The call's invited outsiders, from the employee's calendar; ``[]`` on any doubt.
+
+    A nicety, not a requirement: a missing scope or a calendar outage is a warning and
+    an empty list, never a failed recording and never an escalation.
+    """
+    if not config.calendar_client_emails or not config.uses_delegation:
+        return []
+    folder = config.folder_by_id(folder_id)
+    subject = folder.email.strip() if folder else ""
+    if not subject:
+        return []
+    start = item.get("meeting_start") or parse_meeting_start(file_name)
+    if start is None:
+        return []
+    own_domains = {
+        entry.email.rsplit("@", 1)[1].strip().lower()
+        for entry in config.folders
+        if "@" in entry.email
+    }
+    try:
+        service = auth.build_calendar_service(config=config, subject=subject)
+        return calendar_api.client_emails(
+            service,
+            start=start,
+            own_domains=own_domains,
+            window_minutes=_CALENDAR_WINDOW_MINUTES,
+        )
+    except (AuthError, HttpError) as exc:
+        # These carry what to fix: the scope and client id to authorize, or the API to
+        # enable. The admin setting this up reads exactly this line.
+        logger.warning("Could not read the calendar invitees of %s: %s", file_name, exc)
+        return []
+    except Exception as exc:
+        logger.warning(
+            "Could not read the calendar invitees of %s: %s", file_name, type(exc).__name__
+        )
+        return []
+
+
 def _write_call_documents(
     service: Any,
     file_id: str,
@@ -502,6 +563,8 @@ def _write_call_documents(
         planfix_task_id=task_id,
         processed_at=datetime.now(timezone.utc),
         container_id=container_id,
+        calendly_event_uuid=booking_decision.calendly_event_uuid,
+        client_emails=_client_emails(item, file_name, folder_id, config),
     )
     meta_yaml = meta_doc.to_yaml(document, config.meta_entities)
 
@@ -872,6 +935,8 @@ def _webhook_payload(
 _PLANFIX_CODE_LABELS = {
     "manager": "Менеджер",
     "client": "Клиент",
+    "client_emails": "Email клиента",
+    "calendly_url": "Calendly",
     "date": "Дата",
     "duration": "Длительность",
     "video_url": "Запись",
@@ -1018,6 +1083,29 @@ def _to_plain_text(markdown: str) -> str:
     return _MARKDOWN_BOLD_RE.sub(lambda m: m.group("text"), text)
 
 
+def _telegram_extra_lines(document: dict[str, object] | None) -> list[str]:
+    """The client's email and links to the Calendly booking and the Planfix task.
+
+    Telegram only: the CRM already holds the client, and a comment linking to its
+    own task is noise. Not part of ``planfix.meta_fields`` for the same reason -- the
+    chat wants them whatever the CRM header is configured to show. The task link goes
+    last and bare: the domain already says it is Planfix.
+    """
+    if not document:
+        return []
+    lines = []
+    emails = document.get("client_emails") or []
+    if isinstance(emails, list) and emails:
+        lines.append("Email клиента: " + ", ".join(str(email) for email in emails))
+    calendly_url = " ".join(str(document.get("calendly_url") or "").split())
+    if calendly_url:
+        lines.append(f"[Calendly]({calendly_url})")
+    planfix_url = " ".join(str(document.get("planfix_task_url") or "").split())
+    if planfix_url:
+        lines.append(planfix_url)
+    return lines
+
+
 def _telegram_summary(
     artifacts: dict[str, str],
     preset_names: tuple[str, ...],
@@ -1034,7 +1122,11 @@ def _telegram_summary(
     sections = _summary_sections(artifacts, preset_names)
     if not sections:
         return ""
-    header = "\n".join(_planfix_meta_lines(meta_document, meta_fields, meta_entities))
+    lines = _planfix_meta_lines(meta_document, meta_fields, meta_entities)
+    lines.extend(_telegram_extra_lines(meta_document))
+    # A blank line between fields: in a chat bubble consecutive lines run together
+    # and the labels stop standing out.
+    header = "\n\n".join(lines)
     blocks = [header] if header else []
     blocks.extend(sections)
     return _to_plain_text("\n\n".join(blocks)).strip()
@@ -1119,7 +1211,7 @@ def _send_planfix_comment(
         return
 
     description = _planfix_description(
-        artifacts,
+        _summary_artifacts(artifacts, config, item.get("file", {}).get("name", "")),
         config.planfix_presets,
         meta_document,
         config.planfix_meta_fields,
@@ -1242,7 +1334,7 @@ def _send_telegram_summary(
         return
 
     text = _telegram_summary(
-        artifacts,
+        _summary_artifacts(artifacts, config, name or ""),
         config.planfix_presets,
         meta_document,
         config.planfix_meta_fields,

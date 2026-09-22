@@ -4166,6 +4166,21 @@ def test_telegram_summary_strips_markdown_to_plain_text():
     assert text.index("Виза O-1") < text.index("Задачи")
 
 
+def test_telegram_summary_separates_header_fields_with_a_blank_line():
+    """Telegram runs consecutive lines together on a phone, so each header field
+    gets its own paragraph."""
+    text = main._telegram_summary(
+        {"keypoints": "Задачи: раз"},
+        ("keypoints",),
+        {**_LINKED_DOCUMENT, "duration": "00:21:06", "client_emails": ["a@x.com"]},
+        ("subject", "duration"),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "Виза O-1\n\n" in text
+    assert "Длительность: 00:21:06\n\nEmail клиента: a@x.com\n\nCalendly:" in text
+
+
 def test_telegram_summary_drops_checkbox_markers_from_list_items():
     """Telegram shows `- [ ] call back` literally, so a task keeps only its dash."""
     text = main._telegram_summary(
@@ -4190,6 +4205,89 @@ def test_telegram_summary_is_blank_when_only_the_header_would_render():
         ("duration",),
         meta_entities=meta_entity.default_entities(),
     ) == ""
+
+
+_LINKED_DOCUMENT = {
+    "subject": "Виза O-1",
+    "planfix_task_url": "https://tagilcity.planfix.com/task/851030",
+    "calendly_url": "https://calendly.com/app/events/a1b2c3d4",
+}
+
+
+def test_telegram_summary_links_the_planfix_task_and_the_calendly_booking():
+    """A chat reader cannot get from the summary to the CRM task or the booking any
+    other way: both links go under the header, whatever ``meta_fields`` lists."""
+    text = main._telegram_summary(
+        {"keypoints": "## Задачи\n\n- Собрать документы"},
+        ("keypoints",),
+        _LINKED_DOCUMENT,
+        ("subject",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "Calendly: https://calendly.com/app/events/a1b2c3d4" in text
+    # The task link closes the header, bare -- the domain already names Planfix.
+    assert "Planfix:" not in text
+    assert (
+        "Calendly: https://calendly.com/app/events/a1b2c3d4\n\n"
+        "https://tagilcity.planfix.com/task/851030\n\nЗадачи"
+    ) in text
+
+
+def test_telegram_summary_leaves_out_a_link_it_does_not_have():
+    text = main._telegram_summary(
+        {"keypoints": "Задачи: раз"},
+        ("keypoints",),
+        {**_LINKED_DOCUMENT, "calendly_url": ""},
+        ("subject",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "https://tagilcity.planfix.com/task/851030" in text
+    assert "Calendly" not in text
+
+
+def test_telegram_summary_links_alone_are_not_a_summary():
+    """The links belong to the header, and a header alone is never sent."""
+    assert main._telegram_summary(
+        {},
+        ("keypoints",),
+        _LINKED_DOCUMENT,
+        ("subject",),
+        meta_entities=meta_entity.default_entities(),
+    ) == ""
+
+
+def test_planfix_comment_does_not_link_to_its_own_task():
+    """The comment lives inside the task it would link to; Calendly stays out too,
+    the links are a Telegram affordance."""
+    html = main._planfix_description(
+        {"keypoints": "Задачи: раз"},
+        ("keypoints",),
+        _LINKED_DOCUMENT,
+        ("subject",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "planfix.com/task" not in html
+    assert "calendly" not in html
+
+
+def test_the_meta_document_carries_the_bookings_calendly_link(tmp_path):
+    cfg = replace(
+        _stt_config(tmp_path),
+        call_booking_calendly_url="https://calendly.com/app/events/<uuid>",
+    )
+
+    document = main._write_call_documents(
+        MagicMock(), "fid1", _STT_NAME, "folderA", "folderA", _STT_TRANSCRIPT, {},
+        cfg, tmp_path, item={},
+        booking_decision=BookingDecision(
+            state="matched", task_id="851030", calendly_event_uuid="a1b2c3d4"
+        ),
+    )
+
+    assert document["calendly_url"] == "https://calendly.com/app/events/a1b2c3d4"
 
 
 def test_telegram_summary_is_sent_and_marked(monkeypatch, telegram_config):
@@ -6396,3 +6494,200 @@ def test_a_delegated_cycle_takes_no_changes_cursor(mocker, tmp_path):
 
     token_mock.assert_not_called()
     assert not (tmp_path / "changes_cursor.txt").exists()
+
+
+_CALENDAR_START = datetime(2026, 9, 22, 10, 0, tzinfo=timezone.utc)
+
+
+def _calendar_config(**overrides):
+    config = make_config(
+        folders=[
+            EmployeeFolder("folderA", name="Kate", email="kate@expertizeme.org"),
+            EmployeeFolder("folderB", name="Bob", email="bob@Other-Own.com"),
+        ],
+    )
+    fields = {
+        "calendar_client_emails": True,
+        "google_service_account": {"client_email": "sa@p.iam.gserviceaccount.com"},
+        **overrides,
+    }
+    return replace(config, **fields)
+
+
+def test_client_emails_ask_the_folders_calendar(mocker):
+    build = mocker.patch("src.main.auth.build_calendar_service", return_value="svc")
+    lookup = mocker.patch(
+        "src.main.calendar_api.client_emails", return_value=["client@gmail.com"]
+    )
+
+    emails = main._client_emails(
+        {"meeting_start": _CALENDAR_START}, "rec.mp4", "folderA", _calendar_config()
+    )
+
+    assert emails == ["client@gmail.com"]
+    assert build.call_args.kwargs["subject"] == "kate@expertizeme.org"
+    kwargs = lookup.call_args.kwargs
+    assert kwargs["start"] == _CALENDAR_START
+    assert set(kwargs["own_domains"]) == {"expertizeme.org", "other-own.com"}
+    # Its own window, wider than the booking threshold: a real call measured on us1
+    # started 16 minutes before its slot.
+    assert kwargs["window_minutes"] == 30
+
+
+def test_client_emails_fall_back_to_the_time_in_the_name(mocker):
+    mocker.patch("src.main.auth.build_calendar_service", return_value="svc")
+    lookup = mocker.patch("src.main.calendar_api.client_emails", return_value=[])
+    name = "Call - 2026/09/22 14:00 GMT+04:00 – Recording.mp4"
+
+    main._client_emails({}, name, "folderA", _calendar_config())
+
+    assert lookup.call_args.kwargs["start"] == _CALENDAR_START
+
+
+@pytest.mark.parametrize(
+    "item, name, folder, overrides",
+    [
+        ({"meeting_start": _CALENDAR_START}, "rec.mp4", "folderA",
+         {"calendar_client_emails": False}),
+        ({"meeting_start": _CALENDAR_START}, "rec.mp4", "folderA",
+         {"google_service_account": None}),
+        ({"meeting_start": _CALENDAR_START}, "rec.mp4", "unknown", {}),
+        ({}, "no time here.mp4", "folderA", {}),
+    ],
+    ids=["flag-off", "no-delegation", "no-folder-email", "no-start"],
+)
+def test_client_emails_make_no_request_without_what_they_need(
+    mocker, item, name, folder, overrides
+):
+    build = mocker.patch("src.main.auth.build_calendar_service")
+
+    assert main._client_emails(item, name, folder, _calendar_config(**overrides)) == []
+    build.assert_not_called()
+
+
+def test_a_calendar_failure_costs_only_the_emails(mocker, caplog):
+    mocker.patch(
+        "src.main.auth.build_calendar_service",
+        side_effect=main.AuthError("unauthorized_client"),
+    )
+
+    emails = main._client_emails(
+        {"meeting_start": _CALENDAR_START}, "rec.mp4", "folderA", _calendar_config()
+    )
+
+    assert emails == []
+    assert "unauthorized_client" in caplog.text
+
+
+def test_the_meta_document_carries_the_client_emails(tmp_path, mocker):
+    mocker.patch("src.main._client_emails", return_value=["client@gmail.com"])
+    document = _write_documents(_stt_config(tmp_path), tmp_path, {})
+    assert document["client_emails"] == ["client@gmail.com"]
+
+
+def test_telegram_summary_names_the_clients_email():
+    text = main._telegram_summary(
+        {"keypoints": "Задачи: раз"},
+        ("keypoints",),
+        {**_LINKED_DOCUMENT, "client_emails": ["a@x.com", "b@y.com"]},
+        ("subject",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "Email клиента: a@x.com, b@y.com" in text
+    assert text.index("Email клиента") < text.index("planfix.com/task")
+
+
+def test_planfix_comment_does_not_carry_the_clients_email():
+    html = main._planfix_description(
+        {"keypoints": "Задачи: раз"},
+        ("keypoints",),
+        {**_LINKED_DOCUMENT, "client_emails": ["a@x.com"]},
+        ("subject",),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "a@x.com" not in html
+
+
+def _partial_rerun_config(tmp_path):
+    return replace(
+        _stt_config(tmp_path),
+        folders=(
+            EmployeeFolder(
+                "folderA", name="Kate", email="kate@example.com", telegram=("-1001",)
+            ),
+        ),
+        telegram_bot_token="bot-token",
+        planfix_presets=("keypoints",),
+    )
+
+
+def _leave_keypoints_on_disk(cfg):
+    path = main._local_artifact_path(cfg, _STT_NAME, _KEYPOINTS_BUILTIN.artifact_suffix)
+    path.write_text("## Задачи\n\n- Собрать документы", encoding="utf-8")
+
+
+def test_a_partial_rerun_still_sends_the_keypoints_to_telegram(tmp_path, monkeypatch):
+    """`gdstt reprocess <id> 3` reruns meta alone; without a webhook the stage returns
+    only meta, and the summary used to go out empty -- that is, not at all."""
+    cfg = _partial_rerun_config(tmp_path)
+    _leave_keypoints_on_disk(cfg)
+    send = MagicMock(return_value=True)
+    monkeypatch.setattr(main.notify, "send_message", send)
+    monkeypatch.setattr(main.drive, "set_file_app_properties", MagicMock())
+
+    main._send_telegram_summary(
+        MagicMock(), {"file": {"name": _STT_NAME}}, "fid1", "folderA", cfg,
+        {"meta": "---\nsubject: x\n---"}, UNMATCHED_DECISION,
+    )
+
+    send.assert_called_once()
+    assert "Собрать документы" in send.call_args[0][0]
+
+
+def test_a_partial_rerun_still_comments_the_keypoints_into_planfix(tmp_path, monkeypatch):
+    cfg = replace(
+        _partial_rerun_config(tmp_path),
+        planfix_create_comment_url="https://planfix.example/comment",
+    )
+    _leave_keypoints_on_disk(cfg)
+    comment = MagicMock(return_value=True)
+    monkeypatch.setattr(main.planfix, "send_comment", comment)
+    monkeypatch.setattr(main.drive, "set_file_app_properties", MagicMock())
+
+    main._send_planfix_comment(
+        MagicMock(), {"file": {"name": _STT_NAME}}, "fid1", cfg,
+        {"meta": "---\nsubject: x\n---"}, MATCHED_DECISION,
+    )
+
+    comment.assert_called_once()
+    assert "Собрать документы" in comment.call_args.kwargs["description"]
+
+
+def test_a_calendar_failure_says_why_in_the_log(mocker, caplog):
+    """The admin fixing the delegation reads this line; the type alone says nothing."""
+    mocker.patch(
+        "src.main.auth.build_calendar_service",
+        side_effect=main.AuthError("authorize calendar.events.readonly for client 123"),
+    )
+
+    main._client_emails(
+        {"meeting_start": _CALENDAR_START}, "rec.mp4", "folderA", _calendar_config()
+    )
+
+    assert "authorize calendar.events.readonly for client 123" in caplog.text
+
+
+def test_planfix_labels_the_new_code_fields():
+    html = main._planfix_description(
+        {"keypoints": "Задачи: раз"},
+        ("keypoints",),
+        {"client_emails": ["a@x.com"], "calendly_url": "https://calendly.com/e/1"},
+        ("client_emails", "calendly_url"),
+        meta_entity.default_entities(),
+    )
+
+    assert "Email клиента" in html
+    assert "a@x.com" in html
+    assert "Calendly" in html

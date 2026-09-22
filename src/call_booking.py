@@ -12,6 +12,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +24,10 @@ logger = logging.getLogger(__name__)
 # deployment needs to tune that.
 RETENTION_DAYS = 30
 
+# What a Calendly event uuid may hold. It is pasted into a link template, so anything
+# beyond letters, digits and dashes could rewrite the link instead of naming an event.
+CALENDLY_UUID_RE = re.compile(r"[A-Za-z0-9-]+")
+
 
 @dataclass(frozen=True)
 class CallBooking:
@@ -31,14 +36,20 @@ class CallBooking:
     task_id: str
     manager_email: str
     start_time: datetime  # timezone-aware, UTC
+    # The Calendly event behind the booking, when the sender knows it. Only ever a
+    # link ingredient, so a booking without one still matches like any other.
+    calendly_event_uuid: str = ""
 
 
 def _to_dict(booking: CallBooking) -> dict[str, str]:
-    return {
+    raw = {
         "task_id": booking.task_id,
         "manager_email": booking.manager_email,
         "start_time": booking.start_time.astimezone(timezone.utc).isoformat(),
     }
+    if booking.calendly_event_uuid:
+        raw["calendly_event_uuid"] = booking.calendly_event_uuid
+    return raw
 
 
 def _from_dict(raw: object) -> CallBooking | None:
@@ -57,10 +68,16 @@ def _from_dict(raw: object) -> CallBooking | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
+    calendly_event_uuid = raw.get("calendly_event_uuid")
+    if not isinstance(calendly_event_uuid, str) or not CALENDLY_UUID_RE.fullmatch(
+        calendly_event_uuid
+    ):
+        calendly_event_uuid = ""
     return CallBooking(
         task_id=task_id,
         manager_email=manager_email,
         start_time=parsed.astimezone(timezone.utc),
+        calendly_event_uuid=calendly_event_uuid,
     )
 
 

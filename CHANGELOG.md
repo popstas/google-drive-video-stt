@@ -5,6 +5,10 @@
 
 ### Features
 
+- Put the client's email from the calendar into meta and telegram
+- Add the calendar.client_emails switch
+- Read a call's outside invitees from its calendar event
+- Link the planfix task and calendly booking in telegram summaries
 - Accept several summary chats as one comma-separated string
 - Show summary chats in doctor and add telegram sent
 - Send booked calls to their own chats and link the meeting folder
@@ -38,6 +42,13 @@
 
 ### Bug Fixes
 
+- A blank line between the telegram summary's header fields
+- Summaries of a partial rerun keep their keypoints
+- Read a journal's calendly uuid through the same check the receiver uses
+- Give the calendar match its own half-hour window
+- A bad calendly uuid drops the link, not the booking
+- Match only a calendar event that starts near the call
+- Alert on a failed listing only when it persists
 - Say in the log when a summary reaches Telegram
 - An attended call's recording is not ours to open, or to lose
 - Leave outsiders' recordings alone, and bound every hold on the mark
@@ -57,6 +68,9 @@
 
 ### Documentation
 
+- The calendar scope and the new summary lines in the fleet guide
+- Plan client emails from the calendar and the us1 rerun
+- Design client emails from the calendar event
 - How to fill in the summary chats of a folder
 - A setup walkthrough for a fleet, with the traps the reference omits
 - How to rejoin a history Meet split, and what it costs

@@ -235,6 +235,10 @@ class Config:
     # File-name overrides, in priority order: a recording whose Drive name matches one
     # is always processed and always commented into that rule's task. See NameRule.
     call_booking_name_rules: tuple[NameRule, ...] = ()
+    # A Calendly event's web address with ``<uuid>`` where a booking's
+    # ``calendly_event_uuid`` goes. Blank leaves ``calendly_url`` empty in the meta
+    # document: Calendly's own URL scheme is not something to hard-code a guess of.
+    call_booking_calendly_url: str = ""
     # Planfix comment target. A blank URL disables the comment; ``planfix_presets``
     # names the preset artifacts concatenated into the comment body, in order.
     planfix_create_comment_url: str = ""
@@ -296,6 +300,9 @@ class Config:
     # On by default because it is pure saving; switchable because a deployment
     # that wants every recording transcribed must be able to say so.
     meet_skip_empty_calls: bool = True
+    # Read the invited outsiders' addresses from each call's calendar event. Off by
+    # default: it needs the calendar.events.readonly scope authorized first.
+    calendar_client_emails: bool = False
     config_file: Path | None = None
 
     @property
@@ -1144,6 +1151,7 @@ def _config_from_yaml(
         call_booking.get("disable_recognition"), default=False
     )
     call_booking_name_rules = _parse_name_rules(call_booking.get("name_rules"))
+    call_booking_calendly_url = _yaml_str(call_booking.get("calendly_url"))
 
     planfix_create_comment_url = _yaml_str(planfix.get("create_comment_url"))
     planfix_token = _yaml_str(planfix.get("token"))
@@ -1168,6 +1176,9 @@ def _config_from_yaml(
     meet_fallback = _parse_meet_fallback(raw.get("meet"))
     meet_skip_empty_calls = _yaml_bool(
         _as_mapping(raw.get("meet"), "meet").get("skip_empty_calls"), default=True
+    )
+    calendar_client_emails = _yaml_bool(
+        _as_mapping(raw.get("calendar"), "calendar").get("client_emails"), default=False
     )
 
     # Clean break: a config still on the old flat list must be rewritten by hand so
@@ -1389,6 +1400,7 @@ def _config_from_yaml(
         call_booking_threshold_minutes=call_booking_threshold_minutes,
         call_booking_disable_recognition=call_booking_disable_recognition,
         call_booking_name_rules=call_booking_name_rules,
+        call_booking_calendly_url=call_booking_calendly_url,
         planfix_create_comment_url=planfix_create_comment_url,
         planfix_token=planfix_token,
         planfix_presets=planfix_presets,
@@ -1407,6 +1419,7 @@ def _config_from_yaml(
         meet_first_look_hours=meet_first_look_hours,
         meet_fallback=meet_fallback,
         meet_skip_empty_calls=meet_skip_empty_calls,
+        calendar_client_emails=calendar_client_emails,
         config_file=config_file,
     )
 
@@ -1711,6 +1724,9 @@ def _default_config_dict(
             #   - regex: "^Sale department B2B"
             #     task_id: "861300"
             "name_rules": [],
+            # Link to a booking's Calendly event in Telegram summaries; <uuid> is
+            # replaced by the booking's calendly_event_uuid.
+            "calendly_url": "",
         },
         # Seeded empty: a blank url disables the Planfix comment.
         "planfix": {
@@ -1728,6 +1744,10 @@ def _default_config_dict(
             # telegram chat.
             "ignore_telegram_when_planfix": False,
         },
+        # true = add the invited outsiders' emails (the client) to .meta.yml and the
+        # Telegram summary. Needs calendar.events.readonly authorized for the service
+        # account's client id and the Calendar API enabled in its project.
+        "calendar": {"client_emails": False},
         # Google auth is inline-first and config-owned. The generated config ships an
         # empty block (no *_file pointers) so the data_dir fallback applies until the
         # operator runs `gdstt auth import-credentials` / `auth use-files`.
@@ -1944,6 +1964,7 @@ def _config_to_yaml_dict(config: Config, config_file: Path | None = None) -> dic
             "fallback": config.meet_fallback,
             "skip_empty_calls": config.meet_skip_empty_calls,
         },
+        "calendar": {"client_emails": config.calendar_client_emails},
         "google": _google_to_yaml_dict(config, config_file),
         # Serialize the resolved preset DAG. Each entry carries a ``prompt_file`` so
         # the prompt text stays owned by the .md assets; disabled built-ins (e.g.
