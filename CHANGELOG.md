@@ -38,6 +38,7 @@
 
 ### Bug Fixes
 
+- Alert on a failed listing only when it persists
 - Say in the log when a summary reaches Telegram
 - An attended call's recording is not ours to open, or to lose
 - Leave outsiders' recordings alone, and bound every hold on the mark
