@@ -70,6 +70,19 @@ def video_url(file_id: str) -> str:
     return f"https://drive.google.com/file/d/{file_id}/view" if file_id else ""
 
 
+def folder_url(container_id: str, folder_id: str) -> str:
+    """Where a recording's meeting folder opens, or "" when it has none of its own.
+
+    Meet files each call into its own subfolder, which holds the video beside every
+    artifact, so a reader who asks for access to that folder gets the whole call. A
+    recording lying directly in the configured folder shares it with every other
+    call; that folder is not "the call", and the link stays on the video.
+    """
+    if not container_id or container_id == folder_id:
+        return ""
+    return f"https://drive.google.com/drive/folders/{container_id}"
+
+
 def task_url(template: str, task_id: str) -> str:
     """Render a Planfix task's web address from the configured template.
 
@@ -101,8 +114,13 @@ def build(
     transcript: str,
     planfix_task_id: str,
     processed_at: datetime,
+    container_id: str = "",
 ) -> dict[str, object]:
-    """Assemble the full meta document for one recording."""
+    """Assemble the full meta document for one recording.
+
+    ``folder_id`` is the configured folder, which says whose call this is;
+    ``container_id`` is the folder the video actually lies in.
+    """
     employee = config.folder_by_id(folder_id)
     return {
         **values,
@@ -116,6 +134,7 @@ def build(
         "planfix_task_url": task_url(config.planfix_task_url, planfix_task_id),
         "video_id": file_id,
         "video_url": video_url(file_id),
+        "folder_url": folder_url(container_id, folder_id),
         "source_name": file_name,
         "stt_model": f"{config.stt_provider}/{config.deepgram_model}",
         "llm_model": config.openai_model,

@@ -172,3 +172,26 @@ def test_video_url_is_empty_without_a_file():
 def test_build_uses_the_shared_video_url(config_with_folder):
     """The document and the CLI must show the same link for the same recording."""
     assert _document(config_with_folder)["video_url"] == meta_doc.video_url("FILE1")
+
+
+def test_folder_url_opens_the_meeting_subfolder():
+    assert (
+        meta_doc.folder_url("MEETING1", "FOLDER1")
+        == "https://drive.google.com/drive/folders/MEETING1"
+    )
+
+
+def test_folder_url_is_empty_for_a_recording_in_the_configured_folder():
+    """That folder holds every call, so it is not a link to this one."""
+    assert meta_doc.folder_url("FOLDER1", "FOLDER1") == ""
+    assert meta_doc.folder_url("", "FOLDER1") == ""
+
+
+def test_build_carries_the_meeting_folder(config_with_folder):
+    document = _document(config_with_folder, container_id="MEETING1")
+    assert document["folder_url"] == "https://drive.google.com/drive/folders/MEETING1"
+    assert document["video_url"] == meta_doc.video_url("FILE1")
+
+
+def test_build_leaves_the_meeting_folder_empty_without_a_container(config_with_folder):
+    assert _document(config_with_folder)["folder_url"] == ""

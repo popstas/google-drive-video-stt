@@ -311,3 +311,22 @@ def test_select_stale_marks_skips_files_with_unparseable_times():
     ]
 
     assert select_stale_marks(files) == []
+
+
+def test_a_known_meeting_time_is_used_instead_of_the_name(config, mocker):
+    """Meet said when the call began; the name is a worse rendering of the same moment.
+
+    Without it this very recording answers `no-meeting-time` and reaches no task.
+    """
+    _seed(config)
+    parse = mocker.patch("src.booking_gate.parse_meeting_start")
+
+    decision = resolve(
+        {"id": "v1", "name": "hand-uploaded.mp4"},
+        "f1",
+        config,
+        meeting_start=MATCHED_START,
+    )
+
+    assert decision.state == "matched"
+    parse.assert_not_called()
