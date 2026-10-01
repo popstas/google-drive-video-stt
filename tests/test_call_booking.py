@@ -163,3 +163,49 @@ def test_match_returns_none_for_an_empty_journal():
         match([], email="a@b.c", video_start=_utc(11, 7), threshold_minutes=15)
         is None
     )
+
+
+def test_calendly_event_uuid_round_trips(tmp_path):
+    path = tmp_path / "call_bookings.jsonl"
+    booking = CallBooking(
+        task_id="851030",
+        manager_email="manager@example.com",
+        start_time=_utc(11, 7),
+        calendly_event_uuid="a1b2c3d4",
+    )
+
+    append(path, booking)
+
+    assert load(path, now=_utc(11, 12)) == [booking]
+
+
+def test_a_journal_line_written_before_the_uuid_existed_still_loads(tmp_path):
+    path = tmp_path / "call_bookings.jsonl"
+    path.write_text(
+        '{"task_id": "851030", "manager_email": "manager@example.com", '
+        '"start_time": "2026-08-11T07:00:00+00:00"}\n',
+        encoding="utf-8",
+    )
+
+    assert load(path, now=_utc(11, 12)) == [_booking()]
+
+
+def test_a_booking_without_a_uuid_writes_no_uuid_key(tmp_path):
+    """Old lines and new uuid-less lines stay byte-for-byte the same shape."""
+    path = tmp_path / "call_bookings.jsonl"
+
+    append(path, _booking())
+
+    assert "calendly_event_uuid" not in path.read_text(encoding="utf-8")
+
+
+def test_a_journal_uuid_that_cannot_go_into_a_url_is_read_as_none(tmp_path):
+    """The receiver validates, but the journal is a plain file anyone can edit."""
+    path = tmp_path / "call_bookings.jsonl"
+    path.write_text(
+        '{"task_id": "851030", "manager_email": "manager@example.com", '
+        '"start_time": "2026-08-11T07:00:00+00:00", "calendly_event_uuid": "../x"}\n',
+        encoding="utf-8",
+    )
+
+    assert load(path, now=_utc(11, 12))[0].calendly_event_uuid == ""

@@ -13,6 +13,7 @@ tell "nobody asked about the referral" from "this build does not produce that fi
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from datetime import datetime
 
 import yaml
@@ -59,6 +60,7 @@ def _client(file_name: str) -> str:
 
 
 TASK_ID_PLACEHOLDER = "<task-id>"
+CALENDLY_UUID_PLACEHOLDER = "<uuid>"
 
 
 def video_url(file_id: str) -> str:
@@ -83,20 +85,30 @@ def folder_url(container_id: str, folder_id: str) -> str:
     return f"https://drive.google.com/drive/folders/{container_id}"
 
 
-def task_url(template: str, task_id: str) -> str:
-    """Render a Planfix task's web address from the configured template.
+def _fill(template: str, placeholder: str, value: str) -> str:
+    """Put ``value`` into a link template at ``placeholder``, or append it.
 
-    ``<task-id>`` is substituted where it appears; a template without it is treated as
-    a base and the id is appended, so both ``.../task/<task-id>`` and ``.../task``
-    behave the way an operator writing either one would expect. Without a template or
-    without an id there is nothing to link to, and the field stays empty.
+    A template without the placeholder is treated as a base and the value is
+    appended, so both ``.../task/<task-id>`` and ``.../task`` behave the way an
+    operator writing either one would expect. Without a template or without a value
+    there is nothing to link to, and the field stays empty.
     """
     base = (template or "").strip()
-    if not base or not task_id:
+    if not base or not value:
         return ""
-    if TASK_ID_PLACEHOLDER in base:
-        return base.replace(TASK_ID_PLACEHOLDER, task_id)
-    return f"{base.rstrip('/')}/{task_id}"
+    if placeholder in base:
+        return base.replace(placeholder, value)
+    return f"{base.rstrip('/')}/{value}"
+
+
+def task_url(template: str, task_id: str) -> str:
+    """Render a Planfix task's web address from the configured template."""
+    return _fill(template, TASK_ID_PLACEHOLDER, task_id)
+
+
+def calendly_url(template: str, event_uuid: str) -> str:
+    """Render a Calendly event's web address from the configured template."""
+    return _fill(template, CALENDLY_UUID_PLACEHOLDER, event_uuid)
 
 
 def _date(file_name: str) -> str:
@@ -115,6 +127,8 @@ def build(
     planfix_task_id: str,
     processed_at: datetime,
     container_id: str = "",
+    calendly_event_uuid: str = "",
+    client_emails: Iterable[str] = (),
 ) -> dict[str, object]:
     """Assemble the full meta document for one recording.
 
@@ -127,11 +141,13 @@ def build(
         "manager": employee.name if employee else "",
         "manager_email": employee.email if employee else "",
         "client": _client(file_name),
+        "client_emails": list(client_emails),
         "date": _date(file_name),
         "duration": _duration(transcript),
         "language": config.stt_language,
         "planfix_task_id": planfix_task_id,
         "planfix_task_url": task_url(config.planfix_task_url, planfix_task_id),
+        "calendly_url": calendly_url(config.call_booking_calendly_url, calendly_event_uuid),
         "video_id": file_id,
         "video_url": video_url(file_id),
         "folder_url": folder_url(container_id, folder_id),

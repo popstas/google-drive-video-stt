@@ -31,6 +31,12 @@ MEET_SCOPES = [
     "https://www.googleapis.com/auth/meetings.space.readonly",
 ]
 
+# Reading the invitees of an employee's events. Read-only and events-only: the
+# service needs attendee addresses, never calendar settings or write access.
+CALENDAR_SCOPES = [
+    "https://www.googleapis.com/auth/calendar.events.readonly",
+]
+
 
 class AuthError(Exception):
     pass
@@ -394,6 +400,21 @@ def build_meet_service(*, config: Config, subject: str):
         )
     creds = _delegated_credentials(config, subject, scopes=MEET_SCOPES)
     return build("meet", "v2", credentials=creds, cache_discovery=False)
+
+
+def build_calendar_service(*, config: Config, subject: str):
+    """A Calendar client acting as ``subject``, for the invitees of their calls.
+
+    Delegation only, like Meet: an employee's calendar answers for its owner.
+    """
+    if not config.uses_delegation:
+        raise AuthError(
+            "Reading calendar invitees needs a service account with domain-wide "
+            "delegation. Configure google.service_account (or "
+            f"google.service_account_file) and authorize {' '.join(CALENDAR_SCOPES)}."
+        )
+    creds = _delegated_credentials(config, subject, scopes=CALENDAR_SCOPES)
+    return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
 
 def run_interactive_flow(

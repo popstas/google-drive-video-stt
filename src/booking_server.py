@@ -17,7 +17,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from src.call_booking import CallBooking, append
+from src.call_booking import CALENDLY_UUID_RE, CallBooking, append
 from src.config import Config
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,26 @@ def _parse_start_time(raw: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _calendly_event_uuid(raw: object) -> str:
+    """The Calendly event's uuid, or "" when there is none worth linking.
+
+    Optional and only a link ingredient, so a bad value is dropped rather than costing
+    the booking: an unmatched call is far worse than a missing link. Calendly's own
+    webhook names the event by URI, whose last segment is the uuid. What remains is
+    pasted into a link template, so it may hold only letters, digits and dashes.
+    """
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        logger.warning("Ignoring a non-string calendly_event_uuid: %s", type(raw).__name__)
+        return ""
+    value = raw.strip().rstrip("/").rsplit("/", 1)[-1]
+    if value and not CALENDLY_UUID_RE.fullmatch(value):
+        logger.warning("Ignoring a calendly_event_uuid that is not a uuid: %r", value[:80])
+        return ""
+    return value
+
+
 def _booking_from_payload(payload: object) -> CallBooking | None:
     """Validate the POST body into a booking, or ``None`` when it is unusable."""
     if not isinstance(payload, dict):
@@ -81,10 +101,13 @@ def _booking_from_payload(payload: object) -> CallBooking | None:
     if start_time is None:
         return None
 
+    calendly_event_uuid = _calendly_event_uuid(payload.get("calendly_event_uuid"))
+
     return CallBooking(
         task_id=task_id_text,
         manager_email=manager_email.strip(),
         start_time=start_time,
+        calendly_event_uuid=calendly_event_uuid,
     )
 
 

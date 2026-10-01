@@ -264,3 +264,60 @@ def test_start_returns_a_bound_server_when_enabled(tmp_path):
         assert booking_server.is_running() is True
     finally:
         instance.shutdown()
+
+
+def test_keeps_the_calendly_event_uuid(server):
+    instance, journal = server
+
+    body = {**VALID, "calendly_event_uuid": "a1b2c3d4-e5f6-7890-abcd-ef0123456789"}
+    assert _post(instance, body) == 204
+
+    stored = load(journal, now=datetime(2026, 8, 11, 12, tzinfo=timezone.utc))
+    assert stored[0].calendly_event_uuid == "a1b2c3d4-e5f6-7890-abcd-ef0123456789"
+
+
+def test_a_booking_without_a_calendly_event_uuid_is_still_accepted(server):
+    instance, journal = server
+
+    assert _post(instance, VALID) == 204
+
+    stored = load(journal, now=datetime(2026, 8, 11, 12, tzinfo=timezone.utc))
+    assert stored[0].calendly_event_uuid == ""
+
+
+@pytest.mark.parametrize("uuid", [None, "", "  "])
+def test_an_empty_calendly_event_uuid_is_no_uuid(server, uuid):
+    """Low-code senders emit null for an empty field; that must not cost the booking."""
+    instance, journal = server
+
+    assert _post(instance, {**VALID, "calendly_event_uuid": uuid}) == 204
+
+    stored = load(journal, now=datetime(2026, 8, 11, 12, tzinfo=timezone.utc))
+    assert stored[0].calendly_event_uuid == ""
+
+
+def test_a_calendly_event_uri_is_read_as_its_uuid(server):
+    """Calendly's own webhook names the event by URI; its last segment is the uuid."""
+    instance, journal = server
+
+    body = {
+        **VALID,
+        "calendly_event_uuid": "https://api.calendly.com/scheduled_events/AB12-cd34/",
+    }
+    assert _post(instance, body) == 204
+
+    stored = load(journal, now=datetime(2026, 8, 11, 12, tzinfo=timezone.utc))
+    assert stored[0].calendly_event_uuid == "AB12-cd34"
+
+
+@pytest.mark.parametrize("uuid", ["abc def", "abc?q=1", 12345, ["a"]])
+def test_a_calendly_event_uuid_that_cannot_go_into_a_url_is_dropped(server, uuid):
+    """The uuid is pasted into a link template, so anything beyond letters, digits and
+    dashes is dropped -- but the booking itself still counts: a bad link ingredient
+    must not leave the call unmatched."""
+    instance, journal = server
+
+    assert _post(instance, {**VALID, "calendly_event_uuid": uuid}) == 204
+
+    stored = load(journal, now=datetime(2026, 8, 11, 12, tzinfo=timezone.utc))
+    assert stored[0].calendly_event_uuid == ""

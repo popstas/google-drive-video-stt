@@ -2787,6 +2787,7 @@ def test_generated_config_ships_the_new_sections(tmp_path):
         "threshold_minutes": 15,
         "disable_recognition": False,
         "name_rules": [],
+        "calendly_url": "",
     }
     assert raw["planfix"] == {
         "create_comment_url": "",
@@ -2877,6 +2878,21 @@ def test_planfix_task_url_defaults_to_empty(tmp_path):
 def test_default_config_writes_the_planfix_task_url_key():
     """The key must be visible in a generated config, or nobody knows it exists."""
     assert _default_config_dict()["planfix"]["task_url"] == ""
+
+
+def test_call_booking_calendly_url_is_read_from_config(tmp_path):
+    config = _load_config(
+        tmp_path, {"call_booking": {"calendly_url": "https://calendly.com/app/events/<uuid>"}}
+    )
+    assert config.call_booking_calendly_url == "https://calendly.com/app/events/<uuid>"
+
+
+def test_call_booking_calendly_url_defaults_to_empty(tmp_path):
+    assert _load_config(tmp_path, {}).call_booking_calendly_url == ""
+
+
+def test_default_config_writes_the_call_booking_calendly_url_key():
+    assert _default_config_dict()["call_booking"]["calendly_url"] == ""
 
 
 # --- meta.entities -------------------------------------------------------------
@@ -3504,3 +3520,22 @@ def test_the_skip_switch_survives_a_rewrite(tmp_path):
     written = _config_to_yaml_dict(cfg, tmp_path / "config.yml")
 
     assert written["meet"]["skip_empty_calls"] is False
+
+
+def test_calendar_client_emails_defaults_to_off(tmp_path):
+    assert _load_config(tmp_path, {}).calendar_client_emails is False
+
+
+def test_calendar_client_emails_is_read(tmp_path):
+    config = _load_config(tmp_path, {"calendar": {"client_emails": True}})
+    assert config.calendar_client_emails is True
+
+
+def test_default_config_writes_the_calendar_client_emails_key():
+    """Off in a fresh config: the admin has to authorize the scope first."""
+    assert _default_config_dict()["calendar"] == {"client_emails": False}
+
+
+def test_calendar_client_emails_round_trips(tmp_path):
+    config = _load_config(tmp_path, {"calendar": {"client_emails": True}})
+    assert _config_to_yaml_dict(config)["calendar"] == {"client_emails": True}
