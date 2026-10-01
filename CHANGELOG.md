@@ -1,7 +1,7 @@
 # Changelog
 
 
-## Unreleased
+## v0.10.0 - 2026-10-01
 
 ### Features
 
@@ -9,6 +9,7 @@
 
 ### Bug Fixes
 
+- Stop retrying a recording nobody spoke in every cycle
 - Stop three booking tests from expiring on the calendar
 - Drop task checkboxes from the Telegram summary
 
