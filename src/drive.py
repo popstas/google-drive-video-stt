@@ -22,9 +22,13 @@ ARTIFACT_TYPE_PROPERTY = "artifact_type"
 SPEAKER_NAMES_PROPERTY = "speaker_names"
 BOOKING_MATCH_PROPERTY = "booking_match"
 PLANFIX_COMMENT_TASK_ID_PROPERTY = "planfix_comment_task_id"
+TELEGRAM_SENT_CHAT_ID_PROPERTY = "telegram_sent_chat_id"
 # The single value ``booking_match`` ever takes: this recording matched no booked
 # call, so the polling loop must leave it alone.
 BOOKING_MATCH_NONE = "none"
+# Set to "true" when the STT provider returned no speech for the recording, so the
+# polling loop stops re-downloading and re-transcribing it every cycle.
+TRANSCRIPT_EMPTY_PROPERTY = "transcript_empty"
 _LOCAL_FILENAME_UNSAFE_RE = re.compile(r'[<>:"/\\|?*\0]')
 
 
@@ -257,8 +261,12 @@ def list_folder_state(service: Any, folder_id: str) -> list[dict]:
             "meta_yml_id": meta_yml["id"] if meta_yml else None,
             "artifact_ids": artifact_ids,
             "booking_match": mp4_props.get(BOOKING_MATCH_PROPERTY, ""),
+            "transcript_empty": mp4_props.get(TRANSCRIPT_EMPTY_PROPERTY, ""),
             "planfix_comment_task_id": mp4_props.get(
                 PLANFIX_COMMENT_TASK_ID_PROPERTY, ""
+            ),
+            "telegram_sent_chat_id": mp4_props.get(
+                TELEGRAM_SENT_CHAT_ID_PROPERTY, ""
             ),
         })
     return items

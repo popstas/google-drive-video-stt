@@ -7,7 +7,7 @@ import pytest
 
 from src.config import Config
 from src.stt import transcribe as transcribe_mod
-from src.stt.base import STTError
+from src.stt.base import EmptyTranscriptError, STTError
 from src.stt.deepgram_provider import DeepgramProvider
 
 
@@ -62,7 +62,7 @@ def test_transcribe_full_empty_string_raises(mocker, tmp_path):
     provider.last_request_id = None
     mocker.patch("src.stt.transcribe.get_provider", return_value=provider)
 
-    with pytest.raises(STTError, match="empty transcript"):
+    with pytest.raises(EmptyTranscriptError, match="empty transcript"):
         transcribe_mod.transcribe_file(mp3, _cfg(provider="deepgram"))
 
 

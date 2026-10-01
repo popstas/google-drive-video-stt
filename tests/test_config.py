@@ -2578,6 +2578,7 @@ def test_generated_config_ships_the_new_sections(tmp_path):
             "duration", "video_url",
         ],
         "task_url": "",
+        "ignore_telegram_when_planfix": False,
     }
 
 
@@ -2826,3 +2827,100 @@ def test_preset_reasoning_effort_round_trips(tmp_path):
 
     by_name = {preset.name: preset for preset in reloaded.presets}
     assert by_name["keypoints"].reasoning_effort == "high"
+
+
+# --- folders[].telegram ---------------------------------------------------------
+
+
+TELEGRAM_BASE = {
+    **CALL_BOOKING_BASE,
+    "notifications": {"telegram": {"bot_token": "bot-token", "chat_id": "42"}},
+}
+
+
+def test_folder_telegram_defaults_to_empty(tmp_path):
+    config = load_config(config_path=write_config(tmp_path, CALL_BOOKING_BASE))
+
+    assert config.folders[0].telegram == ""
+
+
+def test_folder_telegram_is_parsed(tmp_path):
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [
+            {
+                "folder_id": "f1",
+                "name": "Ekaterina",
+                "email": "kate@example.com",
+                "telegram": "-1001234567890",
+            }
+        ],
+    }
+
+    config = load_config(config_path=write_config(tmp_path, raw))
+
+    assert config.folders[0].telegram == "-1001234567890"
+
+
+def test_folder_telegram_without_a_bot_token_is_rejected(tmp_path):
+    """`notify.send_message` returns quietly with no token, so the recordings would be
+    transcribed at full cost and the chat would stay empty."""
+    raw = {
+        **CALL_BOOKING_BASE,
+        "folders": [
+            {"folder_id": "f1", "name": "Ekaterina", "telegram": "-100123"},
+        ],
+    }
+
+    with pytest.raises(ValueError, match="bot_token"):
+        load_config(config_path=write_config(tmp_path, raw))
+
+
+def test_disable_recognition_allows_an_emailless_telegram_folder(tmp_path):
+    """A folder with a chat never needs to match a booking: it is recognized
+    unconditionally and delivered to the chat."""
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [
+            {"folder_id": "f1", "name": "Ekaterina", "email": "kate@example.com"},
+            {"folder_id": "f2", "name": "Sales", "telegram": "-100123"},
+        ],
+        "call_booking": {
+            "enabled": True,
+            "authorization_token": "t",
+            "disable_recognition": True,
+        },
+    }
+
+    config = load_config(config_path=write_config(tmp_path, raw))
+
+    assert config.folders[1].telegram == "-100123"
+
+
+def test_folder_telegram_survives_a_config_round_trip(tmp_path):
+    raw = {
+        **TELEGRAM_BASE,
+        "folders": [
+            {"folder_id": "f1", "name": "Ekaterina", "telegram": "-100123"},
+        ],
+    }
+    config_file = write_config(tmp_path, raw)
+    config = load_config(config_path=config_file)
+
+    dumped = _config_to_yaml_dict(config, config_file)
+
+    assert dumped["folders"][0]["telegram"] == "-100123"
+
+
+def test_ignore_telegram_when_planfix_defaults_to_off(tmp_path):
+    config = load_config(config_path=write_config(tmp_path, CALL_BOOKING_BASE))
+
+    assert config.planfix_ignore_telegram_when_planfix is False
+
+
+def test_ignore_telegram_when_planfix_is_parsed(tmp_path):
+    raw = {**CALL_BOOKING_BASE, "planfix": {"ignore_telegram_when_planfix": True}}
+
+    config = load_config(config_path=write_config(tmp_path, raw))
+
+    assert config.planfix_ignore_telegram_when_planfix is True

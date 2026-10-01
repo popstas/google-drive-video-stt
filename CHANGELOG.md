@@ -1,6 +1,17 @@
 # Changelog
 
 
+## Unreleased
+
+### Features
+
+- Post call summaries to a folder's Telegram chat
+
+### Bug Fixes
+
+- Stop three booking tests from expiring on the calendar
+- Drop task checkboxes from the Telegram summary
+
 ## v0.9.0 - 2026-08-14
 
 ### Features

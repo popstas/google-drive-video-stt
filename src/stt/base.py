@@ -8,6 +8,10 @@ class STTError(RuntimeError):
     pass
 
 
+class EmptyTranscriptError(STTError):
+    """The provider heard no speech: retrying the same audio returns nothing again."""
+
+
 class STTProvider(ABC):
     @abstractmethod
     def transcribe_full(self, audio_path: Path) -> str:

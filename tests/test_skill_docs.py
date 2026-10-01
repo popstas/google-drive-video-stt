@@ -83,7 +83,7 @@ def test_skill_is_a_single_compact_file():
     assert skill_files == [SKILL_PATH]
     # A compactness guard, not a budget to spend: raise it only when a real feature
     # adds operator surface, and pay for the raise by keeping the new section tight.
-    assert len(SKILL_PATH.read_text(encoding="utf-8").splitlines()) <= 420
+    assert len(SKILL_PATH.read_text(encoding="utf-8").splitlines()) <= 424
 
     assert not (CANONICAL_SKILL_ROOT / "references").exists()
     assert not (CANONICAL_SKILL_ROOT / "examples").exists()
@@ -279,7 +279,7 @@ def test_docs_document_the_folders_migration():
 
     assert "folders:" in readme
     assert "folder_id: abc" in readme
-    assert "folders: [{folder_id, name, email}]" in agents
+    assert "folders: [{folder_id, name, email" in agents
     assert "is **removed**" in agents
 
     # Every surviving mention must sit in a paragraph that explains the removal or
