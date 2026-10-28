@@ -538,8 +538,12 @@ def _write_call_documents(
     *,
     item: dict,
     booking_decision: booking_gate.BookingDecision,
+    participants: list[str] | None = None,
 ) -> dict[str, object] | None:
     """Write ``<stem>.meta.yml`` and ``<stem>.stt`` for one recording.
+
+    ``participants`` are the names the presets were told were on the call; Meet's
+    attendee list stands in when there are none.
 
     Returns the meta document so the Planfix comment can quote from it. Both files are
     written from artifacts that already exist, so this costs no model call. Neither file
@@ -565,6 +569,7 @@ def _write_call_documents(
         container_id=container_id,
         calendly_event_uuid=booking_decision.calendly_event_uuid,
         client_emails=_client_emails(item, file_name, folder_id, config),
+        participants=participants or item.get("participants") or [],
     )
     meta_yaml = meta_doc.to_yaml(document, config.meta_entities)
 
@@ -611,6 +616,7 @@ def _try_write_call_documents(
     *,
     item: dict,
     booking_decision: booking_gate.BookingDecision,
+    participants: list[str] | None = None,
 ) -> dict[str, object] | None:
     """Call ``_write_call_documents``, degrading to no document on failure.
 
@@ -627,6 +633,7 @@ def _try_write_call_documents(
         return _write_call_documents(
             service, file_id, file_name, folder_id, container_id, transcript, artifacts,
             config, tmp_dir, item=item, booking_decision=booking_decision,
+            participants=participants,
         )
     except Exception as exc:
         logger.warning(
@@ -939,6 +946,7 @@ _PLANFIX_CODE_LABELS = {
     "calendly_url": "Calendly",
     "date": "Дата",
     "duration": "Длительность",
+    "participants": "Участники",
     "video_url": "Запись",
 }
 
@@ -1012,6 +1020,14 @@ def _planfix_meta_lines(
         if field_name not in labels:
             continue
         value = document.get(field_name)
+        if field_name == "participants":
+            # One name per line: a call of four reads as a list, not a run-on line.
+            names = [" ".join(str(name).split()) for name in value or []]
+            names = [name for name in names if name]
+            if names:
+                bullets = "\n".join(f"- {name}" for name in names)
+                lines.append(f"**{labels[field_name]}:**\n{bullets}")
+            continue
         if isinstance(value, list):
             value = ", ".join(str(entry) for entry in value)
         # Collapse embedded newlines (free LLM text can carry them): markdown_to_html
@@ -1563,6 +1579,7 @@ def process_item(
                 meta_document = _try_write_call_documents(
                     service, file_id, file_name, folder_id, container_id, text, artifacts,
                     config, tmp_dir, item=item, booking_decision=booking_decision,
+                    participants=participant_names,
                 )
             elif needs_presets:
                 # The transcript already exists on Drive; re-feed it to produce the
@@ -1600,6 +1617,7 @@ def process_item(
                 meta_document = _try_write_call_documents(
                     service, file_id, file_name, folder_id, container_id, text, artifacts,
                     config, tmp_dir, item=item, booking_decision=booking_decision,
+                    participants=speaker_names,
                 )
     except Exception as exc:
         error = exc

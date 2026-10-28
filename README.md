@@ -648,7 +648,7 @@ webhook:
   token: ""              # optional; sent as "Authorization: Bearer <token>"
 google: {}               # inline-first auth; empty => data_dir fallback
 planfix:
-  meta_fields: [subject, tags, referral, referral_note, case_deadline, deadlines, target_filing, duration, video_url]   # header fields on the Planfix comment
+  meta_fields: [subject, tags, referral, referral_note, case_deadline, deadlines, target_filing, duration, participants, video_url]   # header fields on the Planfix comment
   task_url: ""           # e.g. https://<account>.planfix.com/task/<task-id>
   ignore_telegram_when_planfix: false   # true => a call that reached Planfix is not
                                         # also posted to the folder's telegram chat
@@ -704,7 +704,7 @@ variable is read at runtime:
 | `meta.entities` | four built-in entities (see [Conversation meta](#conversation-meta-config-driven-entities)) | The `meta` preset's field list: one mapping per entity (`name`, `prompt`, `type`, `multiple`, `allowed`, `label`, `requires`) |
 | `webhook.url` | (empty) | Completion webhook endpoint; must be an absolute `http://` or `https://` URL. Empty disables it; a failure never fails the file |
 | `webhook.token` | (empty) | Optional bearer token sent as `Authorization: Bearer <token>` |
-| `planfix.meta_fields` | `[subject, tags, referral, referral_note, case_deadline, deadlines, target_filing, duration, video_url]` | Which meta fields open the Planfix comment, and in what order |
+| `planfix.meta_fields` | `[subject, tags, referral, referral_note, case_deadline, deadlines, target_filing, duration, participants, video_url]` | Which meta fields open the Planfix comment, and in what order |
 | `calendar.client_emails` | `false` | Read the invited outsiders' addresses (the client) from each call's calendar event into `client_emails` and the Telegram summary's `Email клиента:` line. Needs delegation and the `calendar.events.readonly` scope — see [Client emails from the calendar](#client-emails-from-the-calendar) |
 | `call_booking.calendly_url` | (empty) | A Calendly event's web address with `<uuid>` where a booking's `calendly_event_uuid` goes. Fills `calendly_url` in the meta document and the `Calendly:` link of the Telegram summary. Empty leaves both blank |
 | `planfix.task_url` | (empty) | Where a task lives in the web UI, e.g. `https://<account>.planfix.com/task/<task-id>`. Fills `planfix_task_url` in the meta document and the link column of `gdstt planfix sent`. Empty leaves both blank |
@@ -972,8 +972,8 @@ reword a question by editing `meta.entities`. No code change is needed either
 way.
 
 Every processed recording also gets a `<stem>.meta.yml` merging every entity
-value with facts the code already knows — manager, client, date, duration, Planfix
-task id, models used — and a combined `<stem>.stt` document (keypoints, then this
+value with facts the code already knows — manager, client, date, duration,
+participants (host first), Planfix task id, models used — and a combined `<stem>.stt` document (keypoints, then this
 meta block, then the transcript). Where they land depends on `output.target`: the
 default `drive` target uploads both as ordinary Drive siblings, same as every other
 artifact; `folder` mode keeps every artifact local, including `.meta.yml`, and

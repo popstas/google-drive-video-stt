@@ -538,6 +538,12 @@ granted ones); a missing scope raises `AuthError` telling you to re-auth. Adding
   `call_booking.calendly_url` filled with the booking's optional `calendly_event_uuid`
   (webhook field, `[A-Za-z0-9-]+`, stored in the journal only when present and carried
   on `BookingDecision`); a name rule has no booking and so no Calendly link.
+- `participants` (meta document, after `duration`) is the name list the presets got
+  (`participant_names` / the `speaker_names` appProperty), else Meet's `item["participants"]`,
+  deduped, host first: the organizer `split_participants` marks in the file name, else the
+  folder employee, matched by name or leading words. Only the marked organizer is added
+  when missing -- the employee's configured name can be another script than Meet's. The
+  header renders it as `**Участники:**` plus one `- name` line each.
 - The summary's `video_url` line links `folder_url` (the meeting subfolder, empty for
   a recording lying in the configured folder) when there is one. It is substituted at
   render time, not added to `planfix.meta_fields`, so existing configs get it.

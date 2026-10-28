@@ -31,6 +31,7 @@ CODE_FIELDS = (
     "client_emails",
     "date",
     "duration",
+    "participants",
     "language",
     "planfix_task_id",
     "planfix_task_url",

@@ -243,3 +243,50 @@ def test_build_leaves_the_client_emails_empty_by_default(config_with_folder):
 def test_client_emails_follow_the_client_in_the_field_order():
     fields = meta_entity.CODE_FIELDS
     assert fields.index("client_emails") == fields.index("client") + 1
+
+
+def test_participants_follow_the_duration_in_the_field_order():
+    fields = meta_entity.CODE_FIELDS
+    assert fields.index("participants") == fields.index("duration") + 1
+
+
+def test_build_puts_the_marked_organizer_first_in_the_participants(config_with_folder):
+    document = _document(
+        config_with_folder,
+        participants=["Mels", "Angelica Munkueva", "Oleg", "mels"],
+    )
+    assert document["participants"] == ["Angelica Munkueva", "Mels", "Oleg"]
+
+
+def test_build_matches_the_host_by_first_name(config_with_folder):
+    document = _document(config_with_folder, participants=["Mels", "Angelica"])
+    assert document["participants"] == ["Angelica", "Mels"]
+
+
+def test_build_adds_a_marked_organizer_missing_from_the_participants(config_with_folder):
+    document = _document(config_with_folder, participants=["Mels", "Oleg"])
+    assert document["participants"] == ["Angelica Munkueva", "Mels", "Oleg"]
+
+
+def test_build_falls_back_to_the_folder_employee_as_the_host(config_with_folder):
+    document = _document(
+        config_with_folder,
+        file_name="Alice and Bob - 2026/07/02 21:56 CEST.mp4",
+        participants=["Bob", "Анжелика Мункуева", "Alice"],
+    )
+    assert document["participants"] == ["Анжелика Мункуева", "Bob", "Alice"]
+
+
+def test_build_does_not_add_an_unmatched_folder_employee(config_with_folder):
+    """The configured name is often another script than Meet's: adding it would
+    list one person twice."""
+    document = _document(
+        config_with_folder,
+        file_name="Alice and Bob - 2026/07/02 21:56 CEST.mp4",
+        participants=["Bob", "Alice"],
+    )
+    assert document["participants"] == ["Bob", "Alice"]
+
+
+def test_build_leaves_participants_empty_when_nobody_is_known(config_with_folder):
+    assert _document(config_with_folder)["participants"] == []

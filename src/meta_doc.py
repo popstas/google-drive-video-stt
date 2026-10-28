@@ -45,6 +45,52 @@ def _duration(transcript: str) -> str:
     return stamps[-1] if stamps else ""
 
 
+def _unique_names(names: Iterable[str]) -> list[str]:
+    """Names in the order given, stripped, without blanks or case-insensitive repeats."""
+    unique: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        cleaned = " ".join(str(name or "").split())
+        if cleaned and cleaned.casefold() not in seen:
+            seen.add(cleaned.casefold())
+            unique.append(cleaned)
+    return unique
+
+
+def _same_person(a: str, b: str) -> bool:
+    """Whether two spellings name one person: equal, or one is the other's first words.
+
+    Meet and the calendar title often carry "Viktoriia" where the account says
+    "Viktoriia Ivanova"; that is still the same participant.
+    """
+    left, right = a.casefold().split(), b.casefold().split()
+    if not left or not right:
+        return False
+    short, long = sorted((left, right), key=len)
+    return long[: len(short)] == short
+
+
+def _participants(names: Iterable[str], file_name: str, manager: str) -> list[str]:
+    """Who was on the call, host first.
+
+    The host is the organizer the recording's name marks with the company, else the
+    folder's employee; whichever is found in the list moves to the top, keeping the
+    list's own spelling. A marked organizer missing from the list is added on top --
+    they were on the call even if nobody listed them. The employee is not: their
+    configured name is often another script than Meet's ("Анжелика Мункуева" vs
+    "Angelica Munkueva"), and adding it would list one person twice.
+    """
+    unique = _unique_names(names)
+    calendar_manager, _ = postprocess.split_participants(file_name)
+    for host in (calendar_manager, manager):
+        for index, name in enumerate(unique):
+            if host and _same_person(name, host):
+                return [name, *unique[:index], *unique[index + 1:]]
+    if calendar_manager and unique:
+        return [calendar_manager, *unique]
+    return unique
+
+
 def _client(file_name: str) -> str:
     """The first client name, or empty when no manager marker was found.
 
@@ -129,6 +175,7 @@ def build(
     container_id: str = "",
     calendly_event_uuid: str = "",
     client_emails: Iterable[str] = (),
+    participants: Iterable[str] = (),
 ) -> dict[str, object]:
     """Assemble the full meta document for one recording.
 
@@ -144,6 +191,9 @@ def build(
         "client_emails": list(client_emails),
         "date": _date(file_name),
         "duration": _duration(transcript),
+        "participants": _participants(
+            participants, file_name, employee.name if employee else ""
+        ),
         "language": config.stt_language,
         "planfix_task_id": planfix_task_id,
         "planfix_task_url": task_url(config.planfix_task_url, planfix_task_id),

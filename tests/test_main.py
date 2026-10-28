@@ -6691,3 +6691,60 @@ def test_planfix_labels_the_new_code_fields():
     assert "Email клиента" in html
     assert "a@x.com" in html
     assert "Calendly" in html
+
+
+def test_telegram_summary_lists_participants_after_the_duration():
+    text = main._telegram_summary(
+        {"keypoints": "Задачи: раз"},
+        ("keypoints",),
+        {**_LINKED_DOCUMENT, "duration": "00:21:06", "participants": ["Анна", "Борис"]},
+        ("subject", "duration", "participants"),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "Длительность: 00:21:06\n\nУчастники:\n- Анна\n- Борис\n\n" in text
+
+
+def test_planfix_comment_lists_participants_as_a_list():
+    html = main._planfix_description(
+        {"keypoints": "Задачи: раз"},
+        ("keypoints",),
+        {**_LINKED_DOCUMENT, "duration": "00:21:06", "participants": ["Анна", "Борис"]},
+        ("duration", "participants"),
+        meta_entities=meta_entity.default_entities(),
+    )
+
+    assert "<b>Участники:</b>" in html
+    assert "<ul><li>Анна</li><li>Борис</li></ul>" in html
+    assert html.index("Длительность") < html.index("Участники")
+
+
+def test_header_skips_participants_when_there_are_none():
+    lines = main._planfix_meta_lines(
+        {"duration": "00:21:06", "participants": []},
+        ("duration", "participants"),
+        meta_entity.default_entities(),
+    )
+    assert lines == ["**Длительность:** 00:21:06"]
+
+
+def test_the_meta_document_carries_the_participants(tmp_path):
+    document = main._write_call_documents(
+        MagicMock(), "fid1", _STT_NAME, "folderA", "folderA", _STT_TRANSCRIPT, {},
+        _stt_config(tmp_path), tmp_path,
+        item={"participants": ["Meet Person"]},
+        booking_decision=MATCHED_DECISION,
+        participants=["Борис"],
+    )
+    assert "Борис" in document["participants"]
+    assert "Meet Person" not in document["participants"]
+
+
+def test_the_meta_document_falls_back_to_meets_participants(tmp_path):
+    document = main._write_call_documents(
+        MagicMock(), "fid1", _STT_NAME, "folderA", "folderA", _STT_TRANSCRIPT, {},
+        _stt_config(tmp_path), tmp_path,
+        item={"participants": ["Meet Person"]},
+        booking_decision=MATCHED_DECISION,
+    )
+    assert "Meet Person" in document["participants"]

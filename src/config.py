@@ -250,7 +250,7 @@ class Config:
     planfix_meta_fields: tuple[str, ...] = (
         "subject", "tags", "referral", "referral_note",
         "case_deadline", "deadlines", "target_filing",
-        "duration", "video_url",
+        "duration", "participants", "video_url",
     )
     # Where a task lives in the web UI, e.g.
     # ``https://tagilcity.planfix.com/task/<task-id>``. The account name is part of the
@@ -1013,7 +1013,7 @@ def _parse_planfix_meta_fields(value: object) -> tuple[str, ...]:
         return (
             "subject", "tags", "referral", "referral_note",
             "case_deadline", "deadlines", "target_filing",
-            "duration", "video_url",
+            "duration", "participants", "video_url",
         )
     if not isinstance(value, list):
         raise ValueError(f"planfix.meta_fields must be a list, got: {value!r}")
@@ -1736,7 +1736,7 @@ def _default_config_dict(
             "meta_fields": [
                 "subject", "tags", "referral", "referral_note",
                 "case_deadline", "deadlines", "target_filing",
-                "duration", "video_url",
+                "duration", "participants", "video_url",
             ],
             # e.g. https://<account>.planfix.com/task/<task-id>
             "task_url": "",

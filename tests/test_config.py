@@ -471,7 +471,7 @@ def test_default_config_writes_the_new_output_and_planfix_keys():
     assert data["planfix"]["meta_fields"] == [
         "subject", "tags", "referral", "referral_note",
         "case_deadline", "deadlines", "target_filing",
-        "duration", "video_url",
+        "duration", "participants", "video_url",
     ]
 
 
@@ -2703,7 +2703,7 @@ def test_planfix_meta_fields_has_a_default(tmp_path):
     assert _load_config(tmp_path, {}).planfix_meta_fields == (
         "subject", "tags", "referral", "referral_note",
         "case_deadline", "deadlines", "target_filing",
-        "duration", "video_url",
+        "duration", "participants", "video_url",
     )
 
 
@@ -2718,6 +2718,7 @@ def test_planfix_meta_fields_default_includes_the_new_entities(tmp_path):
         "deadlines",
         "target_filing",
         "duration",
+        "participants",
         "video_url",
     )
 
@@ -2796,7 +2797,7 @@ def test_generated_config_ships_the_new_sections(tmp_path):
         "meta_fields": [
             "subject", "tags", "referral", "referral_note",
             "case_deadline", "deadlines", "target_filing",
-            "duration", "video_url",
+            "duration", "participants", "video_url",
         ],
         "task_url": "",
         "ignore_telegram_when_planfix": False,
