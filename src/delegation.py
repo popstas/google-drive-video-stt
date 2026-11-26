@@ -32,12 +32,19 @@ logger = logging.getLogger(__name__)
 # for it every cycle is the whole point of resolving at all.
 _CLIENTS: dict[tuple[str, str], Any] = {}
 _NAMES: dict[tuple[str, str], str] = {}
+# The split last reported for each employee: the live root and how many roots there
+# were. Resolution runs every cycle, so without this one unchanged split repeats its
+# warning every cycle for good -- 21872 lines in 17 days across nine employees in
+# production -- and buries every warning that is actually new. A different live root
+# or a different count is a new event and is reported again.
+_REPORTED_SPLITS: dict[tuple[str, str], tuple[str, int]] = {}
 
 
 def forget_clients() -> None:
-    """Drop the cached clients and names (tests, and a config reload)."""
+    """Drop the cached clients, names and reported splits (tests, a config reload)."""
     _CLIENTS.clear()
     _NAMES.clear()
+    _REPORTED_SPLITS.clear()
 
 
 def _key(config: Config, subject: str) -> tuple[str, str]:
@@ -142,7 +149,11 @@ def resolve(
             continue
         name = folder.name or _cached_owner_name(service, cache_key, folder.email)
         if candidates > 1:
-            logger.warning(
+            split = (folder_id, candidates)
+            already_reported = _REPORTED_SPLITS.get(cache_key) == split
+            _REPORTED_SPLITS[cache_key] = split
+            logger.log(
+                logging.DEBUG if already_reported else logging.WARNING,
                 "%s owns %d Meet folders; reading the newest (%s). The others were "
                 "abandoned after being shared and nothing will process what is in "
                 "them",
@@ -150,6 +161,8 @@ def resolve(
                 candidates,
                 folder_id,
             )
+        else:
+            _REPORTED_SPLITS.pop(cache_key, None)
         services[folder_id] = service
         resolved.append(replace(folder, folder_id=folder_id, name=name))
     return Fleet(

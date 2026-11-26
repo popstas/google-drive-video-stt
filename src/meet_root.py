@@ -79,7 +79,9 @@ def resolve(service, names: Sequence[str]) -> MeetRoot | None:
     found.sort(key=lambda item: item.get("createdTime", ""))
     live = found[-1]
     if len(found) > 1:
-        logger.info(
+        # Debug, not info: this runs for every employee every cycle, and the caller
+        # reports a split to the operator once, when it first appears or changes.
+        logger.debug(
             "Found %d Meet folders; the newest (%s, created %s) is the live one and "
             "the rest were abandoned after being shared",
             len(found),

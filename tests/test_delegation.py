@@ -186,6 +186,77 @@ def test_abandoned_roots_are_reported(tmp_path, mocker, caplog):
     assert any("3 Meet folders" in record.getMessage() for record in caplog.records)
 
 
+def _abandoned_warnings(caplog):
+    return [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and "Meet folders" in record.getMessage()
+    ]
+
+
+def test_an_unchanged_split_is_reported_once_not_every_cycle(tmp_path, mocker, caplog):
+    """Resolution runs every cycle, and a split that has not changed is not news: in
+    production the same nine warnings were repeated every cycle for weeks, 21872 lines
+    in 17 days, which buries every warning that is new."""
+    mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch(
+        "src.delegation.meet_root.resolve", return_value=_root("live", candidates=2)
+    )
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Name")
+    config = _delegating(
+        [EmployeeFolder(folder_id="", email="one@example.com")], tmp_path
+    )
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            delegation.resolve(config, MagicMock())
+
+    assert len(_abandoned_warnings(caplog)) == 1
+
+
+def test_a_split_that_changes_is_reported_again(tmp_path, mocker, caplog):
+    """A new abandoned root, or a new live one, is exactly the event worth seeing."""
+    mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
+    resolve_root = mocker.patch(
+        "src.delegation.meet_root.resolve", return_value=_root("live", candidates=2)
+    )
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Name")
+    config = _delegating(
+        [EmployeeFolder(folder_id="", email="one@example.com")], tmp_path
+    )
+
+    with caplog.at_level(logging.WARNING):
+        delegation.resolve(config, MagicMock())
+        resolve_root.return_value = _root("newer", candidates=3)
+        delegation.resolve(config, MagicMock())
+
+    messages = [record.getMessage() for record in _abandoned_warnings(caplog)]
+    assert len(messages) == 2
+    assert "3 Meet folders" in messages[1]
+
+
+def test_each_employee_gets_their_own_split_report(tmp_path, mocker, caplog):
+    mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
+    mocker.patch(
+        "src.delegation.meet_root.resolve",
+        side_effect=[_root("a", candidates=2), _root("b", candidates=2)] * 2,
+    )
+    mocker.patch("src.delegation.meet_root.owner_name", return_value="Name")
+    config = _delegating(
+        [
+            EmployeeFolder(folder_id="", email="one@example.com"),
+            EmployeeFolder(folder_id="", email="two@example.com"),
+        ],
+        tmp_path,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        delegation.resolve(config, MagicMock())
+        delegation.resolve(config, MagicMock())
+
+    assert len(_abandoned_warnings(caplog)) == 2
+
+
 def test_a_configured_name_is_never_overwritten(tmp_path, mocker):
     mocker.patch("src.delegation.auth.build_drive_service", return_value=MagicMock())
     mocker.patch("src.delegation.meet_root.resolve", return_value=_root("f1"))
