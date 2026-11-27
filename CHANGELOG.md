@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+
+### Features
+
+- List call participants, host first, after the duration
+
 ## v0.10.0 - 2026-10-01
 
 ### Features

@@ -4807,6 +4807,56 @@ def test_run_once_still_names_the_employee_from_the_configured_folder(mocker):
     assert process_mock.call_args.args[2] == "root"
 
 
+@pytest.mark.parametrize("container", ["root", "meeting-1"])
+def test_a_subfolder_recording_transcribed_in_folder_mode_is_not_picked_up_again(
+    mocker, tmp_path, container
+):
+    """Folder mode keeps the transcript on local disk, keyed by the video's name and
+    nothing else. A recording found in a meeting subfolder -- or one that used to sit
+    in the root and is now found one level down -- must therefore read as done, not
+    as new work that re-runs Deepgram and posts a second summary."""
+    out_dir = tmp_path / "results"
+    out_dir.mkdir()
+    (out_dir / "call.txt").write_text("Speaker 1: hi", encoding="utf-8")
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[_subfolder_item("v1", "call.mp4", container)],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+    cfg = make_config(
+        folders=["root"],
+        stt_provider="deepgram",
+        deepgram_api_key="dg",
+        deepgram_audio_source="m4a_copy",
+        drive_mp3_artifact=False,
+        output_target="folder",
+        output_dir=out_dir,
+    )
+
+    main.run_once(MagicMock(), cfg)
+
+    process_mock.assert_not_called()
+
+
+def test_a_subfolder_recording_with_its_transcript_beside_it_is_not_picked_up_again(
+    mocker,
+):
+    """Drive mode reads "done" from the siblings in the recording's own folder, which
+    for a Meet call is the meeting subfolder the walk just listed."""
+    mocker.patch(
+        "src.main.drive.list_folder_tree_state",
+        return_value=[
+            _subfolder_item("v1", "call.mp4", "meeting-1", has_mp3=True, has_txt=True)
+        ],
+    )
+    process_mock = mocker.patch("src.main.process_item")
+    cfg = make_config(folders=["root"], stt_provider="deepgram", deepgram_api_key="dg")
+
+    main.run_once(MagicMock(), cfg)
+
+    process_mock.assert_not_called()
+
+
 def test_process_item_writes_the_transcript_into_the_meeting_subfolder(mocker, tmp_path):
     """The .txt belongs beside its video, not in the employee's root."""
     cfg = make_config(folders=["root"], stt_provider="deepgram", output_dir=tmp_path)
