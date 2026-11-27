@@ -108,7 +108,7 @@ def test_several_candidates_are_reported(caplog):
         [_folder("old", "2026-08-01T10:00:00Z"), _folder("live", "2026-09-16T09:00:00Z")]
     )
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         meet_root.resolve(service, ("Google Meet",))
 
     assert any("Found 2 Meet folders" in record.getMessage() for record in caplog.records)
